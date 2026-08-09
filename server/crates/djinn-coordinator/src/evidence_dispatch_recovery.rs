@@ -6,6 +6,7 @@ use djinn_db::{
     TypedEvidenceDemandDispatchErrorInput, TypedEvidenceRepository,
     TypedEvidenceRetryDispatchErrorInput,
 };
+use djinn_slot::PoolError;
 
 impl CoordinatorActor {
     /// Re-enqueue every exact typed attempt that remains `demanded`.
@@ -60,49 +61,67 @@ impl CoordinatorActor {
                 continue;
             };
             match self.pool.dispatch(&task.id, &project_path, model_id).await {
-                Ok(()) if allocation.is_retry => {
-                    let Ok(mut tx) = self.db.pool().begin().await else {
-                        continue;
-                    };
-                    let result = TypedEvidenceRepository::dispatch_retry_success_in_transaction(
-                        &mut tx,
-                        DispatchTypedEvidenceRetryInput {
-                            finding_id: allocation.finding_id.clone(),
-                            attempt_id: allocation.attempt_id.clone(),
-                            spike_task_id: allocation.spike_task_id.clone(),
-                            transition_id: uuid::Uuid::now_v7().to_string(),
-                            actor_task_id: None,
-                        },
-                    )
-                    .await;
-                    if result.is_ok() {
-                        let _ = tx.commit().await;
-                    }
-                }
-                Ok(()) => {
-                    let Ok(mut tx) = self.db.pool().begin().await else {
-                        continue;
-                    };
-                    let result = TypedEvidenceRepository::dispatch_demand_success_in_transaction(
-                        &mut tx,
-                        DispatchTypedEvidenceDemandInput {
-                            finding_id: allocation.finding_id.clone(),
-                            attempt_id: allocation.attempt_id.clone(),
-                            spike_task_id: allocation.spike_task_id.clone(),
-                            transition_id: uuid::Uuid::now_v7().to_string(),
-                            actor_task_id: None,
-                        },
-                    )
-                    .await;
-                    if result.is_ok() {
-                        let _ = tx.commit().await;
-                    }
+                Ok(()) => self.activate_evidence_dispatch(&allocation).await,
+                // A previous delivery can reach the pool but lose its database
+                // commit. The pool's exact-task active result is therefore an
+                // acknowledgement, not another dispatch failure.
+                Err(PoolError::SessionAlreadyActive { task_id }) if task_id == task.id => {
+                    self.activate_evidence_dispatch(&allocation).await;
                 }
                 Err(error) => {
                     self.append_evidence_enqueue_error(&typed, &allocation, error.to_string())
-                        .await
+                        .await;
                 }
             }
+        }
+    }
+
+    /// Persist the exact repository-owned activation after pool acceptance.
+    /// A transition or commit failure deliberately leaves the allocation
+    /// demanded, so duplicate delivery/restart can use `SessionAlreadyActive`
+    /// to retry this transition without dispatching a replacement task.
+    async fn activate_evidence_dispatch(
+        &self,
+        allocation: &djinn_db::DemandedTypedEvidenceDispatch,
+    ) {
+        let mut tx = match self.db.pool().begin().await {
+            Ok(tx) => tx,
+            Err(error) => {
+                tracing::warn!(%error, finding_id=%allocation.finding_id, attempt_id=%allocation.attempt_id, "accepted evidence enqueue could not begin activation transaction");
+                return;
+            }
+        };
+        let result = if allocation.is_retry {
+            TypedEvidenceRepository::dispatch_retry_success_in_transaction(
+                &mut tx,
+                DispatchTypedEvidenceRetryInput {
+                    finding_id: allocation.finding_id.clone(),
+                    attempt_id: allocation.attempt_id.clone(),
+                    spike_task_id: allocation.spike_task_id.clone(),
+                    transition_id: uuid::Uuid::now_v7().to_string(),
+                    actor_task_id: None,
+                },
+            )
+            .await
+        } else {
+            TypedEvidenceRepository::dispatch_demand_success_in_transaction(
+                &mut tx,
+                DispatchTypedEvidenceDemandInput {
+                    finding_id: allocation.finding_id.clone(),
+                    attempt_id: allocation.attempt_id.clone(),
+                    spike_task_id: allocation.spike_task_id.clone(),
+                    transition_id: uuid::Uuid::now_v7().to_string(),
+                    actor_task_id: None,
+                },
+            )
+            .await
+        };
+        if let Err(error) = result {
+            tracing::warn!(%error, finding_id=%allocation.finding_id, attempt_id=%allocation.attempt_id, "accepted evidence enqueue could not persist activation");
+            return;
+        }
+        if let Err(error) = tx.commit().await {
+            tracing::warn!(%error, finding_id=%allocation.finding_id, attempt_id=%allocation.attempt_id, "accepted evidence enqueue could not commit activation");
         }
     }
 
