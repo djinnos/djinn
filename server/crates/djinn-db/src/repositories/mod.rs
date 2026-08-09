@@ -14,6 +14,7 @@ pub mod commit_file_changes;
 pub mod coordinator_incarnation;
 pub mod credential;
 pub mod custom_provider;
+pub mod direct_delivery_capability;
 pub mod dispatch_pause;
 pub mod dispatch_state;
 pub mod doctor_finding;

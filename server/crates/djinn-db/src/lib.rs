@@ -168,6 +168,9 @@ pub use repositories::{
     coordinator_incarnation::{CoordinatorIncarnation, CoordinatorIncarnationRepository},
     credential::CredentialRepository,
     custom_provider::CustomProviderRepository,
+    direct_delivery_capability::{
+        DirectDeliveryCapabilityRepository, DirectDeliverySchemaCapability,
+    },
     dispatch_pause::{DispatchPauseMutation, DispatchPauseRepository, DispatchPauseTarget},
     dispatch_state::{DispatchStateRecord, DispatchStateRepository, DispatchStateUpsert},
     doctor_finding::{
