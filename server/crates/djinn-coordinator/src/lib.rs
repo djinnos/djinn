@@ -146,6 +146,7 @@ mod actor;
 mod consolidation;
 pub mod dispatch;
 mod evidence;
+mod evidence_dispatch_recovery;
 mod evidence_lifecycle_state;
 pub mod handle;
 mod health;

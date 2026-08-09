@@ -1280,6 +1280,7 @@ impl CoordinatorActor {
         // link/claim is cleared and the in-memory refinement loop is advanced;
         // for failed spikes the proposal remains blocked.
         poll_stack::boxed(|| self.recover_terminal_linked_spike_evidence()).await;
+        poll_stack::boxed(|| self.redrive_demanded_evidence_dispatches()).await;
 
         poll_stack::boxed(|| self.run_dispatch_loop(_startup_imports_complete)).await;
         tracing::info!("CoordinatorActor stopped");
@@ -2016,6 +2017,7 @@ impl CoordinatorActor {
                     return;
                 };
                 poll_stack::boxed(|| self.maybe_reconcile_proposal_on_update(&proposal)).await;
+                poll_stack::boxed(|| self.redrive_demanded_evidence_dispatches()).await;
             }
             // ADR-051 §7 — exit recheck.  When a planner session ends, look
             // up the epic its task was attached to and recheck whether an

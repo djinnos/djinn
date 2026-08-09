@@ -180,6 +180,14 @@ pub struct TypedEvidenceAttemptAllocation {
     pub sequence: i32,
     pub planned_checks: Vec<TribunalEvidencePlannedCheck>,
 }
+/// Exact allocated attempt awaiting coordinator enqueue.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DemandedTypedEvidenceDispatch {
+    pub finding_id: String,
+    pub attempt_id: String,
+    pub spike_task_id: String,
+    pub is_retry: bool,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypedEvidenceDispositionProjection {
     pub disposition: TribunalEvidenceDisposition,
@@ -233,6 +241,21 @@ impl TypedEvidenceRepository {
         attempt_id: &str,
     ) -> Result<Vec<TribunalEvidencePlannedCheck>> {
         checks(tx, attempt_id).await
+    }
+
+    /// Durable coordinator inventory; identity is read from the typed attempt,
+    /// never recreated from an open task.
+    pub async fn demanded_dispatches(&self) -> Result<Vec<DemandedTypedEvidenceDispatch>> {
+        let rows = sqlx::query("SELECT f.id AS finding_id,a.id AS attempt_id,a.spike_task_id, EXISTS(SELECT 1 FROM typed_evidence_retry_idempotency r WHERE r.retry_attempt_id=a.id) AS is_retry FROM typed_evidence_findings f JOIN typed_evidence_attempts a ON a.finding_id=f.id JOIN tasks t ON t.id=a.spike_task_id WHERE f.lifecycle='demanded' AND t.status <> 'closed' ORDER BY f.created_at,a.sequence").fetch_all(self.db.pool()).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| DemandedTypedEvidenceDispatch {
+                finding_id: row.get("finding_id"),
+                attempt_id: row.get("attempt_id"),
+                spike_task_id: row.get("spike_task_id"),
+                is_retry: row.get("is_retry"),
+            })
+            .collect())
     }
 
     pub async fn copy_planned_checks_for_latest_attempt_in_transaction(
