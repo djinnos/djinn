@@ -21,6 +21,19 @@ pub struct DeliveryPrepareInput {
     pub candidate_sha: String,
 }
 
+fn same_rework_preparation(
+    row: &TaskDelivery,
+    input: &DeliveryReworkInput,
+    identity: &TaskDeliveryIdentity,
+) -> bool {
+    row.identity == *identity
+        && row.prepare_transition_id == input.rework.transition_id
+        && row.source_sha == input.source_sha
+        && row.patch_digest == input.patch_digest
+        && row.selected_parent_sha == input.selected_parent_sha
+        && row.candidate_sha == input.candidate_sha
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryFinalizeInput {
     pub identity: TaskDeliveryIdentity,
@@ -55,6 +68,24 @@ pub enum TaskIntegrationResult {
 }
 
 impl TaskRepository {
+    /// Read the immutable ledger row by its complete delivery identity.
+    pub async fn get_delivery(
+        &self,
+        identity: &TaskDeliveryIdentity,
+    ) -> Result<Option<TaskDelivery>> {
+        identity.validate()?;
+        sqlx::query_as::<_, DeliveryRow>(&format!(
+            "SELECT {COLS} FROM task_deliveries WHERE build_attempt_id=$1 AND task_id=$2 AND delivery_generation=$3"
+        ))
+        .bind(&identity.build_attempt_id)
+        .bind(&identity.task_id)
+        .bind(identity.delivery_generation)
+        .fetch_optional(self.db.pool())
+        .await?
+        .map(DeliveryRow::into_delivery)
+        .transpose()
+    }
+
     pub async fn prepare_delivery(
         &self,
         input: &DeliveryPrepareInput,
@@ -130,7 +161,6 @@ impl TaskRepository {
         let legal = matches!(
             (current.state, target),
             (TaskDeliveryState::Prepared, TaskDeliveryState::Applying)
-                | (TaskDeliveryState::Prepared, TaskDeliveryState::Conflict)
                 | (TaskDeliveryState::Applying, TaskDeliveryState::Applied)
                 | (TaskDeliveryState::Applying, TaskDeliveryState::Conflict)
         );
@@ -143,7 +173,7 @@ impl TaskRepository {
         let row = match target {
             TaskDeliveryState::Applying => sqlx::query_as::<_, DeliveryRow>(&format!("UPDATE task_deliveries SET state='applying', applying_transition_id=$1 WHERE build_attempt_id=$2 AND task_id=$3 AND delivery_generation=$4 AND state='prepared' RETURNING {COLS}")).bind(&input.transition_id).bind(&input.identity.build_attempt_id).bind(&input.identity.task_id).bind(input.identity.delivery_generation).fetch_optional(&mut *tx).await?,
             TaskDeliveryState::Applied => sqlx::query_as::<_, DeliveryRow>(&format!("UPDATE task_deliveries SET state='applied', applied_at=now(), finalization_transition_id=$1 WHERE build_attempt_id=$2 AND task_id=$3 AND delivery_generation=$4 AND state='applying' RETURNING {COLS}")).bind(&input.transition_id).bind(&input.identity.build_attempt_id).bind(&input.identity.task_id).bind(input.identity.delivery_generation).fetch_optional(&mut *tx).await?,
-            TaskDeliveryState::Conflict => sqlx::query_as::<_, DeliveryRow>(&format!("UPDATE task_deliveries SET state='conflict', conflict_reason=$1, finalization_transition_id=$2 WHERE build_attempt_id=$3 AND task_id=$4 AND delivery_generation=$5 AND state IN ('prepared','applying') RETURNING {COLS}")).bind(input.conflict_reason.as_deref()).bind(&input.transition_id).bind(&input.identity.build_attempt_id).bind(&input.identity.task_id).bind(input.identity.delivery_generation).fetch_optional(&mut *tx).await?,
+            TaskDeliveryState::Conflict => sqlx::query_as::<_, DeliveryRow>(&format!("UPDATE task_deliveries SET state='conflict', conflict_reason=$1, finalization_transition_id=$2 WHERE build_attempt_id=$3 AND task_id=$4 AND delivery_generation=$5 AND state='applying' RETURNING {COLS}")).bind(input.conflict_reason.as_deref()).bind(&input.transition_id).bind(&input.identity.build_attempt_id).bind(&input.identity.task_id).bind(input.identity.delivery_generation).fetch_optional(&mut *tx).await?,
             TaskDeliveryState::Prepared => None,
         };
         let result = match row {
@@ -160,8 +190,9 @@ impl TaskRepository {
         &self,
         input: &DeliveryReworkInput,
     ) -> Result<DeliveryTransitionResult> {
-        input.rework.build_attempt_id.as_str();
-        input.rework.task_id.as_str();
+        nonblank("transition_id", &input.rework.transition_id)?;
+        nonblank("build_attempt_id", &input.rework.build_attempt_id)?;
+        nonblank("task_id", &input.rework.task_id)?;
         nonblank("source_sha", &input.source_sha)?;
         nonblank("patch_digest", &input.patch_digest)?;
         nonblank("selected_parent_sha", &input.selected_parent_sha)?;
@@ -177,11 +208,21 @@ impl TaskRepository {
             &input.rework.task_id,
             input.rework.delivery_generation,
         )?;
+        if new_id.delivery_generation != old_id.delivery_generation + 1 {
+            return Err(Error::InvalidTransition(
+                "rework delivery_generation must be exactly expected_generation + 1".into(),
+            ));
+        }
         let mut tx = self.db.pool().begin().await?;
         lock_attempt_and_task(&mut tx, &old_id).await?;
         if let Some(row) =
             delivery_by_prepare_transition_tx(&mut tx, &old_id, &input.rework.transition_id).await?
         {
+            if !same_rework_preparation(&row, input, &new_id) {
+                return Err(Error::InvalidTransition(
+                    "reused rework transition_id has different immutable command facts".into(),
+                ));
+            }
             tx.commit().await?;
             return Ok(DeliveryTransitionResult::Replayed(row));
         }
@@ -236,17 +277,50 @@ impl TaskRepository {
                 task_status: Some(task.status),
             });
         }
-        sqlx::query("UPDATE task_deliveries SET state='applied', applied_at=now(), finalization_transition_id=COALESCE(finalization_transition_id, 'task_integrated') WHERE build_attempt_id=$1 AND task_id=$2 AND delivery_generation=$3 AND state='applying'").bind(&input.identity.build_attempt_id).bind(&input.identity.task_id).bind(input.identity.delivery_generation).execute(&mut *tx).await?;
-        sqlx::query("UPDATE proposal_build_attempts SET branch_head_sha=$1 WHERE id=$2")
+        let head_update = sqlx::query("UPDATE proposal_build_attempts SET branch_head_sha=$1 WHERE id=$2 AND branch_head_sha IS NOT DISTINCT FROM $3")
             .bind(&input.candidate_sha)
             .bind(&input.identity.build_attempt_id)
+            .bind(&delivery.selected_parent_sha)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE tasks SET status='closed', merge_commit_sha=$1, close_reason='completed', closed_at=to_char(now() at time zone 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), updated_at=to_char(now() at time zone 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$2 AND status='approved'").bind(&input.merge_commit_sha).bind(&input.identity.task_id).execute(&mut *tx).await?;
+        if head_update.rows_affected() != 1 {
+            return Ok(TaskIntegrationResult::Stale {
+                delivery: Some(delivery),
+                task_status: Some(task.status),
+            });
+        }
+        let delivery_update = sqlx::query("UPDATE task_deliveries SET state='applied', applied_at=now(), finalization_transition_id=COALESCE(finalization_transition_id, 'task_integrated') WHERE build_attempt_id=$1 AND task_id=$2 AND delivery_generation=$3 AND state='applying'").bind(&input.identity.build_attempt_id).bind(&input.identity.task_id).bind(input.identity.delivery_generation).execute(&mut *tx).await?;
+        if delivery_update.rows_affected() != 1 {
+            return Ok(TaskIntegrationResult::Stale {
+                delivery: Some(delivery),
+                task_status: Some(task.status),
+            });
+        }
+        let close_update = sqlx::query("UPDATE tasks SET status='closed', merge_commit_sha=$1, close_reason='completed', closed_at=to_char(now() at time zone 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), updated_at=to_char(now() at time zone 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$2 AND status='approved'").bind(&input.merge_commit_sha).bind(&input.identity.task_id).execute(&mut *tx).await?;
+        if close_update.rows_affected() != 1 {
+            return Ok(TaskIntegrationResult::Stale {
+                delivery: Some(delivery),
+                task_status: Some(task.status),
+            });
+        }
         sqlx::query("INSERT INTO activity_log (id,task_id,actor_id,actor_role,event_type,payload) VALUES ($1,$2,'system','system','status_changed',$3)").bind(uuid::Uuid::now_v7().to_string()).bind(&input.identity.task_id).bind(serde_json::json!({"from_status":"approved","to_status":"closed","reason":"direct_delivery_integrated"}).to_string()).execute(&mut *tx).await?;
         let task: Task = task_select_where_id!(&input.identity.task_id)
             .fetch_one(&mut *tx)
             .await?;
+        // Preserve normal terminal status effects in this same transaction so
+        // a late failure rolls back the ledger, attempt head, and task closure.
+        super::adjudication_close::apply_adjudication_child_close_tx(
+            &mut tx,
+            &task.id,
+            &task.labels,
+        )
+        .await?;
+        crate::repositories::note::working_spec::archive_task_working_specs_tx(
+            &mut tx,
+            &task.id,
+            "archived task working spec on terminal task state",
+        )
+        .await?;
         tx.commit().await?;
         self.events
             .send(DjinnEventEnvelope::task_updated(&task, false));
@@ -362,4 +436,57 @@ fn same_preparation(a: &TaskDelivery, b: &DeliveryPrepareInput) -> bool {
         && a.patch_digest == b.patch_digest
         && a.selected_parent_sha == b.selected_parent_sha
         && a.candidate_sha == b.candidate_sha
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rework_input(generation: i64) -> DeliveryReworkInput {
+        DeliveryReworkInput {
+            rework: ReworkDelivery {
+                transition_id: "rework-transition".into(),
+                build_attempt_id: "attempt".into(),
+                task_id: "task".into(),
+                expected_generation: 1,
+                delivery_generation: generation,
+            },
+            source_sha: "new-source".into(),
+            patch_digest: "patch".into(),
+            selected_parent_sha: "parent".into(),
+            candidate_sha: "candidate".into(),
+        }
+    }
+
+    fn reworked_row() -> TaskDelivery {
+        TaskDelivery {
+            identity: TaskDeliveryIdentity::new("attempt", "task", 2).unwrap(),
+            state: TaskDeliveryState::Prepared,
+            candidate_sha: "candidate".into(),
+            source_sha: "new-source".into(),
+            patch_digest: "patch".into(),
+            selected_parent_sha: "parent".into(),
+            prepare_transition_id: "rework-transition".into(),
+            base_sha: "parent".into(),
+            applied_at: None,
+            conflict_reason: None,
+            created_at: "now".into(),
+        }
+    }
+
+    #[test]
+    fn rework_replay_requires_exact_generation_and_immutable_facts() {
+        let identity = TaskDeliveryIdentity::new("attempt", "task", 2).unwrap();
+        let row = reworked_row();
+        assert!(same_rework_preparation(&row, &rework_input(2), &identity));
+        assert!(!same_rework_preparation(&row, &rework_input(3), &identity));
+
+        let mut different_candidate = rework_input(2);
+        different_candidate.candidate_sha = "other-candidate".into();
+        assert!(!same_rework_preparation(
+            &row,
+            &different_candidate,
+            &identity
+        ));
+    }
 }
