@@ -115,6 +115,16 @@ pub async fn model_turn_lease_lifecycle_fixture(db: &Database, lease_id: &str) -
         .unwrap()
 }
 
+/// Return persisted provider-launch identities in generation order.
+pub async fn model_turn_launch_identities_fixture(db: &Database) -> Vec<(String, i64, String)> {
+    sqlx::query_as(
+        "SELECT lease_id::text, generation, request_id FROM model_turn_leases ORDER BY generation",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap()
+}
+
 /// Snapshot one lease's fenced heartbeat state for watchdog regression tests.
 pub async fn model_turn_lease_heartbeat_snapshot_fixture(
     db: &Database,

@@ -495,6 +495,12 @@ pub enum GitError {
 pub mod actor;
 pub use actor::{GitActorHandle, get_or_spawn};
 
+pub mod direct_delivery;
+pub use direct_delivery::{
+    DirectDeliveryBuild, DirectDeliveryCandidate, DirectDeliveryInput, DirectDeliverySignature,
+    build_direct_delivery_candidate,
+};
+
 pub mod exported_config;
 
 pub mod index_mode;

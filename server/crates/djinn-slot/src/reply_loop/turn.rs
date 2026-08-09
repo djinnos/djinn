@@ -1,5 +1,7 @@
 // djinn:allow-oversize — reply loop orchestration remains intentionally co-located
 // while rrdr budget wind-down hooks land; split-out is a separate refactor.
+#[cfg(any(test, feature = "test-support"))]
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -67,35 +69,106 @@ use djinn_db::{CompactionTrigger, SessionCompactionBoundaryRepository};
 /// never reach the slot hand-off. The hook observes existing boundaries only;
 /// it cannot alter admission or launch behavior.
 #[cfg(any(test, feature = "test-support"))]
-pub type ReplyLoopBoundaryObserver = Arc<dyn Fn(&'static str) + Send + Sync>;
-
-#[cfg(any(test, feature = "test-support"))]
-static REPLY_LOOP_BOUNDARY_OBSERVER: OnceLock<Mutex<Option<ReplyLoopBoundaryObserver>>> =
-    OnceLock::new();
-
-#[cfg(any(test, feature = "test-support"))]
-pub fn set_reply_loop_boundary_observer(observer: Option<ReplyLoopBoundaryObserver>) {
-    *REPLY_LOOP_BOUNDARY_OBSERVER
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = observer;
+pub struct ReplyLoopBoundaryEvent {
+    pub name: &'static str,
+    pub session_id: String,
 }
 
 #[cfg(any(test, feature = "test-support"))]
-fn observe_reply_loop_boundary(event: &'static str) {
-    if let Some(observer) = REPLY_LOOP_BOUNDARY_OBSERVER
-        .get_or_init(|| Mutex::new(None))
+pub type ReplyLoopBoundaryObserver = Arc<dyn Fn(ReplyLoopBoundaryEvent) + Send + Sync>;
+
+#[cfg(any(test, feature = "test-support"))]
+struct ReplyLoopBoundaryObservers {
+    global: Option<ReplyLoopBoundaryObserver>,
+    by_session: HashMap<String, ReplyLoopBoundaryObserver>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+static REPLY_LOOP_BOUNDARY_OBSERVER: OnceLock<Mutex<ReplyLoopBoundaryObservers>> = OnceLock::new();
+
+#[cfg(any(test, feature = "test-support"))]
+fn reply_loop_boundary_observers() -> &'static Mutex<ReplyLoopBoundaryObservers> {
+    REPLY_LOOP_BOUNDARY_OBSERVER.get_or_init(|| {
+        Mutex::new(ReplyLoopBoundaryObservers {
+            global: None,
+            by_session: HashMap::new(),
+        })
+    })
+}
+
+/// A session-scoped test observer registration.
+///
+/// Unlike the legacy global hook, this remains installed while unrelated
+/// tests replace the global observer. Dropping it removes only this session's
+/// observation and is safe during panic unwinding.
+#[cfg(any(test, feature = "test-support"))]
+pub struct ReplyLoopBoundaryObserverRegistration {
+    session_id: String,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ReplyLoopBoundaryObserverRegistration {
+    fn drop(&mut self) {
+        reply_loop_boundary_observers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_session
+            .remove(&self.session_id);
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_reply_loop_boundary_observer(observer: Option<ReplyLoopBoundaryObserver>) {
+    reply_loop_boundary_observers()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref()
-        .cloned()
-    {
-        observer(event);
+        .global = observer;
+}
+
+/// Registers a test observer that receives boundaries only for `session_id`.
+///
+/// This is independent of the legacy global hook, so parallel reply-loop tests
+/// cannot replace or clear the observer for a running session.
+#[cfg(any(test, feature = "test-support"))]
+pub fn register_reply_loop_boundary_observer(
+    session_id: String,
+    observer: ReplyLoopBoundaryObserver,
+) -> ReplyLoopBoundaryObserverRegistration {
+    reply_loop_boundary_observers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .by_session
+        .insert(session_id.clone(), observer);
+    ReplyLoopBoundaryObserverRegistration { session_id }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn observe_reply_loop_boundary(event: &'static str, session_id: &str) {
+    let (global, session_observer) = {
+        let observers = reply_loop_boundary_observers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            observers.global.clone(),
+            observers.by_session.get(session_id).cloned(),
+        )
+    };
+    if let Some(observer) = global {
+        observer(ReplyLoopBoundaryEvent {
+            name: event,
+            session_id: session_id.to_owned(),
+        });
+    }
+    if let Some(observer) = session_observer {
+        observer(ReplyLoopBoundaryEvent {
+            name: event,
+            session_id: session_id.to_owned(),
+        });
     }
 }
 
 #[cfg(not(any(test, feature = "test-support")))]
-fn observe_reply_loop_boundary(_event: &'static str) {}
+fn observe_reply_loop_boundary(_event: &'static str, _session_id: &str) {}
 
 /// Typed admission decision returned through the reply-loop error seam.
 ///
@@ -233,6 +306,56 @@ fn is_codex_openai_family(model_id: &str) -> bool {
         .unwrap_or("")
         .to_ascii_lowercase();
     matches!(provider.as_str(), "openai" | "chatgpt_codex")
+}
+
+fn covered_attempt_identity(session_id: &str, ordinal: i64) -> (String, i64) {
+    (format!("{session_id}:covered:{ordinal}"), ordinal)
+}
+
+fn covered_retry_jitter(session_id: &str, ordinal: i64) -> std::time::Duration {
+    let hash = session_id.bytes().fold(ordinal as u64, |value, byte| {
+        value.wrapping_mul(31).wrapping_add(u64::from(byte))
+    });
+    std::time::Duration::from_millis(hash % 251)
+}
+
+/// B1 retry-after values are deadlines relative to the attempt's monotonic
+/// origin, not durations. Only the remaining interval is waited here; the
+/// deterministic jitter is deliberately bounded and follows that floor.
+fn covered_retry_delay(
+    deadline_monotonic_ms: Option<u64>,
+    attempt_started: std::time::Instant,
+    now: std::time::Instant,
+    session_id: &str,
+    ordinal: i64,
+) -> std::time::Duration {
+    let elapsed_ms = now
+        .saturating_duration_since(attempt_started)
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    let floor = deadline_monotonic_ms
+        .unwrap_or_default()
+        .saturating_sub(elapsed_ms);
+    std::time::Duration::from_millis(floor)
+        .saturating_add(covered_retry_jitter(session_id, ordinal))
+}
+
+/// Evaluate replacement eligibility only after the terminal guard settled the
+/// old attempt. Token state is included because cancellation can win while
+/// `finish` awaits the authoritative B1 outcome.
+fn should_retry_covered_outcome(
+    outcome: Option<&djinn_provider::ProviderOutcomeV1>,
+    stream_interrupted: bool,
+    watchdog_aborted: bool,
+    session_cancelled: bool,
+    supervisor_cancelled: bool,
+) -> bool {
+    !stream_interrupted
+        && !watchdog_aborted
+        && !session_cancelled
+        && !supervisor_cancelled
+        && outcome.is_some_and(|outcome| outcome.terminal.retryable())
 }
 
 /// Typed terminal error for empty/no-event turns that signals a provider failure
@@ -921,6 +1044,7 @@ pub async fn run_reply_loop(
         let mut corrected_tool_failure_signatures: HashSet<ToolCallSignature> = HashSet::new();
         let mut last_assistant_text = String::new();
         let mut turns: u32 = 0;
+        let mut covered_attempt_ordinal: i64 = 0;
         let session_budget = session_budget_override
             .unwrap_or_else(|| {
                 SessionBudgetPolicy::from_env().unwrap_or_else(|err| {
@@ -1073,7 +1197,7 @@ pub async fn run_reply_loop(
             // provider-agnostic conversation — covers all wire formats without
             // mutating stored history.
             let request_conversation = conversation.with_synthesized_tool_results();
-            observe_reply_loop_boundary("reply_loop_handoff");
+            observe_reply_loop_boundary("reply_loop_handoff", session_id);
             // The coordinator selected this model before handing the turn to the
             // slot, but it can be demoted while this reply loop is still alive.
             // Recheck the existing breaker at the actual attempt boundary,
@@ -1090,6 +1214,7 @@ pub async fn run_reply_loop(
             // fence before this code reaches the network launch below. An
             // adapter that cannot construct a plan remains explicitly on the
             // uncovered compatibility path rather than claiming enforcement.
+            let mut covered_attempt_started = None;
             let planned_attempt = provider.provider_attempt_plan_v1(
                 credential_record_id,
                 request_conversation.as_ref(),
@@ -1097,17 +1222,24 @@ pub async fn run_reply_loop(
                 tool_choice,
             );
             if let Some(identity) = slot_ctx.live_identity.as_ref() {
-                let report = report_for_route(identity, provider.name(), model_id, planned_attempt.as_ref().ok());
+                let report = report_for_route(
+                    identity,
+                    provider.name(),
+                    model_id,
+                    planned_attempt.as_ref().ok(),
+                );
                 if let Some(reporter) = slot_ctx.model_turn_capability_reporter.as_ref() {
                     reporter.emit(&report);
                 }
                 tracing::info!(slot_pod_uid = %report.slot_pod_uid, deployment_revision = %report.deployment_revision, provider = %report.provider, model_scope = %report.model_scope, coverage = ?report.coverage, "model-turn B2 capability report emitted");
             }
             let stream_result = if let Ok(plan) = planned_attempt {
+                covered_attempt_ordinal = covered_attempt_ordinal.saturating_add(1);
+                let (request_id, generation) = covered_attempt_identity(session_id, covered_attempt_ordinal);
                 let owner_pod_uid = slot_ctx.live_identity.as_ref().and_then(|identity| {
                     matches!(report_for_route(identity, provider.name(), model_id, Some(&plan)).coverage, ModelTurnCapabilityCoverageV2::Covered).then(|| identity.pod_uid.clone())
                 });
-                observe_reply_loop_boundary("model_turn_prepare");
+                observe_reply_loop_boundary("model_turn_prepare", session_id);
                 let coordinator = ModelTurnAdmissionCoordinator::new(
                     djinn_db::ModelTurnAdmissionRepository::new(slot_ctx.db.clone()),
                 );
@@ -1116,16 +1248,19 @@ pub async fn run_reply_loop(
                         &plan,
                         ModelTurnAdmissionRequest {
                             credential_id: credential_record_id.to_owned(),
-                            request_id: format!("{session_id}:{turns}"),
+                            request_id,
+                            generation,
                             owner_pod_uid,
-                            // Phase A rejects non-positive generations for both
-                            // shadow decisions and enforced leases. The first
-                            // slot-owned attempt generation is therefore one.
-                            generation: 1,
                         },
                     )
                     .await
                     .map_err(anyhow::Error::from)?;
+                let launch_identity = match &preparation {
+                    ModelTurnPreparation::Permit(permit) => permit.lease.clone(),
+                    ModelTurnPreparation::Wait(_)
+                    | ModelTurnPreparation::Rejected(_)
+                    | ModelTurnPreparation::DispatchFenced { .. } => None,
+                };
                 let policy = match &plan.coverage {
                     djinn_provider::ProviderAttemptRouteCoverageV1::Covered { policy, .. } => *policy,
                     djinn_provider::ProviderAttemptRouteCoverageV1::Uncovered(_) => {
@@ -1135,16 +1270,19 @@ pub async fn run_reply_loop(
                 let guard = launch_prepared_covered_attempt_with_lease(
                     preparation,
                     || {
-                        observe_reply_loop_boundary("covered_provider_launch");
+                        observe_reply_loop_boundary("covered_provider_launch", session_id);
+                        observe_reply_loop_boundary("model_turn_launch", session_id);
                         let normalizer = Arc::new(Mutex::new(ProviderApiKeyNormalizerV1::new(policy)));
                         let receipt_clock = Arc::clone(&slot_ctx.clock);
                         let started = receipt_clock.now_instant();
+                        covered_attempt_started = Some(started);
                         let attempt = provider.start_sse_attempt_v1(
                             request_conversation.as_ref(), tools, tool_choice,
                             ProviderAttemptContextV1::new(turns as u64, policy, normalizer, move || ProviderReceiptTimeV1 {
                                 wall: receipt_clock.now(),
                                 monotonic_ms: receipt_clock.now_instant().saturating_duration_since(started).as_millis() as u64,
-                            }),
+                            })
+                            .with_launch_identity(launch_identity.clone()),
                         ).map_err(|coverage| anyhow::anyhow!("covered B1 launch rejected: {coverage:?}"))?;
                         let parser = provider.sse_frame_parser_v1().ok_or_else(|| anyhow::anyhow!("covered B1 route has no authoritative frame parser"))?;
                         Ok((attempt, parser))
@@ -1156,7 +1294,7 @@ pub async fn run_reply_loop(
                 Ok((None, Some(guard)))
             } else {
                 // Explicit uncovered compatibility path: no B2 claim was made.
-                observe_reply_loop_boundary("uncovered_provider_launch");
+                observe_reply_loop_boundary("uncovered_provider_launch", session_id);
                 provider.stream(request_conversation.as_ref(), tools, tool_choice).await.map(|stream| (Some(stream), None))
             };
             let (stream, mut covered_attempt) = match stream_result {
@@ -1307,8 +1445,48 @@ pub async fn run_reply_loop(
                 total_cache_write: &mut total_cache_write,
                 total_reasoning_out: &mut total_reasoning_out,
             }).await;
-            if let Some(covered_attempt) = &covered_attempt {
-                covered_attempt.finish(consume_result.as_ref().is_ok_and(|state| state.provider_done)).await;
+            let covered_outcome = if let Some(covered_attempt) = &covered_attempt {
+                covered_attempt.finish(consume_result.as_ref().is_ok_and(|state| state.provider_done)).await
+            } else { None };
+            // `finish` has awaited B1's singular terminal observation and old
+            // lease reconciliation above. Retry from that settled B1 outcome,
+            // rather than the local consumer Result: EOF is an otherwise-Ok
+            // `early_stream_end` but can still be a transport loss.
+            let stream_interrupted = consume_result
+                .as_ref()
+                .is_ok_and(|state| state.interrupted.is_some());
+            let watchdog_aborted = consume_result
+                .as_ref()
+                .is_ok_and(|state| state.watchdog_aborted);
+            if should_retry_covered_outcome(
+                covered_outcome.as_ref(),
+                stream_interrupted,
+                watchdog_aborted,
+                cancel.is_cancelled(),
+                global_cancel.is_cancelled(),
+            ) {
+                observe_reply_loop_boundary("covered_attempt_settled", session_id);
+                let deadline = covered_outcome
+                    .as_ref()
+                    .and_then(|outcome| outcome.observation.as_ref())
+                    .and_then(|observation| observation.retry_after_deadline_monotonic_ms);
+                let delay = covered_retry_delay(
+                    deadline,
+                    covered_attempt_started.ok_or_else(|| {
+                        anyhow::anyhow!("covered retry outcome is missing its attempt origin")
+                    })?,
+                    slot_ctx.clock.now_instant(),
+                    session_id,
+                    covered_attempt_ordinal,
+                );
+                observe_reply_loop_boundary("covered_retry_wait", session_id);
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(anyhow::Error::new(super::error_handling::ReplyLoopCancelled::session())),
+                    _ = global_cancel.cancelled() => return Err(anyhow::Error::new(super::error_handling::ReplyLoopCancelled::supervisor_shutdown())),
+                    _ = tokio::time::sleep(delay) => {}
+                }
+                continue;
             }
             let mut stream_state = match consume_result {
                 Ok(state) => state,
@@ -2308,6 +2486,24 @@ mod tests {
         ProviderAttemptScopeV1, ProviderCredentialRecordScopeV1, ProviderHiddenRetryCapabilityV1,
         ProviderOutputReservationSourceV1,
     };
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn covered_retry_deadline_waits_only_for_remaining_time_plus_jitter() {
+        let origin = std::time::Instant::now();
+        let now = origin + std::time::Duration::from_millis(3_600_000);
+        let jitter = covered_retry_jitter("retry-session", 2);
+        assert_eq!(
+            covered_retry_delay(Some(3_601_000), origin, now, "retry-session", 2),
+            std::time::Duration::from_millis(1_000).saturating_add(jitter),
+            "an absolute B1 deadline must not be treated as a multi-hour duration"
+        );
+        assert_eq!(
+            covered_retry_delay(Some(999), origin, now, "retry-session", 2),
+            jitter,
+            "an already-expired deadline still admits only bounded jitter"
+        );
+    }
 
     fn covered_admission_plan() -> ProviderAttemptPlanV1 {
         ProviderAttemptPlanV1 {

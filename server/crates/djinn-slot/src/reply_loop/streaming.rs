@@ -209,6 +209,7 @@ pub(super) struct CoveredAttemptTerminalGuard {
 struct CoveredAttemptSettlement {
     scheduled: AtomicBool,
     complete: AtomicBool,
+    outcome: Mutex<Option<ProviderOutcomeV1>>,
     notify: tokio::sync::Notify,
 }
 
@@ -230,6 +231,7 @@ impl CoveredAttemptTerminalGuard {
             settlement: Arc::new(CoveredAttemptSettlement {
                 scheduled: AtomicBool::new(false),
                 complete: AtomicBool::new(false),
+                outcome: Mutex::new(None),
                 notify: tokio::sync::Notify::new(),
             }),
             watchdog_stop: tokio_util::sync::CancellationToken::new(),
@@ -300,7 +302,7 @@ impl CoveredAttemptTerminalGuard {
     pub(super) fn finish(
         &self,
         completed: bool,
-    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+    ) -> impl std::future::Future<Output = Option<ProviderOutcomeV1>> + Send + 'static {
         self.watchdog_stop.cancel();
         let watchdog = self
             .watchdog
@@ -331,7 +333,11 @@ impl CoveredAttemptTerminalGuard {
         let settlement = self.settlement.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                settle_covered_attempt(attempt, coordinator, identity).await;
+                let outcome = settle_covered_attempt(attempt, coordinator, identity).await;
+                *settlement
+                    .outcome
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = outcome;
                 settlement.complete.store(true, Ordering::Release);
                 settlement.notify.notify_waiters();
             });
@@ -345,30 +351,40 @@ impl CoveredAttemptTerminalGuard {
     }
 }
 
-async fn wait_for_settlement(settlement: Arc<CoveredAttemptSettlement>) {
+async fn wait_for_settlement(
+    settlement: Arc<CoveredAttemptSettlement>,
+) -> Option<ProviderOutcomeV1> {
     while !settlement.complete.load(Ordering::Acquire) {
         let notified = settlement.notify.notified();
         if settlement.complete.load(Ordering::Acquire) {
-            return;
+            return settlement
+                .outcome
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
         }
         notified.await;
     }
+    settlement
+        .outcome
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 async fn settle_covered_attempt(
     attempt: Arc<tokio::sync::Mutex<Option<ProviderSseAttemptV1>>>,
     coordinator: ModelTurnAdmissionCoordinator,
     identity: Option<ModelTurnLeaseIdentity>,
-) {
-    let Some(mut attempt) = attempt.lock().await.take() else {
-        return;
-    };
+) -> Option<ProviderOutcomeV1> {
+    let mut attempt = attempt.lock().await.take()?;
     let outcome: ProviderOutcomeV1 = attempt.outcome().await;
     if let Some(identity) = identity
         && let Err(error) = coordinator.reconcile(identity, &outcome).await
     {
         tracing::error!(error = %error, "covered attempt reconciliation failed; retaining conservative quarantine");
     }
+    Some(outcome)
 }
 
 impl Drop for CoveredAttemptTerminalGuard {
