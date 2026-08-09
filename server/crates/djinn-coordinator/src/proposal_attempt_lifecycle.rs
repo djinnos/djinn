@@ -232,22 +232,38 @@ impl ProposalAttemptLifecycle {
                 )
                 .await;
         }
-        match self
-            .github
-            .close_attempt_draft_pr(&self.owner, &self.repo, &pr, reason)
-            .await
-        {
-            CloseAttemptDraftPrResult::Closed(_) => {}
-            CloseAttemptDraftPrResult::ProposalPrIdentityMismatch => {
-                return self
-                    .park(
-                        &repo,
-                        attempt,
-                        DirectDeliveryParkReason::ProposalPrIdentityMismatch,
-                    )
-                    .await;
+        // A prior stop may have closed the PR before a failure creating its
+        // retirement tag. That closed, unmerged, exact draft is durable stop
+        // progress and must be adopted on retry rather than closed again.
+        if pr.state == djinn_provider::github_api::PrState::Open {
+            match self
+                .github
+                .close_attempt_draft_pr(&self.owner, &self.repo, &pr, reason)
+                .await
+            {
+                CloseAttemptDraftPrResult::Closed(_) => {}
+                CloseAttemptDraftPrResult::ProposalPrIdentityMismatch => {
+                    return self
+                        .park(
+                            &repo,
+                            attempt,
+                            DirectDeliveryParkReason::ProposalPrIdentityMismatch,
+                        )
+                        .await;
+                }
+                CloseAttemptDraftPrResult::ProviderFailure(e) => return Err(anyhow!(e)),
             }
-            CloseAttemptDraftPrResult::ProviderFailure(e) => return Err(anyhow!(e)),
+        } else if pr.state != djinn_provider::github_api::PrState::Closed
+            || pr.merged == Some(true)
+            || pr.draft != Some(true)
+        {
+            return self
+                .park(
+                    &repo,
+                    attempt,
+                    DirectDeliveryParkReason::ProposalPrIdentityMismatch,
+                )
+                .await;
         }
         match self
             .github
@@ -306,7 +322,215 @@ pub fn retirement_tag(branch: &str) -> String {
 }
 #[cfg(test)]
 mod tests {
-    use super::retirement_tag;
+    use super::{
+        AttemptLifecycleOutcome, ProposalAttemptLifecycle, StartAttemptInput, retirement_tag,
+    };
+    use djinn_core::events::EventBus;
+    use djinn_core::models::ProposalBuildAttemptLifecycle;
+    use djinn_db::{
+        Database, ProposalCreateInput, ProposalRepository, ReserveProposalBuildAttemptInput,
+    };
+    use djinn_provider::github_api::GitHubApiClient;
+    use sqlx::Row;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path, query_param},
+    };
+
+    const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn pr(number: u64, branch: &str, state: &str) -> serde_json::Value {
+        serde_json::json!({"number":number,"title":"attempt","state":state,"merged":false,
+            "html_url":format!("https://example.test/pull/{number}"),"head":{"ref":branch,"sha":SHA},
+            "base":{"ref":"main","sha":SHA},"auto_merge":null,"node_id":format!("PR_{number}"),"draft":true})
+    }
+    async fn db_and_proposal() -> (Database, ProposalRepository, djinn_core::models::Proposal) {
+        let db = Database::open_in_memory().expect("ephemeral database");
+        sqlx::query("UPDATE direct_delivery_epochs SET state = 'active', generation = 1 WHERE name = 'direct_delivery_v1'")
+            .execute(db.pool()).await.expect("enable direct delivery");
+        // Keep this repository (and its cloned test-db handle) alive for the
+        // test. Dropping the last template-clone owner deletes the database.
+        let proposals = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = proposals
+            .create(ProposalCreateInput {
+                title: "attempt",
+                body: "body",
+                acceptance_criteria: None,
+                status: None,
+                body_format: None,
+            })
+            .await
+            .expect("proposal");
+        (db, proposals, proposal)
+    }
+    async fn mount_start(server: &MockServer, branch: &str, number: u64) {
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/git/refs"))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/o/r/git/ref/heads/{branch}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"object":{"sha":SHA}})),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls"))
+            .and(query_param("state", "open"))
+            .and(query_param("head", format!("o:{branch}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/pulls"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(pr(number, branch, "open")))
+            .mount(server)
+            .await;
+    }
+    fn service(db: Database, server: &MockServer) -> ProposalAttemptLifecycle {
+        ProposalAttemptLifecycle::new(
+            db,
+            GitHubApiClient::for_user_token_with_base_url("test".into(), server.uri()),
+            "o".into(),
+            "r".into(),
+        )
+    }
+    fn input(proposal: &djinn_core::models::Proposal, id: &str, short: &str) -> StartAttemptInput {
+        StartAttemptInput {
+            reservation: ReserveProposalBuildAttemptInput {
+                proposal_id: proposal.id.clone(),
+                proposal_short_id: proposal.short_id.clone(),
+                build_attempt_id: id.into(),
+                build_attempt_short_id: short.into(),
+                observed_base_sha: SHA.into(),
+            },
+            title: "attempt".into(),
+            body: "body".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_retires_history_and_regraduation_gets_distinct_branch_and_pr() {
+        let (db, _proposals, proposal) = db_and_proposal().await;
+        let branch = format!("proposal/{}/a1", proposal.short_id);
+        let first_server = MockServer::start().await;
+        mount_start(&first_server, &branch, 1).await;
+        let first = match service(db.clone(), &first_server)
+            .start(input(&proposal, "attempt-1", "a1"))
+            .await
+            .expect("start")
+        {
+            AttemptLifecycleOutcome::Ready(value) => value,
+            other => panic!("unexpected: {other:?}"),
+        };
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(1, &branch, "open")))
+            .mount(&first_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/issues/1/comments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&first_server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/repos/o/r/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(1, &branch, "closed")))
+            .expect(1)
+            .mount(&first_server)
+            .await;
+        assert!(
+            matches!(service(db.clone(), &first_server).stop(first.clone(), "regraduated").await.expect("stop"), AttemptLifecycleOutcome::Retired(ref value) if value.lifecycle == ProposalBuildAttemptLifecycle::Retired)
+        );
+        let row = sqlx::query(
+            "SELECT count(*), max(lifecycle) FROM proposal_build_attempts WHERE id = $1",
+        )
+        .bind(&first.id)
+        .fetch_one(db.pool())
+        .await
+        .expect("retained row");
+        assert_eq!(row.get::<i64, _>(0), 1);
+        assert_eq!(row.get::<String, _>(1), "retired");
+        let second_branch = format!("proposal/{}/a2", proposal.short_id);
+        let second_server = MockServer::start().await;
+        mount_start(&second_server, &second_branch, 2).await;
+        let second = match service(db, &second_server)
+            .start(input(&proposal, "attempt-2", "a2"))
+            .await
+            .expect("regraduate")
+        {
+            AttemptLifecycleOutcome::Ready(value) => value,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_ne!(first.branch_name, second.branch_name);
+        assert_ne!(first.proposal_pr_number, second.proposal_pr_number);
+    }
+
+    #[tokio::test]
+    async fn stop_retry_adopts_closed_exact_pr_after_tag_failure() {
+        let (db, _proposals, proposal) = db_and_proposal().await;
+        let branch = format!("proposal/{}/a1", proposal.short_id);
+        let start_server = MockServer::start().await;
+        mount_start(&start_server, &branch, 1).await;
+        let attempt = match service(db.clone(), &start_server)
+            .start(input(&proposal, "attempt-retry", "a1"))
+            .await
+            .expect("start")
+        {
+            AttemptLifecycleOutcome::Ready(value) => value,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let failed = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(1, &branch, "open")))
+            .mount(&failed)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/issues/1/comments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({})))
+            .mount(&failed)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/repos/o/r/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(1, &branch, "closed")))
+            .mount(&failed)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/git/refs"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&failed)
+            .await;
+        assert!(
+            service(db.clone(), &failed)
+                .stop(attempt.clone(), "retry")
+                .await
+                .is_err()
+        );
+        let retry = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr(1, &branch, "closed")))
+            .mount(&retry)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/git/refs"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&retry)
+            .await;
+        assert!(matches!(
+            service(db, &retry)
+                .stop(attempt, "retry")
+                .await
+                .expect("retry stop"),
+            AttemptLifecycleOutcome::Retired(_)
+        ));
+    }
+
     #[test]
     fn tags_are_attempt_distinct() {
         assert_eq!(
