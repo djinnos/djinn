@@ -26,6 +26,8 @@ pub(crate) fn build_slot_context(
         callbacks,
         tool_dispatcher,
         compaction_cs: agent.compaction_cs.clone(),
+        live_identity: djinn_slot::model_turn_capability::SlotLiveIdentity::from_environment(),
+        model_turn_capability_reporter: None,
     }
 }
 

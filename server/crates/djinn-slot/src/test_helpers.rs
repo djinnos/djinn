@@ -510,6 +510,8 @@ pub fn agent_context_from_db_with_callbacks(
         callbacks,
         tool_dispatcher: Some(Arc::new(MockToolDispatcher)),
         compaction_cs: CompactionCriticalSection::new(),
+        live_identity: None,
+        model_turn_capability_reporter: None,
     }
 }
 
@@ -651,6 +653,8 @@ pub fn agent_context_from_db_with_dispatcher(
         callbacks: std::sync::Arc::new(NoopCallbacks),
         tool_dispatcher,
         compaction_cs: CompactionCriticalSection::new(),
+        live_identity: None,
+        model_turn_capability_reporter: None,
     }
 }
 

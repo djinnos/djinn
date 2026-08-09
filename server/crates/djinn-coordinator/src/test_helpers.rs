@@ -272,6 +272,8 @@ pub fn agent_context_from_db_with_clock(
         callbacks: Arc::new(NoopCallbacks),
         tool_dispatcher: None,
         compaction_cs: CompactionCriticalSection::new(),
+        live_identity: None,
+        model_turn_capability_reporter: None,
     }
 }
 
