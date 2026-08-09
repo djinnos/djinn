@@ -3027,7 +3027,7 @@ pub(super) async fn reap_stale_task_runs_for_startup_with_census(
             .accept_terminal_status(&run.task_run_id, TaskRunStatus::Interrupted)
             .await
         {
-            Ok(djinn_db::TerminalStatusAcceptance::Accepted) => {
+            Ok(djinn_db::repositories::task_run::TerminalStatusAcceptance::Accepted) => {
                 if let Err(error) = outcomes
                     .record_parked_reason(&run.task_run_id, "orphaned")
                     .await
