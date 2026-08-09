@@ -27,6 +27,7 @@ use djinn_orchestration_types::trigger::CoordinatorTrigger;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
 use crate::helpers::ProviderCredential;
+use crate::model_turn_capability::{ModelTurnCapabilityReporter, SlotLiveIdentity};
 use crate::reply_loop::compaction_guard::CompactionCriticalSection;
 
 /// Identifies the knowledge-write target for a session.
@@ -338,6 +339,10 @@ pub struct SlotContext {
     /// observe/wait on compaction without busy waiting. This is internal to the
     /// slot lifecycle and is not serialized across the wire.
     pub compaction_cs: CompactionCriticalSection,
+    /// Live Pod/build identity used by the additive B2 report projection.
+    pub live_identity: Option<SlotLiveIdentity>,
+    /// Optional Phase C consumer; slot code never aggregates reports.
+    pub model_turn_capability_reporter: Option<Arc<dyn ModelTurnCapabilityReporter>>,
 }
 
 impl SlotContext {

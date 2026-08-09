@@ -256,7 +256,17 @@ pub fn build_task_run_job(
     // per injected backing service (e.g. DATABASE_URL + TEST_POSTGRES_URL →
     // 127.0.0.1:5432). A preset may declare more than one name.  Evidence-spike
     // runs use `effective_services` (empty) so no DB connection env is injected.
-    let mut worker_env = build_task_run_env(config, &task_run_id_str, project_id, policy);
+    // The container image is the runtime artifact identity. In production the
+    // dispatch resolver renders it as `repository@sha256:...` whenever the
+    // registry captured a digest, so this distinguishes rebuilt images even
+    // when their Cargo package version did not change.
+    let mut worker_env = build_task_run_env(
+        config,
+        &task_run_id_str,
+        project_id,
+        project_image_tag,
+        policy,
+    );
     worker_env.extend(effective_services.iter().flat_map(sidecar_conn_env));
     // The worker receives an explicit enforcement intent instead of inferring it
     // from an incidental directory. Required mode may never degrade to direct execution.
@@ -719,6 +729,7 @@ fn build_task_run_env(
     config: &KubernetesConfig,
     task_run_id_str: &str,
     project_id: &str,
+    deployment_revision: &str,
     policy: Option<&djinn_stack::environment::CargoCachePolicy>,
 ) -> Vec<EnvVar> {
     let mut env = vec![
@@ -735,6 +746,10 @@ fn build_task_run_env(
         // POD's own UID, not the Job's, so it can only come from the downward
         // API at admission — no host-side value exists when the Job is built.
         downward_api_env_var("DJINN_TASK_RUN_POD_UID", "metadata.uid"),
+        // This is the exact image reference rendered onto the worker container,
+        // normally a digest-pinned pull ref. It is a deployment identity, not a
+        // source package version.
+        env_var("DJINN_DEPLOYMENT_REVISION", deployment_revision),
         // TMPDIR points the supervisor's TempDir::new() (used by
         // mirror.clone_ephemeral) at the writable /workspace emptyDir
         // instead of the container's tmpfs root, which has stricter
@@ -1340,7 +1355,8 @@ mod tests {
         let cfg = KubernetesConfig::for_testing();
         let task_run_id = Uuid::now_v7();
         let secret_name = "djinn-taskrun-test";
-        let project_image = "registry.example:5000/djinn-project-p:abc123def456";
+        let project_image =
+            "registry.example:5000/djinn-project-p@sha256:0123456789abcdef0123456789abcdef";
 
         let job = build_task_run_job(
             &cfg,
@@ -1512,6 +1528,22 @@ mod tests {
                 .map(|field| field.field_path.as_str()),
             Some("metadata.uid"),
             "the worker's Pod UID must come from the downward API"
+        );
+        let deployment_revision = container
+            .env
+            .as_ref()
+            .expect("container.env set")
+            .iter()
+            .find(|e| e.name == "DJINN_DEPLOYMENT_REVISION")
+            .expect("B2 capability reports require the rendered deployment identity");
+        assert_eq!(
+            deployment_revision.value.as_deref(),
+            Some(project_image),
+            "the worker must receive the exact rendered image reference as its deployment revision"
+        );
+        assert!(
+            deployment_revision.value_from.is_none(),
+            "the image identity is fixed while rendering this Job, not supplied by a mutable Pod field"
         );
 
         // DB env vars are gated on the corresponding config fields being
