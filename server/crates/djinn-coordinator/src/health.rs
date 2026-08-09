@@ -2995,11 +2995,60 @@ async fn reap_stale_task_runs(db: &djinn_db::Database) {
     reap_stale_task_runs_with_threshold(db, STALE_TASK_RUN_THRESHOLD_SECS, "periodic").await;
 }
 
-/// Startup variant: aggressive (~10s threshold) because any `running` row
-/// older than that at boot is from a prior process whose workers can no
-/// longer reach us.
+/// Legacy startup variant retained only for an unconfigured inventory.
 pub(super) async fn reap_stale_task_runs_for_startup(db: &djinn_db::Database) {
     reap_stale_task_runs_with_threshold(db, STARTUP_TASK_RUN_THRESHOLD_SECS, "startup").await;
+}
+
+/// Configured startup may interrupt only task-runs whose pre-mutation census
+/// evidence is destructively gone. The startup threshold never authorizes this
+/// mutation.
+pub(super) async fn reap_stale_task_runs_for_startup_with_census(
+    db: &djinn_db::Database,
+    census: &crate::startup_census::StartupCensus,
+) {
+    use crate::startup_census::TaskRunWitness;
+    use djinn_core::models::TaskRunStatus;
+
+    let repo = djinn_db::TaskRunRepository::new(db.clone());
+    let outcomes =
+        djinn_db::repositories::task_run_outcome::TaskRunOutcomeRepository::new(db.clone());
+    for run in census.runs() {
+        if !matches!(run.witness, TaskRunWitness::Gone(_)) {
+            tracing::info!(
+                stage = "startup_stage_b",
+                reason = if matches!(run.witness, TaskRunWitness::Unknown) { "unknown" } else { "preserved" },
+                task_id = %run.task_id,
+                task_run_id = %run.task_run_id,
+                "startup task-run reaper deferred census candidate"
+            );
+            continue;
+        }
+        match repo
+            .accept_terminal_status(&run.task_run_id, TaskRunStatus::Interrupted)
+            .await
+        {
+            Ok(djinn_db::TerminalStatusAcceptance::Accepted) => {
+                if let Err(error) = outcomes
+                    .record_parked_reason(&run.task_run_id, "orphaned")
+                    .await
+                {
+                    tracing::warn!(task_run_id = %run.task_run_id, %error, "failed to record census-authorized startup parked reason");
+                }
+                tracing::warn!(
+                    stage = "startup_stage_b",
+                    task_id = %run.task_id,
+                    task_run_id = %run.task_run_id,
+                    provenance = ?run.witness,
+                    "reaped census-authorized startup task run"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(task_run_id = %run.task_run_id, %error, "census-authorized startup task-run reap failed")
+            }
+        }
+    }
 }
 
 async fn reap_stale_task_runs_with_threshold(
@@ -3093,6 +3142,27 @@ pub(super) async fn reap_orphaned_pending_attempts_for_startup(
             lease_threshold_secs: ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS,
             reason: "startup",
             startup_incarnation_id: Some(current_incarnation_id),
+            startup_census: None,
+        },
+    )
+    .await;
+}
+
+/// Configured startup uses the immutable census for liveness gating and a
+/// pending-only candidate query, never post-Stage-B task-run/session inference.
+pub(super) async fn reap_orphaned_pending_attempts_for_startup_with_census(
+    db: &djinn_db::Database,
+    current_incarnation_id: &str,
+    census: &crate::startup_census::StartupCensus,
+) {
+    reap_orphaned_pending_attempts_core(
+        db,
+        OrphanReapParams {
+            age_threshold_secs: STARTUP_ORPHANED_PENDING_ATTEMPT_AGE_THRESHOLD_SECS,
+            lease_threshold_secs: ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS,
+            reason: "startup",
+            startup_incarnation_id: Some(current_incarnation_id),
+            startup_census: Some(census),
         },
     )
     .await;
@@ -3113,6 +3183,7 @@ pub(super) async fn reap_orphaned_pending_attempts_with_threshold(
             lease_threshold_secs: threshold_secs,
             reason,
             startup_incarnation_id: None,
+            startup_census: None,
         },
     )
     .await;
@@ -3128,6 +3199,7 @@ struct OrphanReapParams<'a> {
     lease_threshold_secs: i64,
     reason: &'static str,
     startup_incarnation_id: Option<&'a str>,
+    startup_census: Option<&'a crate::startup_census::StartupCensus>,
 }
 
 async fn reap_orphaned_pending_attempts_core(
@@ -3139,6 +3211,7 @@ async fn reap_orphaned_pending_attempts_core(
         lease_threshold_secs,
         reason,
         startup_incarnation_id,
+        startup_census,
     } = params;
 
     let format = time::macros::format_description!(
@@ -3168,7 +3241,11 @@ async fn reap_orphaned_pending_attempts_core(
 
     let repo = djinn_db::TaskAttemptRepository::new(db.clone());
     let incarnation_repo = djinn_db::CoordinatorIncarnationRepository::new(db.clone());
-    let orphans = match repo.list_orphaned_pending(&age_threshold_iso).await {
+    let orphans = match if startup_census.is_some() {
+        repo.list_pending_before(&age_threshold_iso).await
+    } else {
+        repo.list_orphaned_pending(&age_threshold_iso).await
+    } {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(
@@ -3209,6 +3286,20 @@ async fn reap_orphaned_pending_attempts_core(
     let mut terminalized_groups: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     for orphan in &orphans {
+        if let Some(census) = startup_census {
+            use crate::startup_census::TaskCensusProjection;
+            match census.task_projection(&orphan.task_id) {
+                Some(TaskCensusProjection::DestructivelyGone) | None => {}
+                Some(TaskCensusProjection::Unknown) => {
+                    tracing::info!(stage = "startup_stage_c", reason = "unknown", task_id = %orphan.task_id, attempt_id = %orphan.id, "startup pending-attempt reaper deferred unknown census evidence");
+                    continue;
+                }
+                Some(TaskCensusProjection::Live) | Some(TaskCensusProjection::CreationTransit) => {
+                    tracing::info!(stage = "startup_stage_c", reason = "preserved", task_id = %orphan.task_id, attempt_id = %orphan.id, "startup pending-attempt reaper preserved census-live task");
+                    continue;
+                }
+            }
+        }
         // Skip if this row's non-NULL group was already batch-terminalized.
         if let Some(gid) = &orphan.dispatch_group_id
             && terminalized_groups.contains(gid)
@@ -3317,6 +3408,13 @@ async fn reap_orphaned_pending_attempts_core(
                 }
             }
         }
+    }
+
+    // A configured startup must not reconstruct liveness from post-Stage-B rows.
+    // Submitted cleanup remains the periodic/legacy behavior until it has its own
+    // census projection; fail closed rather than issue the legacy liveness query.
+    if startup_census.is_some() {
+        return;
     }
 
     // Also finalize orphaned `submitted` attempts the PR poller can never own.
