@@ -23,5 +23,6 @@ expression: section
 - `proposal_show(id, fields?, revision_bodies?)`
 - `proposal_debate_list(proposal_id)`
 - `proposal_debate_append(against_revision_seq, agent_role, body, kind, proposal_id, round, blocking?)`
+- `proposal_refinement_demand_evidence(against_revision_seq, expected_findings, insufficient_in_session_research, load_bearing_category, proposal_id, question, round, spec_unknown_anchor, target_subsystem)`
 - `task_comment_add(body, id)`
 - `submit_review(task_id, verdict, acceptance_criteria?, feedback?)`

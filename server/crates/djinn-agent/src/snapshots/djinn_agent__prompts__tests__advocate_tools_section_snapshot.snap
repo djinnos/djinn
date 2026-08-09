@@ -33,4 +33,5 @@ expression: section
 - `proposal_block_patch(block_mdx, id, operation, selector, expected_latest_revision_seq?, native_skill_name?, native_skill_version?, note?)`
 - `get_block_catalog()`
 - `proposal_blocks()`
+- `proposal_refinement_retry_evidence(failed_transition_id, finding_id)`
 - `submit_work(commit_title, summary, task_id, evidence_completion?, files_changed?, remaining_concerns?)`

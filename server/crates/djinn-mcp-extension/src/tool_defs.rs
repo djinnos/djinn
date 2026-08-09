@@ -865,6 +865,10 @@ pub fn tool_schemas_advocate() -> Vec<serde_json::Value> {
         read_only(),
     ));
     tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_refinement_retry_evidence(),
+        idempotent_mutation(),
+    ));
+    tool_values.push(serialize_tool(
         crate::finalize_tools::tool_submit_work(),
         mutation(),
     ));
@@ -896,6 +900,10 @@ pub fn tool_schemas_adversary() -> Vec<serde_json::Value> {
     // loop reads. Objections placed in `submit_review` are NOT read by the loop.
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_debate_append(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_refinement_demand_evidence(),
         mutation(),
     ));
     tool_values.push(serialize_tool(
@@ -950,6 +958,18 @@ pub fn tool_schemas_judge() -> Vec<serde_json::Value> {
     // is insufficient to resolve a load-bearing feasibility claim.
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_refinement_demand_evidence(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_refinement_retry_evidence(),
+        idempotent_mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_refinement_resolve_evidence(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_refinement_withdraw_evidence(),
         mutation(),
     ));
     tool_values.push(serialize_tool(

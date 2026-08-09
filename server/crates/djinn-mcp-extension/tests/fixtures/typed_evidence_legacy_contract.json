@@ -1,0 +1,50 @@
+{
+  "legacy_demand_required": [
+    "proposal_id",
+    "round",
+    "against_revision_seq",
+    "question",
+    "target_subsystem",
+    "spec_unknown_anchor",
+    "insufficient_in_session_research",
+    "expected_findings"
+  ],
+  "typed_demand_required": ["load_bearing_category"],
+  "legacy_demand_response_fields": ["proposal_id", "accepted", "result", "error"],
+  "legacy_demand_result_fields": ["claim", "spike_task_id", "against_revision_seq", "round"],
+  "typed_demand_result_fields": ["finding_id", "attempt_id", "lifecycle", "replayed"],
+  "typed_retry_response_fields": [
+    "accepted",
+    "finding_id",
+    "attempt_id",
+    "spike_task_id",
+    "sequence",
+    "lifecycle",
+    "replayed",
+    "error",
+    "conflict_code"
+  ],
+  "typed_disposition_response_fields": [
+    "accepted",
+    "finding_id",
+    "disposition_id",
+    "disposition",
+    "lifecycle",
+    "folding_revision",
+    "validation_result_id",
+    "outcome",
+    "error",
+    "conflict_code"
+  ],
+  "demand_example": {
+    "proposal_id": "proposal-1",
+    "round": 1,
+    "against_revision_seq": 3,
+    "question": "Can the compatibility boundary preserve the existing response contract?",
+    "target_subsystem": "djinn-mcp-extension",
+    "spec_unknown_anchor": "Typed evidence MCP contracts",
+    "insufficient_in_session_research": "The runtime response shape requires an isolated evidence spike.",
+    "expected_findings": "A compatibility proof for existing and additive fields.",
+    "load_bearing_category": "compatibility"
+  }
+}

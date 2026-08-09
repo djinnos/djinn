@@ -26,6 +26,9 @@ expression: names
   "proposal_debate_resolve",
   "proposal_debate_append",
   "proposal_refinement_demand_evidence",
+  "proposal_refinement_retry_evidence",
+  "proposal_refinement_resolve_evidence",
+  "proposal_refinement_withdraw_evidence",
   "task_comment_add",
   "submit_decision"
 ]
