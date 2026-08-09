@@ -72,6 +72,7 @@ pub(super) struct EvidenceLifecycleSnapshot {
     pub dispatch_paused: bool,
     /// `proposals.linked_spike_task_id` — `None` when no evidence demand
     /// is linked.
+    #[allow(dead_code)]
     pub linked_spike_task_id: Option<String>,
     /// `proposals.needs_evidence_claim` — the structured claim JSON.
     /// `None` when no evidence demand is linked.
@@ -82,6 +83,7 @@ pub(super) struct EvidenceLifecycleSnapshot {
     /// Status of the linked spike task row (`"open"`, `"in_progress"`,
     /// `"closed"`, etc.).  `None` when no spike is linked or the task
     /// row was hard-deleted.
+    #[allow(dead_code)]
     pub spike_task_status: Option<String>,
     /// `close_reason` of the linked spike task when it is closed.
     /// `None` when the spike is still open or no spike is linked.

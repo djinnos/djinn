@@ -201,7 +201,7 @@ pub struct LegacyEvidenceParityProjection {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypedEvidenceLifecycleProjection {
     Absent,
-    Valid(TribunalEvidenceFinding),
+    Valid(Box<TribunalEvidenceFinding>),
     Invalid,
 }
 
@@ -411,7 +411,7 @@ impl TypedEvidenceRepository {
             TribunalEvidenceLifecycle::Demanded | TribunalEvidenceLifecycle::SpikeActive => {
                 match self.dual_read_legacy_parity(proposal_id).await? {
                     Some(parity) if parity.finding.id == finding.id => {
-                        Ok(TypedEvidenceLifecycleProjection::Valid(finding))
+                        Ok(TypedEvidenceLifecycleProjection::Valid(Box::new(finding)))
                     }
                     _ => Ok(TypedEvidenceLifecycleProjection::Invalid),
                 }
@@ -432,7 +432,7 @@ impl TypedEvidenceRepository {
                                 .get::<Option<String>, _>("needs_evidence_claim")
                                 .is_none() =>
                     {
-                        Ok(TypedEvidenceLifecycleProjection::Valid(finding))
+                        Ok(TypedEvidenceLifecycleProjection::Valid(Box::new(finding)))
                     }
                     _ => Ok(TypedEvidenceLifecycleProjection::Invalid),
                 }
