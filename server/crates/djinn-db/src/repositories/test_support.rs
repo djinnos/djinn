@@ -6,6 +6,20 @@ use tokio::sync::broadcast;
 
 use crate::database::Database;
 
+/// Activate the dormant direct-delivery epoch for focused cross-crate tests.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn activate_direct_delivery_epoch_for_test(db: &Database) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "UPDATE direct_delivery_epochs SET state = 'active', generation = 1 \
+         WHERE name = 'direct_delivery_v1'",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to activate direct-delivery test epoch");
+}
+
 mod evidence_dispatch_recovery;
 mod refinement_read_only;
 mod test_support_retry;
