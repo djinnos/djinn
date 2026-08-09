@@ -127,13 +127,13 @@ pub mod resize_authorization;
 pub mod resize_lift;
 pub mod resource_monitor;
 pub mod roles;
-/// Immutable pre-mutation cluster evidence shared by startup recovery stages.
-pub mod startup_census;
 /// Production wiring that arms the observe-only disk dimension at coordinator
 /// startup: run-dir reconciliation, the live capacity adapter, and the quota
 /// probe.
 pub mod run_dir_observe;
 pub mod run_dir_reconcile;
+/// Immutable pre-mutation cluster evidence shared by startup recovery stages.
+pub mod startup_census;
 pub mod supervisor_impl;
 pub mod task_merge;
 pub(crate) mod tripwires;
