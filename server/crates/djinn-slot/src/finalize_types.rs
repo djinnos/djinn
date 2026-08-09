@@ -35,6 +35,10 @@ pub struct SubmitWork {
     pub remaining_concerns: Vec<String>,
     /// Available only to the exact linked refinement-evidence spike.
     pub evidence_completion: Option<EvidenceCompletionV1>,
+    /// Raw canonical `TribunalEvidenceReturnV1` delivery. It deliberately
+    /// remains JSON here: malformed returns must reach the typed repository so
+    /// it can durably record their failed validation outcome.
+    pub tribunal_evidence_return_v1: Option<serde_json::Value>,
 }
 
 /// Payload for a reviewer submitting their review outcome.

@@ -254,6 +254,20 @@ impl TypedEvidenceRepository {
         &self.db
     }
 
+    /// Whether this server-authenticated task is the exact active typed
+    /// evidence spike for an allocated attempt. Producers use this only to
+    /// fence durable delivery; `submit_return_v1` remains the authority for
+    /// finding, task, attempt, and payload validation.
+    pub async fn has_active_attempt_for_task(&self, spike_task_id: &str) -> Result<bool> {
+        let active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM typed_evidence_attempts a JOIN typed_evidence_findings f ON f.id=a.finding_id WHERE a.spike_task_id=$1 AND f.lifecycle='spike_active')",
+        )
+        .bind(spike_task_id)
+        .fetch_one(self.db.pool())
+        .await?;
+        Ok(active)
+    }
+
     pub async fn planned_checks_for_attempt_in_transaction(
         tx: &mut Transaction<'_, Postgres>,
         attempt_id: &str,

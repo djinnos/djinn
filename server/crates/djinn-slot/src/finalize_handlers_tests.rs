@@ -387,6 +387,83 @@ async fn submit_work_accepts_server_authenticated_session_separately_from_payloa
     assert_eq!(body["summary"], "implemented the feature");
     assert_eq!(body["files_changed"][0], "src/main.rs");
     assert_eq!(body["remaining_concerns"][0], "needs perf testing");
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.event_type != "tribunal_evidence_return_v1"),
+        "ordinary submit_work must not synthesize typed evidence delivery"
+    );
+}
+
+#[tokio::test]
+async fn typed_evidence_submit_work_logs_raw_returns_for_authenticated_spike_only() {
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
+    let proposal_id = uuid::Uuid::now_v7().to_string();
+    let finding_id = uuid::Uuid::now_v7().to_string();
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO proposals (id,short_id,title,body,body_format,acceptance_criteria,status,latest_revision_seq) VALUES ($1,$2,'typed return','','markdown','[]','draft',1)")
+        .bind(&proposal_id)
+        .bind(proposal_id.replace('-', ""))
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,'spike_active','{}',1,$4)")
+        .bind(&finding_id)
+        .bind(&proposal_id)
+        .bind(format!("demand-{finding_id}"))
+        .bind(&task.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id) VALUES ($1,$2,1,$3)")
+        .bind(&attempt_id)
+        .bind(&finding_id)
+        .bind(&task.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let returns = vec![
+        serde_json::json!({"version":"TribunalEvidenceReturnV1","finding_id":finding_id,"spike_task_id":"spoofed-task","attempt_id":attempt_id,"conclusion":"resolved","checks":[]}),
+        serde_json::json!({"version":"TribunalEvidenceReturnV1","finding_id":finding_id,"spike_task_id":task.id,"attempt_id":attempt_id,"conclusion":"partial","checks":[]}),
+        serde_json::json!({"version":"TribunalEvidenceReturnV1","finding_id":finding_id,"spike_task_id":task.id,"attempt_id":attempt_id,"conclusion":"unresolved","checks":[]}),
+        serde_json::json!({"attempt_id":attempt_id,"malformed":true}),
+    ];
+    for raw_return in &returns {
+        let payload = serde_json::json!({
+            "task_id": "spoofed-submit-task",
+            "commit_title": "deliver typed evidence",
+            "summary": "typed delivery",
+            "tribunal_evidence_return_v1": raw_return,
+        });
+        assert!(
+            handle_submit_work(&payload, &task.id, AUTHENTICATED_SESSION_ID, &ctx).await,
+            "raw return delivery should not validate at the finalize boundary"
+        );
+    }
+    let entries = TaskRepository::new(db.clone(), ctx.event_bus.clone())
+        .list_activity(&task.id)
+        .await
+        .unwrap();
+    let deliveries: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.event_type == "tribunal_evidence_return_v1")
+        .collect();
+    assert_eq!(deliveries.len(), returns.len());
+    for (entry, raw_return) in deliveries.iter().zip(&returns) {
+        assert_eq!(entry.task_id.as_deref(), Some(task.id.as_str()));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&entry.payload).unwrap(),
+            *raw_return,
+            "delivery payload must be exactly the raw V1 value"
+        );
+    }
 }
 
 #[tokio::test]
