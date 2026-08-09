@@ -43,7 +43,8 @@ fn same_rework_preparation(
     input: &DeliveryReworkInput,
     identity: &TaskDeliveryIdentity,
 ) -> bool {
-    row.identity == *identity
+    input.rework.delivery_generation == identity.delivery_generation
+        && row.identity == *identity
         && row.prepare_transition_id == input.rework.transition_id
         && row.source_sha == input.source_sha
         && row.patch_digest == input.patch_digest
