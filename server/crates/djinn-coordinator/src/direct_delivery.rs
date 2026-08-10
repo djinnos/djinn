@@ -195,6 +195,20 @@ impl DeliveryLedger for RepositoryDeliveryLedger {
             )),
         }
     }
+    async fn prepared_candidate(
+        &self,
+        identity: &TaskDeliveryIdentity,
+    ) -> Result<Option<Candidate>> {
+        Ok(self
+            .tasks
+            .get_delivery(identity)
+            .await?
+            .map(|delivery| Candidate {
+                candidate_sha: delivery.candidate_sha,
+                patch_digest: delivery.patch_digest,
+                selected_parent_sha: delivery.selected_parent_sha,
+            }))
+    }
     async fn prepare(
         &self,
         identity: &TaskDeliveryIdentity,
@@ -354,6 +368,10 @@ pub enum DeliveryOutcome {
 pub trait DeliveryLedger: Send + Sync {
     async fn direct_delivery_enabled(&self) -> Result<bool>;
     async fn resolve_active_attempt(&self, task_id: &str) -> Result<ActiveAttempt>;
+    /// Immutable candidate already recorded for this exact generation.
+    async fn prepared_candidate(&self, _: &TaskDeliveryIdentity) -> Result<Option<Candidate>> {
+        Ok(None)
+    }
     async fn prepare(
         &self,
         identity: &TaskDeliveryIdentity,
@@ -463,9 +481,19 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
             &source.task_id,
             source.delivery_generation,
         )?;
+        // A crash after remote success can leave the ref at this generation's
+        // exact durable candidate. Reconcile it before selecting a new parent;
+        // otherwise rebuilding would produce a second commit on top of it.
+        let observed = self.remote.observe(&attempt.branch_name).await?;
+        if let (Some(head), Some(candidate)) =
+            (&observed, self.ledger.prepared_candidate(&identity).await?)
+            && *head == candidate.candidate_sha
+        {
+            return self.integrate(identity, candidate.candidate_sha).await;
+        }
         // Select and validate the parent before recording immutable preparation
         // facts. A mapped append observed here is a valid candidate parent.
-        let parent = match self.remote.observe(&attempt.branch_name).await? {
+        let parent = match observed {
             Some(head) if self.ledger.is_mapped_first_parent(&attempt, &head).await? => head,
             observed => return self.park_unexpected(&attempt, &identity, observed).await,
         };
@@ -1294,6 +1322,14 @@ mod tests {
         Superseded,
         Applied,
     }
+    /// Deterministic process-loss points. Shared state remains durable while
+    /// the caller receives an error and must replay its immutable generation.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum CrashWindow {
+        BeforeRemoteMutation,
+        AfterRemoteBeforeSqlAcknowledgment,
+        AfterSqlFinalization,
+    }
     #[derive(Clone)]
     struct ConcurrentGeneration {
         identity: TaskDeliveryIdentity,
@@ -1308,15 +1344,25 @@ mod tests {
     struct ConcurrentState {
         head: String,
         durable_head: String,
+        attempt_branch_head_sha: String,
         parents: std::collections::HashMap<String, String>,
+        /// Every expected-old CAS invocation, including a pre-mutation crash.
         updates: Vec<(String, String)>,
+        /// Candidate commits actually published to the shared remote graph.
+        published_commits: Vec<String>,
         generations: std::collections::HashMap<(String, i64), ConcurrentGeneration>,
         integrated: std::collections::HashMap<String, String>,
+        task_status: std::collections::HashMap<String, String>,
+        task_merge_commit_sha: std::collections::HashMap<String, String>,
         closure_calls: std::collections::HashMap<String, usize>,
+        dependent_release_calls: std::collections::HashMap<String, usize>,
         integration_attempts: usize,
+        crash_window: Option<CrashWindow>,
+        crash_injected: bool,
     }
     #[derive(Default)]
     struct ConcurrentIntegrationGate {
+        enabled: bool,
         block_predecessor_once: AtomicBool,
         successor_stale_attempts: AtomicUsize,
         release_predecessor: tokio::sync::Notify,
@@ -1337,6 +1383,18 @@ mod tests {
                 branch_name: "proposal/p/a".into(),
                 branch_head_sha: "base".into(),
             })
+        }
+        async fn prepared_candidate(
+            &self,
+            identity: &TaskDeliveryIdentity,
+        ) -> Result<Option<Candidate>> {
+            Ok(self
+                .state
+                .lock()
+                .map_err(|_| anyhow!("poison"))?
+                .generations
+                .get(&(identity.task_id.clone(), identity.delivery_generation))
+                .map(|generation| generation.candidate.clone()))
         }
         async fn prepare(
             &self,
@@ -1462,7 +1520,7 @@ mod tests {
             // four durable-head misses. This makes the post-CAS ordering
             // deterministic and proves the engine is not relying on three
             // scheduler yields.
-            let block_predecessor = {
+            let block_predecessor = self.gate.enabled && {
                 let s = self.state.lock().map_err(|_| anyhow!("poison"))?;
                 s.generations.get(&key).is_some_and(|generation| {
                     generation.candidate.selected_parent_sha == "base"
@@ -1512,10 +1570,24 @@ mod tests {
                 return Ok(LedgerResult::Stale);
             }
             s.durable_head = i.candidate_sha.clone();
+            s.attempt_branch_head_sha = i.candidate_sha.clone();
             s.generations.get_mut(&key).unwrap().state = ConcurrentGenerationState::Applied;
             s.integrated
-                .insert(i.identity.task_id.clone(), i.candidate_sha);
-            *s.closure_calls.entry(i.identity.task_id).or_default() += 1;
+                .insert(i.identity.task_id.clone(), i.candidate_sha.clone());
+            s.task_status
+                .insert(i.identity.task_id.clone(), "closed".into());
+            s.task_merge_commit_sha
+                .insert(i.identity.task_id.clone(), i.merge_commit_sha.clone());
+            *s.closure_calls
+                .entry(i.identity.task_id.clone())
+                .or_default() += 1;
+            *s.dependent_release_calls
+                .entry(i.identity.task_id)
+                .or_default() += 1;
+            if s.crash_window == Some(CrashWindow::AfterSqlFinalization) && !s.crash_injected {
+                s.crash_injected = true;
+                return Err(anyhow!("injected crash after SQL finalization"));
+            }
             Ok(LedgerResult::Applied)
         }
         async fn is_mapped_first_parent(&self, _: &ActiveAttempt, sha: &str) -> Result<bool> {
@@ -1548,8 +1620,8 @@ mod tests {
     #[derive(Clone)]
     struct ConcurrentRemote {
         state: Arc<Mutex<ConcurrentState>>,
-        first_cas: Arc<tokio::sync::Notify>,
-        second_cas: Arc<tokio::sync::Notify>,
+        first_cas: Option<Arc<tokio::sync::Notify>>,
+        second_cas: Option<Arc<tokio::sync::Notify>>,
     }
     #[async_trait]
     impl AttemptRef for ConcurrentRemote {
@@ -1564,9 +1636,14 @@ mod tests {
         }
         async fn update_expected_old(&self, _: &str, old: &str, new: &str) -> Result<RemoteUpdate> {
             let first = old == "base";
+            let crash_after_remote;
             {
                 let mut s = self.state.lock().map_err(|_| anyhow!("poison"))?;
                 s.updates.push((old.into(), new.into()));
+                if s.crash_window == Some(CrashWindow::BeforeRemoteMutation) && !s.crash_injected {
+                    s.crash_injected = true;
+                    return Err(anyhow!("injected crash before remote mutation"));
+                }
                 if s.head != old {
                     return Ok(RemoteUpdate::Stale {
                         observed_sha: Some(s.head.clone()),
@@ -1574,12 +1651,26 @@ mod tests {
                 }
                 s.parents.insert(new.into(), old.into());
                 s.head = new.into();
+                s.published_commits.push(new.into());
+                crash_after_remote = s.crash_window
+                    == Some(CrashWindow::AfterRemoteBeforeSqlAcknowledgment)
+                    && !s.crash_injected;
+                if crash_after_remote {
+                    s.crash_injected = true;
+                }
+            }
+            if crash_after_remote {
+                return Err(anyhow!(
+                    "injected crash after remote mutation before SQL acknowledgment"
+                ));
             }
             if first {
-                self.first_cas.notify_one();
-                self.second_cas.notified().await;
-            } else {
-                self.second_cas.notify_one();
+                if let (Some(first_cas), Some(second_cas)) = (&self.first_cas, &self.second_cas) {
+                    first_cas.notify_one();
+                    second_cas.notified().await;
+                }
+            } else if let Some(second_cas) = &self.second_cas {
+                second_cas.notify_one();
             }
             Ok(RemoteUpdate::Updated { sha: new.into() })
         }
@@ -1607,6 +1698,25 @@ mod tests {
             }))
         }
     }
+    struct CrashBuilder;
+    #[async_trait]
+    impl CandidateBuilder for CrashBuilder {
+        async fn build(
+            &self,
+            identity: &TaskDeliveryIdentity,
+            _: &DeliverySource,
+            parent: &str,
+        ) -> Result<CandidateBuild> {
+            Ok(CandidateBuild::Clean(Candidate {
+                candidate_sha: format!(
+                    "candidate-{}-g{}-on-{parent}",
+                    identity.task_id, identity.delivery_generation
+                ),
+                patch_digest: "crash-matrix-digest".into(),
+                selected_parent_sha: parent.into(),
+            }))
+        }
+    }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_clean_completions_share_cas_graph_and_rebuild_loser() {
         let state = Arc::new(Mutex::new(ConcurrentState {
@@ -1614,15 +1724,18 @@ mod tests {
             durable_head: "base".into(),
             ..Default::default()
         }));
-        let gate = Arc::new(ConcurrentIntegrationGate::default());
+        let gate = Arc::new(ConcurrentIntegrationGate {
+            enabled: true,
+            ..Default::default()
+        });
         let ledger = ConcurrentLedger {
             state: state.clone(),
             gate: gate.clone(),
         };
         let remote = ConcurrentRemote {
             state: state.clone(),
-            first_cas: Arc::new(tokio::sync::Notify::new()),
-            second_cas: Arc::new(tokio::sync::Notify::new()),
+            first_cas: Some(Arc::new(tokio::sync::Notify::new())),
+            second_cas: Some(Arc::new(tokio::sync::Notify::new())),
         };
         let builder = ConcurrentBuilder(Arc::new(tokio::sync::Barrier::new(2)));
         let a = DirectDeliveryEngine::new(ledger.clone(), remote.clone(), builder.clone());
@@ -1699,5 +1812,96 @@ mod tests {
             s.parents[&retry.candidate.candidate_sha],
             retry.candidate.selected_parent_sha
         );
+    }
+
+    #[tokio::test]
+    async fn crash_window_replays_converge_the_shared_remote_and_durable_ledger() {
+        for window in [
+            CrashWindow::BeforeRemoteMutation,
+            CrashWindow::AfterRemoteBeforeSqlAcknowledgment,
+            CrashWindow::AfterSqlFinalization,
+        ] {
+            let state = Arc::new(Mutex::new(ConcurrentState {
+                head: "base".into(),
+                durable_head: "base".into(),
+                attempt_branch_head_sha: "base".into(),
+                crash_window: Some(window),
+                ..Default::default()
+            }));
+            let ledger = ConcurrentLedger {
+                state: state.clone(),
+                gate: Arc::new(ConcurrentIntegrationGate::default()),
+            };
+            let remote = ConcurrentRemote {
+                state: state.clone(),
+                first_cas: None,
+                second_cas: None,
+            };
+            let engine = DirectDeliveryEngine::new(ledger, remote, CrashBuilder);
+            let immutable_source = source(1);
+            assert!(
+                engine.deliver(immutable_source.clone()).await.is_err(),
+                "{window:?}"
+            );
+            if window == CrashWindow::BeforeRemoteMutation {
+                let s = state.lock().unwrap();
+                let prepared = s.generations.get(&("task".into(), 1)).unwrap();
+                assert_eq!(s.head, "base");
+                assert!(s.published_commits.is_empty());
+                assert_eq!(prepared.state, ConcurrentGenerationState::Applying);
+                assert_eq!(
+                    prepared.candidate.candidate_sha,
+                    "candidate-task-g1-on-base"
+                );
+            }
+            let outcome = engine.deliver(immutable_source).await.unwrap();
+            let candidate = "candidate-task-g1-on-base";
+            assert_eq!(
+                outcome,
+                DeliveryOutcome::Integrated {
+                    candidate_sha: candidate.into()
+                }
+            );
+
+            let s = state.lock().unwrap();
+            assert!(s.crash_injected, "{window:?}");
+            assert_eq!(s.head, candidate, "{window:?}");
+            assert_eq!(s.durable_head, candidate, "{window:?}");
+            assert_eq!(s.attempt_branch_head_sha, candidate, "{window:?}");
+            assert_eq!(s.parents.len(), 1, "{window:?}");
+            assert_eq!(s.parents[candidate], "base", "{window:?}");
+            assert_eq!(s.published_commits, [candidate], "{window:?}");
+            assert_eq!(
+                s.updates.len(),
+                if window == CrashWindow::BeforeRemoteMutation {
+                    2
+                } else {
+                    1
+                },
+                "{window:?}"
+            );
+            assert!(
+                s.updates
+                    .iter()
+                    .all(|(old, new)| old == "base" && new == candidate),
+                "{window:?}"
+            );
+            let generation = s.generations.get(&("task".into(), 1)).unwrap();
+            assert_eq!(
+                generation.state,
+                ConcurrentGenerationState::Applied,
+                "{window:?}"
+            );
+            assert_eq!(generation.candidate.candidate_sha, candidate, "{window:?}");
+            assert_eq!(
+                generation.candidate.selected_parent_sha, "base",
+                "{window:?}"
+            );
+            assert_eq!(s.integrated["task"], candidate, "{window:?}");
+            assert_eq!(s.task_status["task"], "closed", "{window:?}");
+            assert_eq!(s.task_merge_commit_sha["task"], candidate, "{window:?}");
+            assert_eq!(s.closure_calls["task"], 1, "{window:?}");
+            assert_eq!(s.dependent_release_calls["task"], 1, "{window:?}");
+        }
     }
 }
