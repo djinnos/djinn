@@ -9,8 +9,8 @@ use std::{collections::HashSet, path::PathBuf, time::Duration};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use djinn_core::models::{
-    DirectDeliveryParkReason, MappedHeadRetryDelivery, ReworkDelivery, TaskDeliveryIdentity,
-    TaskIntegrated, TransitionAction,
+    DirectDeliveryParkReason, MappedHeadRetryDelivery, ReworkDelivery, TaskDelivery,
+    TaskDeliveryIdentity, TaskIntegrated, TransitionAction,
 };
 use djinn_db::{
     Database, DeliveryFinalizeInput, DeliveryMappedHeadRetryInput, DeliveryPrepareInput,
@@ -142,24 +142,64 @@ pub async fn deliver_task_branch(
         email: "direct-delivery@djinn.local".into(),
         when: "0 +0000".into(),
     };
-    let ledger = RepositoryDeliveryLedger::new(
-        db.clone(),
-        ProposalBuildAttemptRepository::new(db.clone()),
-        TaskRepository::new(db, event_bus),
+    let tasks = TaskRepository::new(db.clone(), event_bus.clone());
+    // The adapter owns no proposal-routing rule. Resolve the same canonical
+    // active attempt used by admission before selecting an immutable replay.
+    let attempts = ProposalBuildAttemptRepository::new(db.clone());
+    let active_attempt = match attempts.resolve_task_active_attempt(task_id).await? {
+        ResolveTaskActiveAttemptResult::Resolved(resolved) => resolved.attempt,
+        other => {
+            return Err(anyhow!(
+                "no canonical active attempt for {task_id}: {other:?}"
+            ));
+        }
+    };
+    let source = resume_delivery_source(
+        task_id,
+        source_sha,
+        normalized_patch,
+        tasks
+            .latest_delivery_for_attempt(&active_attempt.id, task_id)
+            .await?
+            .as_ref(),
     );
+    let ledger = RepositoryDeliveryLedger::new(db.clone(), attempts, tasks);
     DirectDeliveryEngine::new(
         ledger,
         GitHubAttemptRef::new(github, owner, repo),
         GitCandidateBuilder::new(repository, signature.clone(), signature),
     )
-    .deliver(DeliverySource {
-        task_id: task_id.into(),
-        delivery_generation: 1,
-        transition_id: format!("direct-delivery:{task_id}:1"),
-        source_sha,
-        normalized_patch,
-    })
+    .deliver(source)
     .await
+}
+
+/// Keep replay tied to the durable generation rather than the current source
+/// checkout. A mapped-head successor may be Applying after a provider response
+/// was lost; only its original identity and transition can reconcile it.
+fn resume_delivery_source(
+    task_id: &str,
+    source_sha: String,
+    normalized_patch: String,
+    latest: Option<&TaskDelivery>,
+) -> DeliverySource {
+    match latest {
+        Some(delivery) => DeliverySource {
+            task_id: task_id.into(),
+            delivery_generation: delivery.identity.delivery_generation,
+            transition_id: delivery.prepare_transition_id.clone(),
+            source_sha: delivery.source_sha.clone(),
+            // Exact-candidate reconciliation occurs before candidate rebuilding.
+            // The current patch remains available for a definitive retry.
+            normalized_patch,
+        },
+        None => DeliverySource {
+            task_id: task_id.into(),
+            delivery_generation: 1,
+            transition_id: format!("direct-delivery:{task_id}:1"),
+            source_sha,
+            normalized_patch,
+        },
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -625,9 +665,10 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
         let observed = self.remote.observe(&attempt.branch_name).await?;
         if let (Some(head), Some(candidate)) =
             (&observed, self.ledger.prepared_candidate(&identity).await?)
-            && *head == candidate.candidate_sha
         {
-            return self.integrate(identity, candidate.candidate_sha).await;
+            if *head == candidate.candidate_sha {
+                return self.integrate(identity, candidate.candidate_sha).await;
+            }
         }
         // Select and validate the parent before recording immutable preparation
         // facts. A mapped append observed here is a valid candidate parent.
@@ -1172,6 +1213,35 @@ mod tests {
             },
             updates,
         )
+    }
+    #[test]
+    fn mapped_head_successor_resumes_its_immutable_identity() {
+        let successor = TaskDelivery {
+            identity: TaskDeliveryIdentity::new("attempt", "task", 2).unwrap(),
+            state: djinn_core::models::TaskDeliveryState::Applying,
+            candidate_sha: "candidate-task-g2-on-mapped".into(),
+            source_sha: "original-source".into(),
+            patch_digest: "original-digest".into(),
+            selected_parent_sha: "mapped".into(),
+            prepare_transition_id: "transition-1:mapped-head:2".into(),
+            base_sha: "mapped".into(),
+            applied_at: None,
+            conflict_reason: None,
+            supersede_transition_id: None,
+            created_at: "now".into(),
+        };
+        let resumed = resume_delivery_source(
+            "task",
+            "newer-checkout-source".into(),
+            "newer-checkout-patch".into(),
+            Some(&successor),
+        );
+        assert_eq!(resumed.delivery_generation, 2);
+        assert_eq!(resumed.transition_id, "transition-1:mapped-head:2");
+        assert_eq!(resumed.source_sha, "original-source");
+        // The immutable candidate remains in the ledger and is recovered by
+        // `prepared_candidate` before this patch is ever rebuilt.
+        assert_eq!(successor.candidate_sha, "candidate-task-g2-on-mapped");
     }
     #[tokio::test]
     async fn conflict_is_finalized_before_parking() {
@@ -2041,5 +2111,94 @@ mod tests {
             assert_eq!(s.closure_calls["task"], 1, "{window:?}");
             assert_eq!(s.dependent_release_calls["task"], 1, "{window:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn mapped_head_generation_two_provider_error_replays_without_duplicate_push() {
+        // Generation one was superseded by a mapped head. Generation two's
+        // expected-old update reached the provider but its response was lost,
+        // leaving the durable Applying row as the only replay authority.
+        let replay_source = DeliverySource {
+            task_id: "task".into(),
+            delivery_generation: 2,
+            transition_id: "transition-1:mapped-head:2".into(),
+            source_sha: "original-source".into(),
+            normalized_patch: "original-patch".into(),
+        };
+        let candidate = Candidate {
+            candidate_sha: "candidate-task-g2-on-mapped".into(),
+            patch_digest: "original-digest".into(),
+            selected_parent_sha: "mapped".into(),
+        };
+        let mut state = ConcurrentState {
+            head: candidate.candidate_sha.clone(),
+            durable_head: "mapped".into(),
+            attempt_branch_head_sha: "mapped".into(),
+            ..Default::default()
+        };
+        state
+            .parents
+            .insert(candidate.candidate_sha.clone(), "mapped".into());
+        state.generations.insert(
+            ("task".into(), 2),
+            ConcurrentGeneration {
+                identity: TaskDeliveryIdentity::new("attempt", "task", 2).unwrap(),
+                source: replay_source.clone(),
+                candidate: candidate.clone(),
+                state: ConcurrentGenerationState::Applying,
+                superseded_by: None,
+                supersede_transition: None,
+                applying_transition: Some(replay_source.transition_id.clone()),
+            },
+        );
+        state.generations.insert(
+            ("task".into(), 1),
+            ConcurrentGeneration {
+                identity: TaskDeliveryIdentity::new("attempt", "task", 1).unwrap(),
+                source: DeliverySource {
+                    transition_id: "transition-1".into(),
+                    delivery_generation: 1,
+                    ..replay_source.clone()
+                },
+                candidate: Candidate {
+                    candidate_sha: "candidate-task-g1-on-base".into(),
+                    patch_digest: "original-digest".into(),
+                    selected_parent_sha: "base".into(),
+                },
+                state: ConcurrentGenerationState::Superseded,
+                superseded_by: Some(2),
+                supersede_transition: Some(replay_source.transition_id.clone()),
+                applying_transition: Some("transition-1".into()),
+            },
+        );
+        let state = Arc::new(Mutex::new(state));
+        let engine = DirectDeliveryEngine::new(
+            ConcurrentLedger {
+                state: state.clone(),
+                gate: Arc::new(ConcurrentIntegrationGate::default()),
+            },
+            ConcurrentRemote {
+                state: state.clone(),
+                first_cas: None,
+                second_cas: None,
+            },
+            CrashBuilder,
+        );
+
+        assert_eq!(
+            engine.deliver(replay_source).await.unwrap(),
+            DeliveryOutcome::Integrated {
+                candidate_sha: candidate.candidate_sha.clone()
+            }
+        );
+        let state = state.lock().unwrap();
+        assert!(state.updates.is_empty(), "exact replay must not push again");
+        assert_eq!(state.head, candidate.candidate_sha);
+        assert_eq!(state.durable_head, candidate.candidate_sha);
+        assert_eq!(
+            state.generations[&("task".into(), 2)].state,
+            ConcurrentGenerationState::Applied
+        );
+        assert_eq!(state.closure_calls["task"], 1);
     }
 }
