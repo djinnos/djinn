@@ -2563,6 +2563,39 @@ impl CoordinatorActor {
         mirror_head_sha: Option<&str>,
         failing_ci_job_ids: &serde_json::Value,
     ) -> bool {
+        // Retry escalation is a task-state mutation: fail closed until the
+        // shared epoch/ownership/ledger boundary permits legacy liveness.
+        let task_repo = self.task_repo();
+        match crate::direct_delivery::admit_direct_delivery_liveness(
+            self.db.clone(),
+            &task_repo,
+            &task.id,
+        )
+        .await
+        {
+            Ok(crate::direct_delivery::DirectDeliveryLiveness::Legacy)
+            | Ok(crate::direct_delivery::DirectDeliveryLiveness::Dispatch) => {}
+            Ok(crate::direct_delivery::DirectDeliveryLiveness::Reconcile) => {
+                match self.reconcile_direct_delivery_task(task).await {
+                    Ok(outcome) => {
+                        tracing::info!(task_id = %task.short_id, ?outcome, "CoordinatorActor: reconciled applying direct delivery instead of retry escalation")
+                    }
+                    Err(error) => {
+                        tracing::error!(task_id = %task.short_id, %error, "CoordinatorActor: direct reconciliation failed; refusing retry escalation")
+                    }
+                }
+                return false;
+            }
+            Ok(crate::direct_delivery::DirectDeliveryLiveness::Settled)
+            | Ok(crate::direct_delivery::DirectDeliveryLiveness::Parked) => {
+                tracing::info!(task_id = %task.short_id, "CoordinatorActor: direct delivery is settled or parked; refusing retry escalation");
+                return false;
+            }
+            Err(error) => {
+                tracing::error!(task_id = %task.short_id, %error, "CoordinatorActor: direct-delivery admission unavailable; refusing retry escalation");
+                return false;
+            }
+        }
         tracing::warn!(
             task_id = %task.short_id,
             hold_cycle,
