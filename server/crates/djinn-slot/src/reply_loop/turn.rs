@@ -49,6 +49,8 @@ use super::loop_guard::{
     AssistantOutputSignature, LoopGuardCondition, LoopGuardError, LoopGuardReason, LoopGuardState,
     ToolCallSignature, ToolFailureClass,
 };
+#[cfg(test)]
+use super::model_turn_admission::ModelTurnAdmissionTestHooks;
 use super::model_turn_admission::{
     ModelTurnAdmissionCoordinator, ModelTurnAdmissionRequest, ModelTurnPreparation,
 };
@@ -85,6 +87,44 @@ struct ReplyLoopBoundaryObservers {
 
 #[cfg(any(test, feature = "test-support"))]
 static REPLY_LOOP_BOUNDARY_OBSERVER: OnceLock<Mutex<ReplyLoopBoundaryObservers>> = OnceLock::new();
+
+#[cfg(test)]
+static REPLY_LOOP_ADMISSION_TEST_HOOKS: OnceLock<
+    Mutex<HashMap<String, Arc<ModelTurnAdmissionTestHooks>>>,
+> = OnceLock::new();
+
+#[cfg(test)]
+fn reply_loop_admission_test_hooks()
+-> &'static Mutex<HashMap<String, Arc<ModelTurnAdmissionTestHooks>>> {
+    REPLY_LOOP_ADMISSION_TEST_HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+pub(crate) struct ReplyLoopAdmissionTestHooksRegistration {
+    session_id: String,
+}
+
+#[cfg(test)]
+impl Drop for ReplyLoopAdmissionTestHooksRegistration {
+    fn drop(&mut self) {
+        reply_loop_admission_test_hooks()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.session_id);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn register_reply_loop_admission_test_hooks(
+    session_id: String,
+    hooks: Arc<ModelTurnAdmissionTestHooks>,
+) -> ReplyLoopAdmissionTestHooksRegistration {
+    reply_loop_admission_test_hooks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(session_id.clone(), hooks);
+    ReplyLoopAdmissionTestHooksRegistration { session_id }
+}
 
 #[cfg(any(test, feature = "test-support"))]
 fn reply_loop_boundary_observers() -> &'static Mutex<ReplyLoopBoundaryObservers> {
@@ -1240,9 +1280,19 @@ pub async fn run_reply_loop(
                     matches!(report_for_route(identity, provider.name(), model_id, Some(&plan)).coverage, ModelTurnCapabilityCoverageV2::Covered).then(|| identity.pod_uid.clone())
                 });
                 observe_reply_loop_boundary("model_turn_prepare", session_id);
-                let coordinator = ModelTurnAdmissionCoordinator::new(
-                    djinn_db::ModelTurnAdmissionRepository::new(slot_ctx.db.clone()),
-                );
+                let repository = djinn_db::ModelTurnAdmissionRepository::new(slot_ctx.db.clone());
+                #[cfg(test)]
+                let coordinator = reply_loop_admission_test_hooks()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(session_id)
+                    .cloned()
+                    .map_or_else(
+                        || ModelTurnAdmissionCoordinator::new(repository.clone()),
+                        |hooks| ModelTurnAdmissionCoordinator::with_test_hooks(repository.clone(), hooks),
+                    );
+                #[cfg(not(test))]
+                let coordinator = ModelTurnAdmissionCoordinator::new(repository);
                 let preparation = coordinator
                     .prepare(
                         &plan,
