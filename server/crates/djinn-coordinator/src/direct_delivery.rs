@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use djinn_core::models::{
     DirectDeliveryParkReason, MappedHeadRetryDelivery, ReworkDelivery, TaskDeliveryIdentity,
-    TaskIntegrated,
+    TaskIntegrated, TransitionAction,
 };
 use djinn_db::{
     Database, DeliveryFinalizeInput, DeliveryMappedHeadRetryInput, DeliveryPrepareInput,
@@ -23,6 +23,144 @@ use djinn_git::{
     build_direct_delivery_candidate,
 };
 use djinn_provider::github_api::{ExpectedOldShaRefUpdateResult, GitHubApiClient};
+use djinn_workspace::MirrorManager;
+
+pub const LEGACY_DELIVERY_LABEL: &str = "direct-delivery-legacy";
+
+/// The only epoch-aware routing decision used by ready admission and completion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DirectDeliveryAdmission {
+    Legacy,
+    Direct { attempt: ActiveAttempt },
+    NoProposalOwner,
+}
+
+/// Persist the active-epoch ownership failure before any task-PR side effect.
+pub async fn park_no_proposal_owner(repo: &TaskRepository, task_id: &str) -> Result<()> {
+    repo.transition(
+        task_id,
+        TransitionAction::Escalate,
+        "coordinator",
+        "system",
+        Some("no_proposal_owner"),
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Read-only, fail-closed epoch and owner selection. Ownership comes exclusively
+/// from `resolve_task_active_attempt`, never coordinator task fields.
+pub async fn admit_direct_delivery(db: Database, task_id: &str) -> Result<DirectDeliveryAdmission> {
+    match DirectDeliveryCapabilityRepository::new(db.clone())
+        .probe()
+        .await?
+    {
+        DirectDeliverySchemaCapability::SupportedDisabled { .. } => {
+            Ok(DirectDeliveryAdmission::Legacy)
+        }
+        DirectDeliverySchemaCapability::SupportedActive { .. } => {
+            let task = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+                .get(task_id)
+                .await?
+                .ok_or_else(|| anyhow!("task {task_id} disappeared during delivery admission"))?;
+            let labels: Vec<String> = serde_json::from_str(&task.labels)
+                .map_err(|error| anyhow!("task {task_id} has invalid labels: {error}"))?;
+            if task.pr_url.is_some() || labels.iter().any(|label| label == LEGACY_DELIVERY_LABEL) {
+                return Ok(DirectDeliveryAdmission::Legacy);
+            }
+            match ProposalBuildAttemptRepository::new(db)
+                .resolve_task_active_attempt(task_id)
+                .await?
+            {
+                ResolveTaskActiveAttemptResult::Resolved(resolved) => {
+                    let attempt = resolved.attempt;
+                    Ok(DirectDeliveryAdmission::Direct {
+                        attempt: ActiveAttempt {
+                            build_attempt_id: attempt.id,
+                            branch_name: attempt.branch_name,
+                            branch_head_sha: attempt
+                                .branch_head_sha
+                                .ok_or_else(|| anyhow!("active attempt has no branch head"))?,
+                        },
+                    })
+                }
+                ResolveTaskActiveAttemptResult::NoProposalOwner { .. }
+                | ResolveTaskActiveAttemptResult::NoActiveAttempt { .. }
+                | ResolveTaskActiveAttemptResult::AmbiguousProposalOwner { .. } => {
+                    Ok(DirectDeliveryAdmission::NoProposalOwner)
+                }
+            }
+        }
+        DirectDeliverySchemaCapability::MissingSchema { missing_relations } => Err(anyhow!(
+            "direct_delivery_v1 schema unavailable: {}",
+            missing_relations.join(", ")
+        )),
+        DirectDeliverySchemaCapability::MissingEpoch => {
+            Err(anyhow!("direct_delivery_v1 epoch is unavailable"))
+        }
+        DirectDeliverySchemaCapability::UnknownEpochState { state, generation } => Err(anyhow!(
+            "direct_delivery_v1 has unknown state {state} at generation {generation}"
+        )),
+    }
+}
+
+/// Direct completion adapter; it exposes no legacy task-PR operation.
+#[allow(clippy::too_many_arguments)]
+pub async fn deliver_task_branch(
+    db: Database,
+    event_bus: djinn_core::events::EventBus,
+    mirror: &MirrorManager,
+    task_id: &str,
+    project_id: &str,
+    task_branch: &str,
+    base_branch: &str,
+    owner: String,
+    repo: String,
+    github: GitHubApiClient,
+) -> Result<DeliveryOutcome> {
+    let workspace = mirror.clone_ephemeral(project_id, task_branch).await?;
+    let repository = workspace.path_buf();
+    let source_sha =
+        djinn_git::run_git_command(repository.clone(), vec!["rev-parse".into(), "HEAD".into()])
+            .await?
+            .stdout
+            .trim()
+            .to_owned();
+    let normalized_patch = djinn_git::run_git_command(
+        repository.clone(),
+        vec![
+            "diff".into(),
+            "--binary".into(),
+            format!("origin/{base_branch}..HEAD"),
+        ],
+    )
+    .await?
+    .stdout;
+    let signature = DirectDeliverySignature {
+        name: "Djinn Direct Delivery".into(),
+        email: "direct-delivery@djinn.local".into(),
+        when: "0 +0000".into(),
+    };
+    let ledger = RepositoryDeliveryLedger::new(
+        db.clone(),
+        ProposalBuildAttemptRepository::new(db.clone()),
+        TaskRepository::new(db, event_bus),
+    );
+    DirectDeliveryEngine::new(
+        ledger,
+        GitHubAttemptRef::new(github, owner, repo),
+        GitCandidateBuilder::new(repository, signature.clone(), signature),
+    )
+    .deliver(DeliverySource {
+        task_id: task_id.into(),
+        delivery_generation: 1,
+        transition_id: format!("direct-delivery:{task_id}:1"),
+        source_sha,
+        normalized_patch,
+    })
+    .await
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LedgerResult {

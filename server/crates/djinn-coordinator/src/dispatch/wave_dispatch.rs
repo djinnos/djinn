@@ -100,6 +100,31 @@ impl CoordinatorActor {
         };
 
         for task in tasks {
+            // Select the writer before any completion mutation, including the
+            // simple-lifecycle fast path below.
+            let admission = match crate::direct_delivery::admit_direct_delivery(
+                self.db.clone(),
+                &task.id,
+            )
+            .await
+            {
+                Ok(admission) => admission,
+                Err(error) => {
+                    tracing::error!(task_id = %task.short_id, error = %error, "CoordinatorActor: direct-delivery capability is unavailable or unknown; refusing task-PR fallback");
+                    continue;
+                }
+            };
+            if admission == crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner {
+                match crate::direct_delivery::park_no_proposal_owner(&repo, &task.id).await {
+                    Ok(()) => {
+                        tracing::warn!(task_id = %task.short_id, "CoordinatorActor: approved task durably parked as no_proposal_owner")
+                    }
+                    Err(error) => {
+                        tracing::error!(task_id = %task.short_id, error = %error, "CoordinatorActor: failed to persist no_proposal_owner park")
+                    }
+                }
+                continue;
+            }
             // Simple-lifecycle tasks normally close directly, but sessions that
             // produced durable artifacts (file changes, memory writes, or task
             // comments pointing at .djinn paths) must survive as branch/PR
@@ -107,7 +132,10 @@ impl CoordinatorActor {
             let simple = IssueType::parse(&task.issue_type)
                 .map(|it| it.uses_simple_lifecycle())
                 .unwrap_or(false);
-            if simple
+            if matches!(
+                admission,
+                crate::direct_delivery::DirectDeliveryAdmission::Legacy
+            ) && simple
                 && !self
                     .simple_lifecycle_task_has_durable_artifacts(&task.id)
                     .await
@@ -151,6 +179,65 @@ impl CoordinatorActor {
                     issue_type = %task.issue_type,
                     "CoordinatorActor: simple-lifecycle task approved with durable artifacts — routing through PR flow"
                 );
+            }
+
+            // Direct work returns before any supervisor task-PR operation.
+            match admission {
+                crate::direct_delivery::DirectDeliveryAdmission::Legacy => {}
+                crate::direct_delivery::DirectDeliveryAdmission::Direct { .. } => {
+                    let task_branch = format!("task/{}", task.short_id);
+                    let Some(mirror) = self.mirror.as_ref() else {
+                        tracing::error!(task_id = %task.short_id, "CoordinatorActor: direct delivery admitted without a mirror; refusing task-PR fallback");
+                        continue;
+                    };
+                    let project_repo = djinn_db::ProjectRepository::new(
+                        self.db.clone(),
+                        crate::events::event_bus_for(&self.events_tx),
+                    );
+                    let (owner, repo_name, installation_id) = match (
+                        project_repo.get_github_coords(&task.project_id).await,
+                        project_repo.get_installation_id(&task.project_id).await,
+                    ) {
+                        (Ok(Some((owner, repo_name))), Ok(Some(installation_id))) => {
+                            (owner, repo_name, installation_id)
+                        }
+                        _ => {
+                            tracing::error!(task_id = %task.short_id, "CoordinatorActor: direct delivery admitted without GitHub identity; refusing task-PR fallback");
+                            continue;
+                        }
+                    };
+                    let base_branch = match project_repo.get_config(&task.project_id).await {
+                        Ok(Some(config)) => config.target_branch,
+                        _ => "main".into(),
+                    };
+                    match crate::direct_delivery::deliver_task_branch(
+                        self.db.clone(),
+                        crate::events::event_bus_for(&self.events_tx),
+                        mirror,
+                        &task.id,
+                        &task.project_id,
+                        &task_branch,
+                        &base_branch,
+                        owner,
+                        repo_name,
+                        djinn_provider::github_api::GitHubApiClient::for_installation(
+                            installation_id,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(outcome) => {
+                            tracing::info!(task_id = %task.short_id, outcome = ?outcome, "CoordinatorActor: completed task routed through direct append engine")
+                        }
+                        Err(error) => {
+                            tracing::error!(task_id = %task.short_id, error = %error, "CoordinatorActor: direct append failed; task-PR identity was left untouched")
+                        }
+                    }
+                    continue;
+                }
+                crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner => {
+                    unreachable!("parked before completion mutation")
+                }
             }
 
             tracing::info!(
