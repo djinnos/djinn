@@ -169,8 +169,9 @@ impl CoordinatorActor {
         for task in tasks {
             // Select the writer before any completion mutation, including the
             // simple-lifecycle fast path below.
-            let admission = match crate::direct_delivery::admit_direct_delivery(
+            let admission = match crate::direct_delivery::admit_approved_direct_delivery(
                 self.db.clone(),
+                &repo,
                 &task.id,
             )
             .await

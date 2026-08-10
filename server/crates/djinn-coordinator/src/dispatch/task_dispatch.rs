@@ -2024,7 +2024,13 @@ impl CoordinatorActor {
             // Ready admission and approved completion share this read-only
             // epoch/ownership boundary. Active unresolved ownership is parked,
             // never allowed to fall through to legacy behavior.
-            match crate::direct_delivery::admit_direct_delivery(self.db.clone(), &task.id).await {
+            match crate::direct_delivery::admit_ready_direct_delivery(
+                self.db.clone(),
+                &self.task_repo(),
+                &task.id,
+            )
+            .await
+            {
                 Ok(crate::direct_delivery::DirectDeliveryAdmission::Legacy)
                 | Ok(crate::direct_delivery::DirectDeliveryAdmission::Direct { .. }) => {}
                 Ok(crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner) => {
