@@ -847,9 +847,6 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
         }
         let mut observed_mapped_heads = HashSet::new();
         loop {
-            // This is the real ref mutation; route selection and failed
-            // resolution must not be reported as an append.
-            observe_boundary_operation("direct_append");
             match self
                 .remote
                 .update_expected_old(&attempt.branch_name, &parent, &candidate.candidate_sha)
@@ -2490,13 +2487,52 @@ mod tests {
     /// Repository-backed cross-product for both production admission boundaries.
     #[tokio::test]
     async fn production_ready_and_completion_admission_matrix_is_fail_closed() {
-        use crate::dispatch::wave_dispatch::route_approved_completion;
+        use crate::dispatch::wave_dispatch::{
+            route_approved_completion, run_direct_completion,
+            run_legacy_completion_preserving_pr_identity,
+        };
         use djinn_core::events::EventBus;
         use djinn_core::models::ProposalBuildAttemptLifecycle;
         use djinn_db::{
             ActivateProposalBuildAttemptInput, EpicRepository, ProposalBuildAttemptRepository,
             ReserveProposalBuildAttemptInput, TaskRepository,
         };
+
+        async fn snapshot(
+            db: &Database,
+            tasks: &TaskRepository,
+            task_id: &str,
+        ) -> (
+            String,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+            Option<i64>,
+            Option<i64>,
+        ) {
+            let task = tasks.get(task_id).await.unwrap().unwrap();
+            let activities = djinn_db::test_support::activity_row_count_for_test(db, task_id).await;
+            let attempts = djinn_db::test_support::task_attempt_count_for_test(db, task_id).await;
+            let build_attempts =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM proposal_build_attempts")
+                    .fetch_one(db.pool())
+                    .await
+                    .ok();
+            let ledger = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM task_deliveries")
+                .fetch_one(db.pool())
+                .await
+                .ok();
+            (
+                task.status,
+                task.pr_url,
+                task.merge_commit_sha,
+                activities,
+                attempts,
+                build_attempts,
+                ledger,
+            )
+        }
 
         #[derive(Clone, Copy)]
         enum State {
@@ -2600,6 +2636,7 @@ mod tests {
                     }
                     _ => {}
                 }
+                let before = snapshot(&db, &tasks, &task.id).await;
                 clear_boundary_operations();
                 let admission = if completion {
                     admit_approved_direct_delivery(db.clone(), &tasks, &task.id).await
@@ -2611,51 +2648,105 @@ mod tests {
                     State::MissingSchema | State::MissingEpoch | State::UnknownEpoch
                 );
                 assert_eq!(admission.is_err(), failed);
-                if let Ok(admission) = admission {
-                    if completion && !matches!(admission, DirectDeliveryAdmission::NoProposalOwner)
-                    {
-                        route_approved_completion(
-                            admission,
-                            || async {
-                                observe_boundary_operation("direct_append");
-                            },
-                            || async {
-                                observe_boundary_operation("supervisor_pr_open");
-                            },
-                        )
-                        .await;
-                    }
+                match (&admission, state) {
+                    (
+                        Ok(DirectDeliveryAdmission::Legacy),
+                        State::Disabled | State::ExplicitLegacy,
+                    ) => {}
+                    (Ok(DirectDeliveryAdmission::Direct { .. }), State::Direct) => {}
+                    (Ok(DirectDeliveryAdmission::NoProposalOwner), State::Unresolved) => {}
+                    (Err(_), State::MissingSchema | State::MissingEpoch | State::UnknownEpoch) => {}
+                    _ => panic!("matrix state selected the wrong admission route"),
                 }
-                let persisted = tasks.get(&task.id).await.unwrap().unwrap();
+                let external_pr_seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+                if let Ok(admission) = admission
+                    && completion
+                    && !matches!(admission, DirectDeliveryAdmission::NoProposalOwner)
+                {
+                    let completion_task = tasks.get(&task.id).await.unwrap().unwrap();
+                    let legacy_pr = completion_task
+                        .pr_url
+                        .clone()
+                        .unwrap_or_else(|| "https://example.test/pr/legacy".to_owned());
+                    let db_for_legacy = db.clone();
+                    let external_pr_for_legacy = external_pr_seen.clone();
+                    let task_for_legacy = completion_task.clone();
+                    route_approved_completion(
+                        admission,
+                        || async { run_direct_completion(|| async {}).await },
+                        || async move {
+                            run_legacy_completion_preserving_pr_identity(
+                                &db_for_legacy,
+                                &task_for_legacy,
+                                || async move {
+                                    *external_pr_for_legacy.lock().unwrap() =
+                                        Some(legacy_pr.clone());
+                                    djinn_runtime::TaskRunOutcome::PrOpened {
+                                        url: legacy_pr,
+                                        sha: "legacy-head".to_owned(),
+                                    }
+                                },
+                            )
+                            .await
+                            .unwrap();
+                        },
+                    )
+                    .await;
+                }
+                let after = snapshot(&db, &tasks, &task.id).await;
+                if failed {
+                    assert_eq!(
+                        after, before,
+                        "capability failure must not mutate task, activity, attempt, build-attempt, or ledger state"
+                    );
+                }
                 if matches!(state, State::Unresolved) {
-                    assert_eq!(persisted.status, "escalated");
+                    assert_eq!(after.0, "escalated");
                 }
                 if matches!(state, State::ExplicitLegacy) {
                     assert_eq!(
-                        persisted.pr_url.as_deref(),
+                        after.1.as_deref(),
                         Some("https://example.test/pr/unchanged")
                     );
+                    if completion {
+                        assert_eq!(
+                            external_pr_seen.lock().unwrap().as_deref(),
+                            Some("https://example.test/pr/unchanged"),
+                            "persisted and externally observed explicit legacy PR identities must match"
+                        );
+                    }
                 }
-                let ops = take_boundary_operations();
-                if failed {
-                    assert_eq!(ops, [BoundaryOperation::CapabilityProbe]);
-                }
-                if matches!(state, State::Unresolved) {
-                    assert_eq!(
-                        ops,
-                        [
-                            BoundaryOperation::CapabilityProbe,
-                            BoundaryOperation::ResolveTaskActiveAttempt,
-                            BoundaryOperation::NoProposalOwnerPark
-                        ]
-                    );
-                }
-                if !completion {
-                    assert!(
-                        !ops.contains(&BoundaryOperation::DirectAppend)
-                            && !ops.contains(&BoundaryOperation::SupervisorPrOpen)
-                    );
-                }
+                let expected_ops = match (state, completion) {
+                    (State::Disabled | State::ExplicitLegacy, false) => {
+                        vec![BoundaryOperation::CapabilityProbe]
+                    }
+                    (State::Disabled | State::ExplicitLegacy, true) => vec![
+                        BoundaryOperation::CapabilityProbe,
+                        BoundaryOperation::SupervisorPrOpen,
+                    ],
+                    (State::Direct, false) => vec![
+                        BoundaryOperation::CapabilityProbe,
+                        BoundaryOperation::ResolveTaskActiveAttempt,
+                    ],
+                    (State::Direct, true) => vec![
+                        BoundaryOperation::CapabilityProbe,
+                        BoundaryOperation::ResolveTaskActiveAttempt,
+                        BoundaryOperation::DirectAppend,
+                    ],
+                    (State::Unresolved, _) => vec![
+                        BoundaryOperation::CapabilityProbe,
+                        BoundaryOperation::ResolveTaskActiveAttempt,
+                        BoundaryOperation::NoProposalOwnerPark,
+                    ],
+                    (State::MissingSchema | State::MissingEpoch | State::UnknownEpoch, _) => {
+                        vec![BoundaryOperation::CapabilityProbe]
+                    }
+                };
+                assert_eq!(
+                    take_boundary_operations(),
+                    expected_ops,
+                    "every matrix cell must assert the complete ordered production effect vector"
+                );
             }
         }
     }

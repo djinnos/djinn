@@ -53,6 +53,17 @@ where
     Ok(outcome)
 }
 
+/// Run the production direct-delivery collaborator. The observation is adjacent
+/// to the shared collaborator rather than synthesized by a boundary test.
+pub(crate) async fn run_direct_completion<T, F, Fut>(completion: F) -> T
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    crate::direct_delivery::observe_boundary_operation("direct_append");
+    completion().await
+}
+
 /// Select the approved-task writer at the completion boundary. Keeping the
 /// collaborators explicit gives production and tests one fail-closed routing
 /// seam between direct append and legacy task-PR completion.
@@ -183,14 +194,8 @@ impl CoordinatorActor {
                 }
             };
             if admission == crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner {
-                match crate::direct_delivery::park_no_proposal_owner(&repo, &task.id).await {
-                    Ok(()) => {
-                        tracing::warn!(task_id = %task.short_id, "CoordinatorActor: approved task durably parked as no_proposal_owner")
-                    }
-                    Err(error) => {
-                        tracing::error!(task_id = %task.short_id, error = %error, "CoordinatorActor: failed to persist no_proposal_owner park")
-                    }
-                }
+                // The admission wrapper owns this durable park. Completion must
+                // not issue a duplicate Escalate transition.
                 continue;
             }
             // Simple-lifecycle tasks normally close directly, but sessions that
@@ -285,20 +290,23 @@ impl CoordinatorActor {
                 match route_approved_completion(
                     admission.clone(),
                     || async {
-                        crate::direct_delivery::deliver_task_branch(
-                            self.db.clone(),
-                            crate::events::event_bus_for(&self.events_tx),
-                            mirror,
-                            &task.id,
-                            &task.project_id,
-                            &task_branch,
-                            &base_branch,
-                            owner,
-                            repo_name,
-                            djinn_provider::github_api::GitHubApiClient::for_installation(
-                                installation_id,
-                            ),
-                        )
+                        run_direct_completion(|| async {
+                            crate::direct_delivery::deliver_task_branch(
+                                self.db.clone(),
+                                crate::events::event_bus_for(&self.events_tx),
+                                mirror,
+                                &task.id,
+                                &task.project_id,
+                                &task_branch,
+                                &base_branch,
+                                owner,
+                                repo_name,
+                                djinn_provider::github_api::GitHubApiClient::for_installation(
+                                    installation_id,
+                                ),
+                            )
+                            .await
+                        })
                         .await
                     },
                     || async {

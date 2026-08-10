@@ -2034,19 +2034,8 @@ impl CoordinatorActor {
                 Ok(crate::direct_delivery::DirectDeliveryAdmission::Legacy)
                 | Ok(crate::direct_delivery::DirectDeliveryAdmission::Direct { .. }) => {}
                 Ok(crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner) => {
-                    match crate::direct_delivery::park_no_proposal_owner(
-                        &self.task_repo(),
-                        &task.id,
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            tracing::warn!(task_id = %task.short_id, "CoordinatorActor: dispatch durably parked as no_proposal_owner")
-                        }
-                        Err(error) => {
-                            tracing::error!(task_id = %task.short_id, error = %error, "CoordinatorActor: failed to persist no_proposal_owner park")
-                        }
-                    }
+                    // The production admission wrapper already persisted the
+                    // no_proposal_owner park. Do not issue a second Escalate.
                     continue;
                 }
                 Err(error) => {
