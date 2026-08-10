@@ -66,7 +66,7 @@ pub async fn admit_direct_delivery(db: Database, task_id: &str) -> Result<Direct
                 .ok_or_else(|| anyhow!("task {task_id} disappeared during delivery admission"))?;
             let labels: Vec<String> = serde_json::from_str(&task.labels)
                 .map_err(|error| anyhow!("task {task_id} has invalid labels: {error}"))?;
-            if task.pr_url.is_some() || labels.iter().any(|label| label == LEGACY_DELIVERY_LABEL) {
+            if has_explicit_legacy_delivery(task.pr_url.as_deref(), &labels) {
                 return Ok(DirectDeliveryAdmission::Legacy);
             }
             match ProposalBuildAttemptRepository::new(db)
@@ -103,6 +103,12 @@ pub async fn admit_direct_delivery(db: Database, task_id: &str) -> Result<Direct
             "direct_delivery_v1 has unknown state {state} at generation {generation}"
         )),
     }
+}
+
+/// Legacy identities are an explicit routing boundary: admission may inspect a
+/// task PR, but direct delivery must never replace or otherwise mutate it.
+fn has_explicit_legacy_delivery(pr_url: Option<&str>, labels: &[String]) -> bool {
+    pr_url.is_some() || labels.iter().any(|label| label == LEGACY_DELIVERY_LABEL)
 }
 
 /// Direct completion adapter; it exposes no legacy task-PR operation.
@@ -1243,6 +1249,22 @@ mod tests {
         // `prepared_candidate` before this patch is ever rebuilt.
         assert_eq!(successor.candidate_sha, "candidate-task-g2-on-mapped");
     }
+    #[test]
+    fn explicit_legacy_admission_preserves_existing_pr_identity_for_completion() {
+        // Completion receives the same task PR identity after the shared
+        // admission decision. Its legacy route, rather than the direct engine,
+        // remains responsible for the existing PR.
+        let existing_pr_url = "https://github.example/owner/repo/pull/42".to_owned();
+        let labels = vec![LEGACY_DELIVERY_LABEL.to_owned()];
+        assert!(has_explicit_legacy_delivery(
+            Some(existing_pr_url.as_str()),
+            &labels
+        ));
+        assert_eq!(
+            existing_pr_url, "https://github.example/owner/repo/pull/42",
+            "legacy admission must not mutate the task PR identity before completion"
+        );
+    }
     #[tokio::test]
     async fn conflict_is_finalized_before_parking() {
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -1567,6 +1589,10 @@ mod tests {
         integration_attempts: usize,
         crash_window: Option<CrashWindow>,
         crash_injected: bool,
+        /// Simulates another mapped append winning generation one's CAS.
+        inject_mapped_head_on_base_cas: bool,
+        /// Simulates a provider response lost after a successful successor CAS.
+        provider_error_after_success_on_successor: bool,
     }
     #[derive(Default)]
     struct ConcurrentIntegrationGate {
@@ -1845,12 +1871,25 @@ mod tests {
         async fn update_expected_old(&self, _: &str, old: &str, new: &str) -> Result<RemoteUpdate> {
             let first = old == "base";
             let crash_after_remote;
+            let provider_error_after_remote;
             {
                 let mut s = self.state.lock().map_err(|_| anyhow!("poison"))?;
                 s.updates.push((old.into(), new.into()));
                 if s.crash_window == Some(CrashWindow::BeforeRemoteMutation) && !s.crash_injected {
                     s.crash_injected = true;
                     return Err(anyhow!("injected crash before remote mutation"));
+                }
+                if first && s.inject_mapped_head_on_base_cas {
+                    s.inject_mapped_head_on_base_cas = false;
+                    s.parents.insert("mapped".into(), "base".into());
+                    s.head = "mapped".into();
+                    // The competing mapped append is already durably
+                    // reconciled before this task builds its successor.
+                    s.durable_head = "mapped".into();
+                    s.attempt_branch_head_sha = "mapped".into();
+                    return Ok(RemoteUpdate::Stale {
+                        observed_sha: Some("mapped".into()),
+                    });
                 }
                 if s.head != old {
                     return Ok(RemoteUpdate::Stale {
@@ -1866,10 +1905,19 @@ mod tests {
                 if crash_after_remote {
                     s.crash_injected = true;
                 }
+                provider_error_after_remote = !first && s.provider_error_after_success_on_successor;
+                if provider_error_after_remote {
+                    s.provider_error_after_success_on_successor = false;
+                }
             }
             if crash_after_remote {
                 return Err(anyhow!(
                     "injected crash after remote mutation before SQL acknowledgment"
+                ));
+            }
+            if provider_error_after_remote {
+                return Err(anyhow!(
+                    "injected provider error after successful remote mutation"
                 ));
             }
             if first {
@@ -2115,63 +2163,17 @@ mod tests {
 
     #[tokio::test]
     async fn mapped_head_generation_two_provider_error_replays_without_duplicate_push() {
-        // Generation one was superseded by a mapped head. Generation two's
-        // expected-old update reached the provider but its response was lost,
-        // leaving the durable Applying row as the only replay authority.
-        let replay_source = DeliverySource {
-            task_id: "task".into(),
-            delivery_generation: 2,
-            transition_id: "transition-1:mapped-head:2".into(),
-            source_sha: "original-source".into(),
-            normalized_patch: "original-patch".into(),
-        };
-        let candidate = Candidate {
-            candidate_sha: "candidate-task-g2-on-mapped".into(),
-            patch_digest: "original-digest".into(),
-            selected_parent_sha: "mapped".into(),
-        };
-        let mut state = ConcurrentState {
-            head: candidate.candidate_sha.clone(),
-            durable_head: "mapped".into(),
-            attempt_branch_head_sha: "mapped".into(),
+        // Execute both delivery passes. The first expected-old update loses to
+        // a mapped head, durably supersedes generation one, and then publishes
+        // generation two while its provider response is lost.
+        let state = Arc::new(Mutex::new(ConcurrentState {
+            head: "base".into(),
+            durable_head: "base".into(),
+            attempt_branch_head_sha: "base".into(),
+            inject_mapped_head_on_base_cas: true,
+            provider_error_after_success_on_successor: true,
             ..Default::default()
-        };
-        state
-            .parents
-            .insert(candidate.candidate_sha.clone(), "mapped".into());
-        state.generations.insert(
-            ("task".into(), 2),
-            ConcurrentGeneration {
-                identity: TaskDeliveryIdentity::new("attempt", "task", 2).unwrap(),
-                source: replay_source.clone(),
-                candidate: candidate.clone(),
-                state: ConcurrentGenerationState::Applying,
-                superseded_by: None,
-                supersede_transition: None,
-                applying_transition: Some(replay_source.transition_id.clone()),
-            },
-        );
-        state.generations.insert(
-            ("task".into(), 1),
-            ConcurrentGeneration {
-                identity: TaskDeliveryIdentity::new("attempt", "task", 1).unwrap(),
-                source: DeliverySource {
-                    transition_id: "transition-1".into(),
-                    delivery_generation: 1,
-                    ..replay_source.clone()
-                },
-                candidate: Candidate {
-                    candidate_sha: "candidate-task-g1-on-base".into(),
-                    patch_digest: "original-digest".into(),
-                    selected_parent_sha: "base".into(),
-                },
-                state: ConcurrentGenerationState::Superseded,
-                superseded_by: Some(2),
-                supersede_transition: Some(replay_source.transition_id.clone()),
-                applying_transition: Some("transition-1".into()),
-            },
-        );
-        let state = Arc::new(Mutex::new(state));
+        }));
         let engine = DirectDeliveryEngine::new(
             ConcurrentLedger {
                 state: state.clone(),
@@ -2185,19 +2187,74 @@ mod tests {
             CrashBuilder,
         );
 
+        assert!(engine.deliver(source(1)).await.is_err());
+        let retained_successor = {
+            let state = state.lock().unwrap();
+            let first = &state.generations[&("task".into(), 1)];
+            let successor = &state.generations[&("task".into(), 2)];
+            assert_eq!(first.state, ConcurrentGenerationState::Superseded);
+            assert_eq!(first.superseded_by, Some(2));
+            assert_eq!(
+                first.supersede_transition.as_deref(),
+                Some("transition-1:mapped-head:2")
+            );
+            assert_eq!(first.applying_transition.as_deref(), Some("transition-1"));
+            assert_eq!(successor.state, ConcurrentGenerationState::Applying);
+            assert_eq!(
+                successor.applying_transition.as_deref(),
+                Some("transition-1:mapped-head:2")
+            );
+            assert_eq!(successor.candidate.selected_parent_sha, "mapped");
+            assert_eq!(state.head, successor.candidate.candidate_sha);
+            assert_eq!(state.updates.len(), 2);
+            assert_eq!(
+                state.published_commits,
+                [successor.candidate.candidate_sha.clone()]
+            );
+            TaskDelivery {
+                identity: successor.identity.clone(),
+                state: djinn_core::models::TaskDeliveryState::Applying,
+                candidate_sha: successor.candidate.candidate_sha.clone(),
+                source_sha: successor.source.source_sha.clone(),
+                patch_digest: successor.candidate.patch_digest.clone(),
+                selected_parent_sha: successor.candidate.selected_parent_sha.clone(),
+                prepare_transition_id: successor.source.transition_id.clone(),
+                base_sha: successor.candidate.selected_parent_sha.clone(),
+                applied_at: None,
+                conflict_reason: None,
+                supersede_transition_id: None,
+                created_at: "now".into(),
+            }
+        };
+        // This is the production adapter's durable lookup: its current
+        // checkout is deliberately ignored in favor of generation two's
+        // immutable transition/source identity.
+        let replay_source = resume_delivery_source(
+            "task",
+            "newer-checkout-source".into(),
+            "newer-checkout-patch".into(),
+            Some(&retained_successor),
+        );
+        assert_eq!(replay_source.delivery_generation, 2);
+        assert_eq!(replay_source.transition_id, "transition-1:mapped-head:2");
         assert_eq!(
             engine.deliver(replay_source).await.unwrap(),
             DeliveryOutcome::Integrated {
-                candidate_sha: candidate.candidate_sha.clone()
+                candidate_sha: retained_successor.candidate_sha.clone()
             }
         );
         let state = state.lock().unwrap();
-        assert!(state.updates.is_empty(), "exact replay must not push again");
-        assert_eq!(state.head, candidate.candidate_sha);
-        assert_eq!(state.durable_head, candidate.candidate_sha);
+        assert_eq!(state.updates.len(), 2, "exact replay must not push again");
+        assert_eq!(state.head, retained_successor.candidate_sha);
+        assert_eq!(state.durable_head, retained_successor.candidate_sha);
         assert_eq!(
             state.generations[&("task".into(), 2)].state,
             ConcurrentGenerationState::Applied
+        );
+        assert_eq!(state.task_status["task"], "closed");
+        assert_eq!(
+            state.task_merge_commit_sha["task"],
+            retained_successor.candidate_sha
         );
         assert_eq!(state.closure_calls["task"], 1);
     }
