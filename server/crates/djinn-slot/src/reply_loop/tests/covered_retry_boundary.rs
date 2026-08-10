@@ -8,7 +8,8 @@ use crate::reply_loop::turn::{
 use djinn_db::test_support::{
     model_turn_accounting_fixture, model_turn_decision_count_fixture,
     model_turn_launch_identities_fixture, model_turn_terminal_fixture,
-    seed_model_turn_admission_fixture,
+    seed_model_turn_admission_fixture, set_model_turn_capability_fixture,
+    set_model_turn_phase_fixture,
 };
 use djinn_db::{Database, ModelTurnBucketDebit, ModelTurnBucketKind};
 use djinn_provider::provider::client::{ProviderAttemptContextV1, ProviderSseAttemptV1, SseFrame};
@@ -685,4 +686,243 @@ async fn watchdog_aborted_b1_terminal_does_not_replace_in_real_reply_loop() {
             .count(),
         1
     );
+}
+
+#[derive(Clone, Copy)]
+enum ReplacementPreparationCase {
+    Wait,
+    Rejected,
+    DispatchFenced,
+}
+
+async fn typed_replacement_preparation_outcome(case: ReplacementPreparationCase) {
+    // Database setup deliberately completes under real Tokio time.
+    let db = Database::ephemeral().await.expect("database");
+    let pool = seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+    let session_cancel = CancellationToken::new();
+    let supervisor_cancel = CancellationToken::new();
+    let slot_ctx = crate::test_helpers::agent_context_from_db(db.clone(), session_cancel.clone());
+    let provider = ScriptedCoveredB1Provider::with_first_terminal_and_deadline(
+        ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Transport),
+        Some(0),
+    );
+    let session_id = format!("covered-retry-preparation-{}", uuid::Uuid::now_v7());
+    let hooks = Arc::new(ModelTurnAdmissionTestHooks::default());
+    hooks
+        .block_covered_retry_wait
+        .store(true, Ordering::Release);
+    if matches!(case, ReplacementPreparationCase::DispatchFenced) {
+        hooks
+            .block_dispatching_at_prepare
+            .store(2, Ordering::Release);
+    }
+    let _hooks = register_reply_loop_admission_test_hooks(session_id.clone(), Arc::clone(&hooks));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let settled = Arc::new(tokio::sync::Notify::new());
+    let waited = Arc::new(tokio::sync::Notify::new());
+    let observed = Arc::clone(&events);
+    let settled_observer = Arc::clone(&settled);
+    let waited_observer = Arc::clone(&waited);
+    let _observer = register_reply_loop_boundary_observer(
+        session_id.clone(),
+        Arc::new(move |event| {
+            observed.lock().expect("observer").push(event.name);
+            if event.name == "covered_attempt_settled" {
+                settled_observer.notify_waiters();
+            }
+            if event.name == "covered_retry_wait" {
+                waited_observer.notify_waiters();
+            }
+        }),
+    );
+    let settled = settled.notified();
+    let waited = waited.notified();
+    let retry_wait_reached = hooks.covered_retry_wait_reached.notified();
+    tokio::pin!(settled, waited, retry_wait_reached);
+    let mut conversation = Conversation::new();
+    conversation.push(Message::user("exercise typed replacement preparation"));
+    let compaction_cs = crate::reply_loop::CompactionCriticalSection::new();
+    let run = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            credential_record_id: "credential-slot",
+            tools: &[],
+            task_id: "covered-retry-preparation",
+            task_short_id: "covered-retry-preparation",
+            session_id: &session_id,
+            project_path: "/workspace",
+            worktree_path: std::path::Path::new("/workspace"),
+            role_name: "worker",
+            finalize_tool_names: &[],
+            context_window: 10_000,
+            model_id: "model",
+            cancel: &session_cancel,
+            global_cancel: &supervisor_cancel,
+            ctx: &slot_ctx,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: Some(2),
+            compaction_cs: &compaction_cs,
+            session_budget: None,
+        },
+        &mut conversation,
+        false,
+    );
+    tokio::pin!(run);
+    tokio::select! { _ = &mut settled => {}, result = &mut run => panic!("old attempt did not settle: {:?}", result.0) }
+    tokio::select! { _ = &mut waited => {}, result = &mut run => panic!("retry wait missing: {:?}", result.0) }
+    tokio::select! { _ = &mut retry_wait_reached => {}, result = &mut run => panic!("retry wait synchronization missing: {:?}", result.0) }
+    let old_request = format!("{session_id}:covered:1");
+    let old = model_turn_launch_identities_fixture(&db)
+        .await
+        .into_iter()
+        .find(|(_, _, request)| request == &old_request)
+        .expect("settled old lease");
+    assert_eq!(
+        model_turn_terminal_fixture(&db, &old.0, old.1, &old.2)
+            .await
+            .0,
+        "failed"
+    );
+
+    match case {
+        ReplacementPreparationCase::Wait => {
+            set_model_turn_phase_fixture(&db, pool, "draining").await
+        }
+        ReplacementPreparationCase::Rejected => {
+            set_model_turn_capability_fixture(&db, pool, "unsupported").await;
+        }
+        ReplacementPreparationCase::DispatchFenced => {}
+    }
+    // Register before releasing the run-scoped retry boundary so the
+    // dispatching hook cannot notify between replacement acquire and await.
+    let reached = hooks.dispatching_reached.notified();
+    tokio::pin!(reached);
+    // The initial terminal is settled and the production retry boundary is
+    // blocked above. Allow its elapsed retry timer and the real repository
+    // preparation to proceed under real Tokio time rather than advancing SQLx
+    // pool timeouts with a virtual retry clock.
+    hooks.covered_retry_wait_release.notify_one();
+    if matches!(case, ReplacementPreparationCase::DispatchFenced) {
+        tokio::select! { _ = &mut reached => {}, result = &mut run => panic!("replacement did not acquire before fence: {:?}", result.0) }
+        let replacement = hooks.acquired_identities.lock().expect("identities")[1].clone();
+        assert_eq!(
+            djinn_db::ModelTurnAdmissionRepository::new(db.clone())
+                .cancel_before_send(replacement.clone())
+                .await
+                .expect("cancel replacement"),
+            djinn_db::ModelTurnLeaseMutationOutcome::Applied
+        );
+        hooks.dispatching_release.notify_waiters();
+    }
+    let (result, ..) = run.await;
+    let error = result.expect_err("typed preparation must terminate replacement scheduling");
+    let outcome = error
+        .downcast_ref::<crate::reply_loop::turn::ModelTurnAdmissionOutcome>()
+        .expect("reply loop must preserve the concrete admission outcome");
+    match (case, outcome) {
+        (
+            ReplacementPreparationCase::Wait,
+            crate::reply_loop::turn::ModelTurnAdmissionOutcome::Wait(
+                djinn_db::ModelTurnAdmissionWait::Draining,
+            ),
+        ) => {}
+        (
+            ReplacementPreparationCase::Rejected,
+            crate::reply_loop::turn::ModelTurnAdmissionOutcome::Rejected(
+                djinn_db::ModelTurnAdmissionRejection::UnsupportedCapability {
+                    state: djinn_db::ModelTurnCapabilityState::Unsupported,
+                },
+            ),
+        ) => {}
+        (
+            ReplacementPreparationCase::DispatchFenced,
+            crate::reply_loop::turn::ModelTurnAdmissionOutcome::DispatchFenced(
+                djinn_db::ModelTurnLeaseMutationOutcome::Fenced,
+            ),
+        ) => {}
+        (_, other) => panic!("wrong concrete replacement outcome: {other:?}"),
+    }
+    assert_eq!(
+        provider.launches.load(Ordering::SeqCst),
+        1,
+        "typed preparation must not send a replacement"
+    );
+    assert_eq!(
+        provider.plans.load(Ordering::SeqCst),
+        2,
+        "the production loop must plan and prepare exactly once more"
+    );
+    assert_eq!(model_turn_decision_count_fixture(&db, pool).await, 0);
+    assert_eq!(
+        model_turn_accounting_fixture(&db, pool).await.0,
+        0,
+        "no active accounting survives cleanup"
+    );
+    let leases = model_turn_launch_identities_fixture(&db).await;
+    assert_eq!(
+        model_turn_terminal_fixture(&db, &old.0, old.1, &old.2)
+            .await
+            .0,
+        "failed"
+    );
+    if matches!(case, ReplacementPreparationCase::DispatchFenced) {
+        assert_eq!(
+            leases.len(),
+            2,
+            "the fenced replacement is terminal, never launched"
+        );
+        assert_eq!(
+            model_turn_terminal_fixture(&db, &leases[1].0, leases[1].1, &leases[1].2)
+                .await
+                .0,
+            "cancelled"
+        );
+    } else {
+        assert_eq!(leases.len(), 1, "wait/rejection must not prepare a lease");
+    }
+    let events = events.lock().expect("observer");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| **event == "covered_attempt_settled")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| **event == "covered_retry_wait")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| **event == "model_turn_prepare")
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| **event == "model_turn_launch")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn covered_retry_replacement_prepare_returns_typed_wait_without_send() {
+    typed_replacement_preparation_outcome(ReplacementPreparationCase::Wait).await;
+}
+
+#[tokio::test]
+async fn covered_retry_replacement_prepare_returns_typed_rejection_without_send() {
+    typed_replacement_preparation_outcome(ReplacementPreparationCase::Rejected).await;
+}
+
+#[tokio::test]
+async fn covered_retry_replacement_prepare_returns_typed_fence_without_send() {
+    typed_replacement_preparation_outcome(ReplacementPreparationCase::DispatchFenced).await;
 }

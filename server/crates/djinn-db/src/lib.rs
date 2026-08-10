@@ -77,7 +77,7 @@ pub mod test_support {
         seed_model_turn_admission_fixture, seed_project, seed_readiness_detail_projection_for_test,
         seed_session_row, seed_session_row_with_id, seed_stale_typed_evidence_disposition_for_test,
         seed_task_row, seed_workspace_coverage_for_test, set_model_turn_capability_fixture,
-        set_proposal_author_for_test, set_task_short_id_for_test,
+        set_model_turn_phase_fixture, set_proposal_author_for_test, set_task_short_id_for_test,
         set_typed_evidence_disposition_lifecycle_for_test,
         structured_evidence_handoff_counts_for_test, switch_to_adversary_authority_for_test,
         switch_to_advocate_authority_for_test, switch_to_judge_authority_for_test,
