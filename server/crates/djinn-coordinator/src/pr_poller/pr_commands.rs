@@ -951,6 +951,9 @@ pub(crate) async fn enable_auto_merge_best_effort(
     pr_title: &str,
     method: MergeMethod,
 ) {
+    // This is a legacy task-PR effect; direct delivery must not enable
+    // auto-merge as part of completion.
+    crate::direct_delivery::observe_boundary_operation("task_pr_auto_merge");
     match gh_client
         .enable_auto_merge(
             "", // owner unused by GraphQL mutation
