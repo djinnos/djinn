@@ -38,6 +38,12 @@ pub(crate) enum BoundaryOperation {
     DirectAppend,
     SimpleClose,
     SupervisorPrOpen,
+    TaskPrCreate,
+    TaskPrMerge,
+    TaskPrAutoMerge,
+    TaskPrApproval,
+    TaskPrSignoff,
+    TaskPrCustomEnqueue,
 }
 
 #[cfg(test)]
@@ -65,6 +71,12 @@ pub(crate) fn observe_boundary_operation(operation: &'static str) {
             "direct_append" => BoundaryOperation::DirectAppend,
             "simple_close" => BoundaryOperation::SimpleClose,
             "supervisor_pr_open" => BoundaryOperation::SupervisorPrOpen,
+            "task_pr_create" => BoundaryOperation::TaskPrCreate,
+            "task_pr_merge" => BoundaryOperation::TaskPrMerge,
+            "task_pr_auto_merge" => BoundaryOperation::TaskPrAutoMerge,
+            "task_pr_approval" => BoundaryOperation::TaskPrApproval,
+            "task_pr_signoff" => BoundaryOperation::TaskPrSignoff,
+            "task_pr_custom_enqueue" => BoundaryOperation::TaskPrCustomEnqueue,
             _ => return,
         };
         BOUNDARY_OPERATIONS.lock().unwrap().push(operation);
@@ -708,7 +720,6 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
         if !self.ledger.direct_delivery_enabled().await? {
             return Ok(DeliveryOutcome::Disabled);
         }
-        observe_boundary_operation("direct_append");
         let attempt = self.ledger.resolve_active_attempt(&source.task_id).await?;
         let identity = TaskDeliveryIdentity::new(
             &attempt.build_attempt_id,
@@ -808,6 +819,9 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
         }
         let mut observed_mapped_heads = HashSet::new();
         loop {
+            // This is the real ref mutation; route selection and failed
+            // resolution must not be reported as an append.
+            observe_boundary_operation("direct_append");
             match self
                 .remote
                 .update_expected_old(&attempt.branch_name, &parent, &candidate.candidate_sha)
@@ -1300,7 +1314,9 @@ mod tests {
     }
     #[tokio::test]
     async fn explicit_legacy_completion_preserves_existing_persisted_pr_identity() {
-        use crate::dispatch::wave_dispatch::run_legacy_completion_preserving_pr_identity;
+        use crate::dispatch::wave_dispatch::{
+            route_approved_completion, run_legacy_completion_preserving_pr_identity,
+        };
         use djinn_core::events::EventBus;
         use djinn_db::{EpicRepository, TaskRepository};
 
@@ -1335,16 +1351,39 @@ mod tests {
         assert_eq!(admission, DirectDeliveryAdmission::Legacy);
 
         let external_pr_seen = Arc::new(Mutex::new(None));
+        let direct_append_calls = Arc::new(Mutex::new(0usize));
         let external_pr_for_completion = external_pr_seen.clone();
-        let outcome = run_legacy_completion_preserving_pr_identity(&db, &task, || async move {
-            *external_pr_for_completion.lock().unwrap() = Some(existing_pr.to_owned());
-            djinn_runtime::TaskRunOutcome::PrOpened {
-                url: existing_pr.to_owned(),
-                sha: "legacy-head".to_owned(),
-            }
-        })
-        .await
-        .unwrap();
+        let task_for_completion = task.clone();
+        let direct_append_for_completion = direct_append_calls.clone();
+        // The exact value returned by the real admission service is consumed by
+        // the production completion seam. The direct collaborator is a panic-free
+        // counter only so mutually exclusive closures can share observation state.
+        let outcome = route_approved_completion(
+            admission,
+            || async move {
+                *direct_append_for_completion.lock().unwrap() += 1;
+                djinn_runtime::TaskRunOutcome::Failed {
+                    stage: "unexpected-direct-append".to_owned(),
+                    provider_failure: None,
+                    reason: "explicit legacy admission selected direct append".to_owned(),
+                    error_class: None,
+                    hint: None,
+                    body_excerpt: None,
+                }
+            },
+            || async move {
+                run_legacy_completion_preserving_pr_identity(&db, &task_for_completion, || async move {
+                    *external_pr_for_completion.lock().unwrap() = Some(existing_pr.to_owned());
+                    djinn_runtime::TaskRunOutcome::PrOpened {
+                        url: existing_pr.to_owned(),
+                        sha: "legacy-head".to_owned(),
+                    }
+                })
+                .await
+                .unwrap()
+            },
+        )
+        .await;
 
         assert_eq!(
             take_boundary_operations(),
@@ -1354,6 +1393,7 @@ mod tests {
             ],
             "only the real legacy completion collaborator may run for an explicit legacy identity"
         );
+        assert_eq!(*direct_append_calls.lock().unwrap(), 0);
         assert!(matches!(
             outcome,
             djinn_runtime::TaskRunOutcome::PrOpened { .. }
