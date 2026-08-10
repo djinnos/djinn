@@ -883,6 +883,9 @@ impl CoordinatorActor {
     ) -> std::result::Result<serde_json::Value, anyhow::Error> {
         let mut last_not_allowed: Option<anyhow::Error> = None;
         for (idx, method) in methods.iter().enumerate() {
+            // Keep the direct-delivery recorder at the real legacy task-PR
+            // mutation: direct completion must never reach this collaborator.
+            crate::direct_delivery::observe_boundary_operation("task_pr_merge");
             match gh_client
                 .merge_pull_request(owner, repo, pull_number, *method, commit_title)
                 .await

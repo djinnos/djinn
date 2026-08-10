@@ -166,6 +166,34 @@ pub async fn admit_direct_delivery(db: Database, task_id: &str) -> Result<Direct
     }
 }
 
+/// Production ready-task boundary. It consumes the shared admission result
+/// before durably parking unresolved active ownership.
+pub(crate) async fn admit_ready_direct_delivery(
+    db: Database,
+    tasks: &TaskRepository,
+    task_id: &str,
+) -> Result<DirectDeliveryAdmission> {
+    let admission = admit_direct_delivery(db, task_id).await?;
+    if admission == DirectDeliveryAdmission::NoProposalOwner {
+        park_no_proposal_owner(tasks, task_id).await?;
+    }
+    Ok(admission)
+}
+
+/// Production approved-task boundary. Completion cannot bypass the same
+/// capability and canonical-ownership decision used by ready admission.
+pub(crate) async fn admit_approved_direct_delivery(
+    db: Database,
+    tasks: &TaskRepository,
+    task_id: &str,
+) -> Result<DirectDeliveryAdmission> {
+    let admission = admit_direct_delivery(db, task_id).await?;
+    if admission == DirectDeliveryAdmission::NoProposalOwner {
+        park_no_proposal_owner(tasks, task_id).await?;
+    }
+    Ok(admission)
+}
+
 /// Legacy identities are an explicit routing boundary: admission may inspect a
 /// task PR, but direct delivery must never replace or otherwise mutate it.
 fn has_explicit_legacy_delivery(pr_url: Option<&str>, labels: &[String]) -> bool {
@@ -819,9 +847,6 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
         }
         let mut observed_mapped_heads = HashSet::new();
         loop {
-            // This is the real ref mutation; route selection and failed
-            // resolution must not be reported as an append.
-            observe_boundary_operation("direct_append");
             match self
                 .remote
                 .update_expected_old(&attempt.branch_name, &parent, &candidate.candidate_sha)
@@ -2458,5 +2483,254 @@ mod tests {
             retained_successor.candidate_sha
         );
         assert_eq!(state.closure_calls["task"], 1);
+    }
+    /// Repository-backed cross-product for both production admission boundaries.
+    #[tokio::test]
+    async fn production_ready_and_completion_admission_matrix_is_fail_closed() {
+        use crate::dispatch::wave_dispatch::{
+            route_approved_completion, run_direct_completion,
+            run_legacy_completion_preserving_pr_identity,
+        };
+        use djinn_core::events::EventBus;
+        use djinn_core::models::ProposalBuildAttemptLifecycle;
+        use djinn_db::{
+            ActivateProposalBuildAttemptInput, EpicRepository, ProposalBuildAttemptRepository,
+            ReserveProposalBuildAttemptInput, TaskRepository,
+        };
+
+        async fn snapshot(
+            db: &Database,
+            tasks: &TaskRepository,
+            task_id: &str,
+        ) -> (
+            String,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+            Option<i64>,
+            Option<i64>,
+        ) {
+            let task = tasks.get(task_id).await.unwrap().unwrap();
+            let activities = djinn_db::test_support::activity_row_count_for_test(db, task_id).await;
+            let attempts = djinn_db::test_support::task_attempt_count_for_test(db, task_id).await;
+            let direct_delivery_counts =
+                djinn_db::test_support::direct_delivery_matrix_counts_for_test(db).await;
+            (
+                task.status,
+                task.pr_url,
+                task.merge_commit_sha,
+                activities,
+                attempts,
+                direct_delivery_counts.build_attempts,
+                direct_delivery_counts.deliveries,
+            )
+        }
+
+        #[derive(Clone, Copy)]
+        enum State {
+            Disabled,
+            ExplicitLegacy,
+            Direct,
+            Unresolved,
+            MissingSchema,
+            MissingEpoch,
+            UnknownEpoch,
+        }
+        for state in [
+            State::Disabled,
+            State::ExplicitLegacy,
+            State::Direct,
+            State::Unresolved,
+            State::MissingSchema,
+            State::MissingEpoch,
+            State::UnknownEpoch,
+        ] {
+            for completion in [false, true] {
+                let db = Database::open_in_memory().unwrap();
+                let events = EventBus::noop();
+                let epic = EpicRepository::new(db.clone(), events.clone())
+                    .create("matrix", "", "", "", "", None)
+                    .await
+                    .unwrap();
+                let tasks = TaskRepository::new(db.clone(), events);
+                let task = tasks
+                    .create(
+                        &epic.id,
+                        "matrix task",
+                        "",
+                        "",
+                        "task",
+                        0,
+                        "worker",
+                        Some(if completion { "approved" } else { "open" }),
+                    )
+                    .await
+                    .unwrap();
+                if matches!(state, State::ExplicitLegacy) {
+                    tasks
+                        .set_pr_url(&task.id, "https://example.test/pr/unchanged")
+                        .await
+                        .unwrap();
+                }
+                if matches!(
+                    state,
+                    State::Direct | State::Unresolved | State::ExplicitLegacy
+                ) {
+                    djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
+                }
+                if matches!(state, State::Direct) {
+                    djinn_db::test_support::seed_direct_delivery_proposal_owner_for_test(
+                        &db, &epic.id, "p", "p",
+                    )
+                    .await;
+                    let attempts = ProposalBuildAttemptRepository::new(db.clone());
+                    attempts
+                        .reserve(&ReserveProposalBuildAttemptInput {
+                            proposal_id: "p".into(),
+                            proposal_short_id: "p".into(),
+                            build_attempt_id: "a".into(),
+                            build_attempt_short_id: "a".into(),
+                            observed_base_sha: "base".into(),
+                        })
+                        .await
+                        .unwrap();
+                    attempts
+                        .activate(&ActivateProposalBuildAttemptInput {
+                            build_attempt_id: "a".into(),
+                            expected_lifecycle: ProposalBuildAttemptLifecycle::Reserved,
+                            expected_branch_head_sha: None,
+                            branch_head_sha: "base".into(),
+                        })
+                        .await
+                        .unwrap();
+                }
+                match state {
+                    State::MissingSchema => {
+                        djinn_db::test_support::drop_table_cascade_for_test(&db, "task_deliveries")
+                            .await
+                    }
+                    State::MissingEpoch => {
+                        djinn_db::test_support::remove_direct_delivery_epoch_for_test(&db).await;
+                    }
+                    State::UnknownEpoch => {
+                        djinn_db::test_support::seed_unknown_direct_delivery_epoch_for_test(&db)
+                            .await;
+                    }
+                    _ => {}
+                }
+                let before = snapshot(&db, &tasks, &task.id).await;
+                clear_boundary_operations();
+                let admission = if completion {
+                    admit_approved_direct_delivery(db.clone(), &tasks, &task.id).await
+                } else {
+                    admit_ready_direct_delivery(db.clone(), &tasks, &task.id).await
+                };
+                let failed = matches!(
+                    state,
+                    State::MissingSchema | State::MissingEpoch | State::UnknownEpoch
+                );
+                assert_eq!(admission.is_err(), failed);
+                match (&admission, state) {
+                    (
+                        Ok(DirectDeliveryAdmission::Legacy),
+                        State::Disabled | State::ExplicitLegacy,
+                    ) => {}
+                    (Ok(DirectDeliveryAdmission::Direct { .. }), State::Direct) => {}
+                    (Ok(DirectDeliveryAdmission::NoProposalOwner), State::Unresolved) => {}
+                    (Err(_), State::MissingSchema | State::MissingEpoch | State::UnknownEpoch) => {}
+                    _ => panic!("matrix state selected the wrong admission route"),
+                }
+                let external_pr_seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+                if let Ok(admission) = admission
+                    && completion
+                    && !matches!(admission, DirectDeliveryAdmission::NoProposalOwner)
+                {
+                    let completion_task = tasks.get(&task.id).await.unwrap().unwrap();
+                    let legacy_pr = completion_task
+                        .pr_url
+                        .clone()
+                        .unwrap_or_else(|| "https://example.test/pr/legacy".to_owned());
+                    let db_for_legacy = db.clone();
+                    let external_pr_for_legacy = external_pr_seen.clone();
+                    let task_for_legacy = completion_task.clone();
+                    route_approved_completion(
+                        admission,
+                        || async { run_direct_completion(|| async {}).await },
+                        || async move {
+                            run_legacy_completion_preserving_pr_identity(
+                                &db_for_legacy,
+                                &task_for_legacy,
+                                || async move {
+                                    *external_pr_for_legacy.lock().unwrap() =
+                                        Some(legacy_pr.clone());
+                                    djinn_runtime::TaskRunOutcome::PrOpened {
+                                        url: legacy_pr,
+                                        sha: "legacy-head".to_owned(),
+                                    }
+                                },
+                            )
+                            .await
+                            .unwrap();
+                        },
+                    )
+                    .await;
+                }
+                let after = snapshot(&db, &tasks, &task.id).await;
+                if failed {
+                    assert_eq!(
+                        after, before,
+                        "capability failure must not mutate task, activity, attempt, build-attempt, or ledger state"
+                    );
+                }
+                if matches!(state, State::Unresolved) {
+                    assert_eq!(after.0, "needs_lead_intervention");
+                }
+                if matches!(state, State::ExplicitLegacy) {
+                    assert_eq!(
+                        after.1.as_deref(),
+                        Some("https://example.test/pr/unchanged")
+                    );
+                    if completion {
+                        assert_eq!(
+                            external_pr_seen.lock().unwrap().as_deref(),
+                            Some("https://example.test/pr/unchanged"),
+                            "persisted and externally observed explicit legacy PR identities must match"
+                        );
+                    }
+                }
+                let expected_ops = match (state, completion) {
+                    (State::Disabled | State::ExplicitLegacy, false) => {
+                        vec![BoundaryOperation::CapabilityProbe]
+                    }
+                    (State::Disabled | State::ExplicitLegacy, true) => vec![
+                        BoundaryOperation::CapabilityProbe,
+                        BoundaryOperation::SupervisorPrOpen,
+                    ],
+                    (State::Direct, false) => vec![
+                        BoundaryOperation::CapabilityProbe,
+                        BoundaryOperation::ResolveTaskActiveAttempt,
+                    ],
+                    (State::Direct, true) => vec![
+                        BoundaryOperation::CapabilityProbe,
+                        BoundaryOperation::ResolveTaskActiveAttempt,
+                        BoundaryOperation::DirectAppend,
+                    ],
+                    (State::Unresolved, _) => vec![
+                        BoundaryOperation::CapabilityProbe,
+                        BoundaryOperation::ResolveTaskActiveAttempt,
+                        BoundaryOperation::NoProposalOwnerPark,
+                    ],
+                    (State::MissingSchema | State::MissingEpoch | State::UnknownEpoch, _) => {
+                        vec![BoundaryOperation::CapabilityProbe]
+                    }
+                };
+                assert_eq!(
+                    take_boundary_operations(),
+                    expected_ops,
+                    "every matrix cell must assert the complete ordered production effect vector"
+                );
+            }
+        }
     }
 }
