@@ -1372,13 +1372,17 @@ mod tests {
                 }
             },
             || async move {
-                run_legacy_completion_preserving_pr_identity(&db, &task_for_completion, || async move {
-                    *external_pr_for_completion.lock().unwrap() = Some(existing_pr.to_owned());
-                    djinn_runtime::TaskRunOutcome::PrOpened {
-                        url: existing_pr.to_owned(),
-                        sha: "legacy-head".to_owned(),
-                    }
-                })
+                run_legacy_completion_preserving_pr_identity(
+                    &db,
+                    &task_for_completion,
+                    || async move {
+                        *external_pr_for_completion.lock().unwrap() = Some(existing_pr.to_owned());
+                        djinn_runtime::TaskRunOutcome::PrOpened {
+                            url: existing_pr.to_owned(),
+                            sha: "legacy-head".to_owned(),
+                        }
+                    },
+                )
                 .await
                 .unwrap()
             },

@@ -285,20 +285,24 @@ impl CoordinatorActor {
                     admission.clone(),
                     || async {
                         crate::direct_delivery::deliver_task_branch(
-                    self.db.clone(),
-                    crate::events::event_bus_for(&self.events_tx),
-                    mirror,
-                    &task.id,
-                    &task.project_id,
-                    &task_branch,
-                    &base_branch,
-                    owner,
-                    repo_name,
-                    djinn_provider::github_api::GitHubApiClient::for_installation(installation_id),
+                            self.db.clone(),
+                            crate::events::event_bus_for(&self.events_tx),
+                            mirror,
+                            &task.id,
+                            &task.project_id,
+                            &task_branch,
+                            &base_branch,
+                            owner,
+                            repo_name,
+                            djinn_provider::github_api::GitHubApiClient::for_installation(
+                                installation_id,
+                            ),
                         )
                         .await
                     },
-                    || async { unreachable!("legacy completion cannot run after direct admission") },
+                    || async {
+                        unreachable!("legacy completion cannot run after direct admission")
+                    },
                 )
                 .await
                 {
@@ -397,11 +401,9 @@ impl CoordinatorActor {
                 admission,
                 || async { unreachable!("direct append cannot run after legacy admission") },
                 || async {
-                    run_legacy_completion_preserving_pr_identity(
-                        &self.db,
-                        &task,
-                        || crate::supervisor_impl::supervisor_pr_open(&spec, &task, &callbacks),
-                    )
+                    run_legacy_completion_preserving_pr_identity(&self.db, &task, || {
+                        crate::supervisor_impl::supervisor_pr_open(&spec, &task, &callbacks)
+                    })
                     .await
                 },
             )
