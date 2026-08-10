@@ -7,6 +7,68 @@ use djinn_core::models::TransitionAction;
 use djinn_core::models::task::IssueType;
 use djinn_core::models::task_attempt::TaskAttemptOutcome;
 
+/// Run the production legacy task-PR collaborator while enforcing the
+/// explicitly persisted PR identity. Tests inject a deterministic collaborator;
+/// production supplies `supervisor_pr_open` below.
+pub(crate) async fn run_legacy_completion_preserving_pr_identity<F, Fut>(
+    db: &djinn_db::Database,
+    task: &djinn_core::models::Task,
+    completion: F,
+) -> anyhow::Result<djinn_runtime::TaskRunOutcome>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = djinn_runtime::TaskRunOutcome>,
+{
+    let expected_pr_url = task.pr_url.clone();
+    let outcome = completion().await;
+    if let (Some(expected), djinn_runtime::TaskRunOutcome::PrOpened { url, .. }) =
+        (expected_pr_url.as_deref(), &outcome)
+        && url != expected
+    {
+        anyhow::bail!(
+            "legacy completion changed explicit PR identity for task {}: expected {}, observed {}",
+            task.id,
+            expected,
+            url
+        );
+    }
+    if expected_pr_url.is_some() {
+        let persisted =
+            djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+                .get(&task.id)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("task {} disappeared during legacy completion", task.id)
+                })?;
+        if persisted.pr_url != expected_pr_url {
+            anyhow::bail!(
+                "legacy completion mutated persisted PR identity for task {}: expected {:?}, observed {:?}",
+                task.id,
+                expected_pr_url,
+                persisted.pr_url
+            );
+        }
+    }
+    Ok(outcome)
+}
+
+/// Select the approved-task writer at the completion boundary. Keeping the
+/// collaborators explicit gives production and tests one fail-closed routing
+/// seam between direct append and legacy task-PR completion.
+pub(crate) fn route_approved_completion<T>(
+    admission: crate::direct_delivery::DirectDeliveryAdmission,
+    direct_delivery: impl FnOnce() -> T,
+    legacy_completion: impl FnOnce() -> T,
+) -> T {
+    match admission {
+        crate::direct_delivery::DirectDeliveryAdmission::Direct { .. } => direct_delivery(),
+        crate::direct_delivery::DirectDeliveryAdmission::Legacy => legacy_completion(),
+        crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner => {
+            unreachable!("no-proposal-owner tasks are parked before completion routing")
+        }
+    }
+}
+
 /// Classify a `supervisor_pr_open` push failure as "an oversized blob is
 /// committed in the branch history" (GitHub's 100 MB hard limit, enforced by
 /// the remote pre-receive hook). Such a push is rejected identically on every
@@ -100,6 +162,31 @@ impl CoordinatorActor {
         };
 
         for task in tasks {
+            // Select the writer before any completion mutation, including the
+            // simple-lifecycle fast path below.
+            let admission = match crate::direct_delivery::admit_direct_delivery(
+                self.db.clone(),
+                &task.id,
+            )
+            .await
+            {
+                Ok(admission) => admission,
+                Err(error) => {
+                    tracing::error!(task_id = %task.short_id, error = %error, "CoordinatorActor: direct-delivery capability is unavailable or unknown; refusing task-PR fallback");
+                    continue;
+                }
+            };
+            if admission == crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner {
+                match crate::direct_delivery::park_no_proposal_owner(&repo, &task.id).await {
+                    Ok(()) => {
+                        tracing::warn!(task_id = %task.short_id, "CoordinatorActor: approved task durably parked as no_proposal_owner")
+                    }
+                    Err(error) => {
+                        tracing::error!(task_id = %task.short_id, error = %error, "CoordinatorActor: failed to persist no_proposal_owner park")
+                    }
+                }
+                continue;
+            }
             // Simple-lifecycle tasks normally close directly, but sessions that
             // produced durable artifacts (file changes, memory writes, or task
             // comments pointing at .djinn paths) must survive as branch/PR
@@ -107,7 +194,10 @@ impl CoordinatorActor {
             let simple = IssueType::parse(&task.issue_type)
                 .map(|it| it.uses_simple_lifecycle())
                 .unwrap_or(false);
-            if simple
+            if matches!(
+                admission,
+                crate::direct_delivery::DirectDeliveryAdmission::Legacy
+            ) && simple
                 && !self
                     .simple_lifecycle_task_has_durable_artifacts(&task.id)
                     .await
@@ -151,6 +241,59 @@ impl CoordinatorActor {
                     issue_type = %task.issue_type,
                     "CoordinatorActor: simple-lifecycle task approved with durable artifacts — routing through PR flow"
                 );
+            }
+
+            // Direct work returns before any supervisor task-PR operation. The
+            // selection seam is shared with the explicit-legacy boundary test.
+            let direct_completion = route_approved_completion(admission, || true, || false);
+            if direct_completion {
+                let task_branch = format!("task/{}", task.short_id);
+                let Some(mirror) = self.mirror.as_ref() else {
+                    tracing::error!(task_id = %task.short_id, "CoordinatorActor: direct delivery admitted without a mirror; refusing task-PR fallback");
+                    continue;
+                };
+                let project_repo = djinn_db::ProjectRepository::new(
+                    self.db.clone(),
+                    crate::events::event_bus_for(&self.events_tx),
+                );
+                let (owner, repo_name, installation_id) = match (
+                    project_repo.get_github_coords(&task.project_id).await,
+                    project_repo.get_installation_id(&task.project_id).await,
+                ) {
+                    (Ok(Some((owner, repo_name))), Ok(Some(installation_id))) => {
+                        (owner, repo_name, installation_id)
+                    }
+                    _ => {
+                        tracing::error!(task_id = %task.short_id, "CoordinatorActor: direct delivery admitted without GitHub identity; refusing task-PR fallback");
+                        continue;
+                    }
+                };
+                let base_branch = match project_repo.get_config(&task.project_id).await {
+                    Ok(Some(config)) => config.target_branch,
+                    _ => "main".into(),
+                };
+                match crate::direct_delivery::deliver_task_branch(
+                    self.db.clone(),
+                    crate::events::event_bus_for(&self.events_tx),
+                    mirror,
+                    &task.id,
+                    &task.project_id,
+                    &task_branch,
+                    &base_branch,
+                    owner,
+                    repo_name,
+                    djinn_provider::github_api::GitHubApiClient::for_installation(installation_id),
+                )
+                .await
+                {
+                    Ok(outcome) => {
+                        tracing::info!(task_id = %task.short_id, outcome = ?outcome, "CoordinatorActor: completed task routed through direct append engine")
+                    }
+                    Err(error) => {
+                        tracing::error!(task_id = %task.short_id, error = %error, "CoordinatorActor: direct append failed; task-PR identity was left untouched")
+                    }
+                }
+                continue;
             }
 
             tracing::info!(
@@ -234,8 +377,19 @@ impl CoordinatorActor {
                 provider_override: None,
             };
             let pr_url_existed_before = task.pr_url.is_some();
-            let outcome =
-                crate::supervisor_impl::supervisor_pr_open(&spec, &task, &callbacks).await;
+            let outcome = match run_legacy_completion_preserving_pr_identity(
+                &self.db,
+                &task,
+                || crate::supervisor_impl::supervisor_pr_open(&spec, &task, &callbacks),
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    tracing::error!(task_id = %task.short_id, error = %error, "CoordinatorActor: legacy completion violated persisted PR identity");
+                    continue;
+                }
+            };
             match outcome {
                 djinn_runtime::TaskRunOutcome::PrOpened { url, sha } => {
                     self.pr_errors.remove(&task.project_id);

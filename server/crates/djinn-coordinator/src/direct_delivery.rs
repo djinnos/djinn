@@ -9,8 +9,8 @@ use std::{collections::HashSet, path::PathBuf, time::Duration};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use djinn_core::models::{
-    DirectDeliveryParkReason, MappedHeadRetryDelivery, ReworkDelivery, TaskDeliveryIdentity,
-    TaskIntegrated,
+    DirectDeliveryParkReason, MappedHeadRetryDelivery, ReworkDelivery, TaskDelivery,
+    TaskDeliveryIdentity, TaskIntegrated, TransitionAction,
 };
 use djinn_db::{
     Database, DeliveryFinalizeInput, DeliveryMappedHeadRetryInput, DeliveryPrepareInput,
@@ -23,6 +23,190 @@ use djinn_git::{
     build_direct_delivery_candidate,
 };
 use djinn_provider::github_api::{ExpectedOldShaRefUpdateResult, GitHubApiClient};
+use djinn_workspace::MirrorManager;
+
+pub const LEGACY_DELIVERY_LABEL: &str = "direct-delivery-legacy";
+
+/// The only epoch-aware routing decision used by ready admission and completion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DirectDeliveryAdmission {
+    Legacy,
+    Direct { attempt: ActiveAttempt },
+    NoProposalOwner,
+}
+
+/// Persist the active-epoch ownership failure before any task-PR side effect.
+pub async fn park_no_proposal_owner(repo: &TaskRepository, task_id: &str) -> Result<()> {
+    repo.transition(
+        task_id,
+        TransitionAction::Escalate,
+        "coordinator",
+        "system",
+        Some("no_proposal_owner"),
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Read-only, fail-closed epoch and owner selection. Ownership comes exclusively
+/// from `resolve_task_active_attempt`, never coordinator task fields.
+pub async fn admit_direct_delivery(db: Database, task_id: &str) -> Result<DirectDeliveryAdmission> {
+    match DirectDeliveryCapabilityRepository::new(db.clone())
+        .probe()
+        .await?
+    {
+        DirectDeliverySchemaCapability::SupportedDisabled { .. } => {
+            Ok(DirectDeliveryAdmission::Legacy)
+        }
+        DirectDeliverySchemaCapability::SupportedActive { .. } => {
+            let task = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+                .get(task_id)
+                .await?
+                .ok_or_else(|| anyhow!("task {task_id} disappeared during delivery admission"))?;
+            let labels: Vec<String> = serde_json::from_str(&task.labels)
+                .map_err(|error| anyhow!("task {task_id} has invalid labels: {error}"))?;
+            if has_explicit_legacy_delivery(task.pr_url.as_deref(), &labels) {
+                return Ok(DirectDeliveryAdmission::Legacy);
+            }
+            match ProposalBuildAttemptRepository::new(db)
+                .resolve_task_active_attempt(task_id)
+                .await?
+            {
+                ResolveTaskActiveAttemptResult::Resolved(resolved) => {
+                    let attempt = resolved.attempt;
+                    Ok(DirectDeliveryAdmission::Direct {
+                        attempt: ActiveAttempt {
+                            build_attempt_id: attempt.id,
+                            branch_name: attempt.branch_name,
+                            branch_head_sha: attempt
+                                .branch_head_sha
+                                .ok_or_else(|| anyhow!("active attempt has no branch head"))?,
+                        },
+                    })
+                }
+                ResolveTaskActiveAttemptResult::NoProposalOwner { .. }
+                | ResolveTaskActiveAttemptResult::NoActiveAttempt { .. }
+                | ResolveTaskActiveAttemptResult::AmbiguousProposalOwner { .. } => {
+                    Ok(DirectDeliveryAdmission::NoProposalOwner)
+                }
+            }
+        }
+        DirectDeliverySchemaCapability::MissingSchema { missing_relations } => Err(anyhow!(
+            "direct_delivery_v1 schema unavailable: {}",
+            missing_relations.join(", ")
+        )),
+        DirectDeliverySchemaCapability::MissingEpoch => {
+            Err(anyhow!("direct_delivery_v1 epoch is unavailable"))
+        }
+        DirectDeliverySchemaCapability::UnknownEpochState { state, generation } => Err(anyhow!(
+            "direct_delivery_v1 has unknown state {state} at generation {generation}"
+        )),
+    }
+}
+
+/// Legacy identities are an explicit routing boundary: admission may inspect a
+/// task PR, but direct delivery must never replace or otherwise mutate it.
+fn has_explicit_legacy_delivery(pr_url: Option<&str>, labels: &[String]) -> bool {
+    pr_url.is_some() || labels.iter().any(|label| label == LEGACY_DELIVERY_LABEL)
+}
+
+/// Direct completion adapter; it exposes no legacy task-PR operation.
+#[allow(clippy::too_many_arguments)]
+pub async fn deliver_task_branch(
+    db: Database,
+    event_bus: djinn_core::events::EventBus,
+    mirror: &MirrorManager,
+    task_id: &str,
+    project_id: &str,
+    task_branch: &str,
+    base_branch: &str,
+    owner: String,
+    repo: String,
+    github: GitHubApiClient,
+) -> Result<DeliveryOutcome> {
+    let workspace = mirror.clone_ephemeral(project_id, task_branch).await?;
+    let repository = workspace.path_buf();
+    let source_sha =
+        djinn_git::run_git_command(repository.clone(), vec!["rev-parse".into(), "HEAD".into()])
+            .await?
+            .stdout
+            .trim()
+            .to_owned();
+    let normalized_patch = djinn_git::run_git_command(
+        repository.clone(),
+        vec![
+            "diff".into(),
+            "--binary".into(),
+            format!("origin/{base_branch}..HEAD"),
+        ],
+    )
+    .await?
+    .stdout;
+    let signature = DirectDeliverySignature {
+        name: "Djinn Direct Delivery".into(),
+        email: "direct-delivery@djinn.local".into(),
+        when: "0 +0000".into(),
+    };
+    let tasks = TaskRepository::new(db.clone(), event_bus.clone());
+    // The adapter owns no proposal-routing rule. Resolve the same canonical
+    // active attempt used by admission before selecting an immutable replay.
+    let attempts = ProposalBuildAttemptRepository::new(db.clone());
+    let active_attempt = match attempts.resolve_task_active_attempt(task_id).await? {
+        ResolveTaskActiveAttemptResult::Resolved(resolved) => resolved.attempt,
+        other => {
+            return Err(anyhow!(
+                "no canonical active attempt for {task_id}: {other:?}"
+            ));
+        }
+    };
+    let source = resume_delivery_source(
+        task_id,
+        source_sha,
+        normalized_patch,
+        tasks
+            .latest_delivery_for_attempt(&active_attempt.id, task_id)
+            .await?
+            .as_ref(),
+    );
+    let ledger = RepositoryDeliveryLedger::new(db.clone(), attempts, tasks);
+    DirectDeliveryEngine::new(
+        ledger,
+        GitHubAttemptRef::new(github, owner, repo),
+        GitCandidateBuilder::new(repository, signature.clone(), signature),
+    )
+    .deliver(source)
+    .await
+}
+
+/// Keep replay tied to the durable generation rather than the current source
+/// checkout. A mapped-head successor may be Applying after a provider response
+/// was lost; only its original identity and transition can reconcile it.
+fn resume_delivery_source(
+    task_id: &str,
+    source_sha: String,
+    normalized_patch: String,
+    latest: Option<&TaskDelivery>,
+) -> DeliverySource {
+    match latest {
+        Some(delivery) => DeliverySource {
+            task_id: task_id.into(),
+            delivery_generation: delivery.identity.delivery_generation,
+            transition_id: delivery.prepare_transition_id.clone(),
+            source_sha: delivery.source_sha.clone(),
+            // Exact-candidate reconciliation occurs before candidate rebuilding.
+            // The current patch remains available for a definitive retry.
+            normalized_patch,
+        },
+        None => DeliverySource {
+            task_id: task_id.into(),
+            delivery_generation: 1,
+            transition_id: format!("direct-delivery:{task_id}:1"),
+            source_sha,
+            normalized_patch,
+        },
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LedgerResult {
@@ -1035,6 +1219,168 @@ mod tests {
             updates,
         )
     }
+    #[test]
+    fn mapped_head_successor_resumes_its_immutable_identity() {
+        let successor = TaskDelivery {
+            identity: TaskDeliveryIdentity::new("attempt", "task", 2).unwrap(),
+            state: djinn_core::models::TaskDeliveryState::Applying,
+            candidate_sha: "candidate-task-g2-on-mapped".into(),
+            source_sha: "original-source".into(),
+            patch_digest: "original-digest".into(),
+            selected_parent_sha: "mapped".into(),
+            prepare_transition_id: "transition-1:mapped-head:2".into(),
+            base_sha: "mapped".into(),
+            applied_at: None,
+            conflict_reason: None,
+            supersede_transition_id: None,
+            created_at: "now".into(),
+        };
+        let resumed = resume_delivery_source(
+            "task",
+            "newer-checkout-source".into(),
+            "newer-checkout-patch".into(),
+            Some(&successor),
+        );
+        assert_eq!(resumed.delivery_generation, 2);
+        assert_eq!(resumed.transition_id, "transition-1:mapped-head:2");
+        assert_eq!(resumed.source_sha, "original-source");
+        // The immutable candidate remains in the ledger and is recovered by
+        // `prepared_candidate` before this patch is ever rebuilt.
+        assert_eq!(successor.candidate_sha, "candidate-task-g2-on-mapped");
+    }
+    #[tokio::test]
+    async fn explicit_legacy_completion_preserves_existing_persisted_pr_identity() {
+        use crate::dispatch::wave_dispatch::{
+            route_approved_completion, run_legacy_completion_preserving_pr_identity,
+        };
+        use djinn_core::events::EventBus;
+        use djinn_db::{EpicRepository, TaskRepository};
+
+        let db = Database::open_in_memory().unwrap();
+        let events = EventBus::noop();
+        let epic = EpicRepository::new(db.clone(), events.clone())
+            .create("Legacy delivery", "", "", "", "", None)
+            .await
+            .unwrap();
+        let repo = TaskRepository::new(db.clone(), events);
+        let task = repo
+            .create(
+                &epic.id,
+                "Approved legacy task",
+                "",
+                "",
+                "task",
+                0,
+                "worker",
+                Some("approved"),
+            )
+            .await
+            .unwrap();
+        let existing_pr = "https://github.example/owner/repo/pull/42";
+        let task = repo.set_pr_url(&task.id, existing_pr).await.unwrap();
+        djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
+
+        let admission = admit_direct_delivery(db.clone(), &task.id).await.unwrap();
+        assert_eq!(admission, DirectDeliveryAdmission::Legacy);
+        let legacy_calls = Arc::new(AtomicUsize::new(0));
+        let direct_calls = Arc::new(AtomicUsize::new(0));
+        let legacy_calls_for_route = legacy_calls.clone();
+        let direct_calls_for_route = direct_calls.clone();
+        let selected_legacy = route_approved_completion(
+            admission,
+            move || {
+                direct_calls_for_route.fetch_add(1, Ordering::SeqCst);
+                false
+            },
+            move || {
+                legacy_calls_for_route.fetch_add(1, Ordering::SeqCst);
+                true
+            },
+        );
+        assert!(selected_legacy);
+
+        let external_pr_seen = Arc::new(Mutex::new(None));
+        let external_pr_for_completion = external_pr_seen.clone();
+        let outcome = run_legacy_completion_preserving_pr_identity(&db, &task, || async move {
+            *external_pr_for_completion.lock().unwrap() = Some(existing_pr.to_owned());
+            djinn_runtime::TaskRunOutcome::PrOpened {
+                url: existing_pr.to_owned(),
+                sha: "legacy-head".to_owned(),
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(legacy_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(direct_calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            outcome,
+            djinn_runtime::TaskRunOutcome::PrOpened { .. }
+        ));
+        assert_eq!(
+            external_pr_seen.lock().unwrap().as_deref(),
+            Some(existing_pr)
+        );
+        assert_eq!(
+            repo.get(&task.id).await.unwrap().unwrap().pr_url.as_deref(),
+            Some(existing_pr),
+            "legacy completion must leave the task's persisted PR identity unchanged"
+        );
+    }
+    #[tokio::test]
+    async fn fresh_legacy_completion_may_persist_its_first_pr_identity() {
+        use crate::dispatch::wave_dispatch::run_legacy_completion_preserving_pr_identity;
+        use djinn_core::events::EventBus;
+        use djinn_db::{EpicRepository, TaskRepository};
+
+        let db = Database::open_in_memory().unwrap();
+        let events = EventBus::noop();
+        let epic = EpicRepository::new(db.clone(), events.clone())
+            .create("Fresh legacy delivery", "", "", "", "", None)
+            .await
+            .unwrap();
+        let repo = TaskRepository::new(db.clone(), events);
+        let task = repo
+            .create(
+                &epic.id,
+                "Approved fresh legacy task",
+                "",
+                "",
+                "task",
+                0,
+                "worker",
+                Some("approved"),
+            )
+            .await
+            .unwrap();
+        assert!(task.pr_url.is_none());
+        let first_pr = "https://github.example/owner/repo/pull/43";
+
+        let db_for_completion = db.clone();
+        let task_id = task.id.clone();
+        let outcome = run_legacy_completion_preserving_pr_identity(&db, &task, || async move {
+            TaskRepository::new(db_for_completion, EventBus::noop())
+                .set_pr_url(&task_id, first_pr)
+                .await
+                .unwrap();
+            djinn_runtime::TaskRunOutcome::PrOpened {
+                url: first_pr.to_owned(),
+                sha: "legacy-head".to_owned(),
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            djinn_runtime::TaskRunOutcome::PrOpened { .. }
+        ));
+        assert_eq!(
+            repo.get(&task.id).await.unwrap().unwrap().pr_url.as_deref(),
+            Some(first_pr),
+            "fresh legacy completion must be allowed to persist its first PR identity"
+        );
+    }
     #[tokio::test]
     async fn conflict_is_finalized_before_parking() {
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -1359,6 +1705,10 @@ mod tests {
         integration_attempts: usize,
         crash_window: Option<CrashWindow>,
         crash_injected: bool,
+        /// Simulates another mapped append winning generation one's CAS.
+        inject_mapped_head_on_base_cas: bool,
+        /// Simulates a provider response lost after a successful successor CAS.
+        provider_error_after_success_on_successor: bool,
     }
     #[derive(Default)]
     struct ConcurrentIntegrationGate {
@@ -1637,12 +1987,25 @@ mod tests {
         async fn update_expected_old(&self, _: &str, old: &str, new: &str) -> Result<RemoteUpdate> {
             let first = old == "base";
             let crash_after_remote;
+            let provider_error_after_remote;
             {
                 let mut s = self.state.lock().map_err(|_| anyhow!("poison"))?;
                 s.updates.push((old.into(), new.into()));
                 if s.crash_window == Some(CrashWindow::BeforeRemoteMutation) && !s.crash_injected {
                     s.crash_injected = true;
                     return Err(anyhow!("injected crash before remote mutation"));
+                }
+                if first && s.inject_mapped_head_on_base_cas {
+                    s.inject_mapped_head_on_base_cas = false;
+                    s.parents.insert("mapped".into(), "base".into());
+                    s.head = "mapped".into();
+                    // The competing mapped append is already durably
+                    // reconciled before this task builds its successor.
+                    s.durable_head = "mapped".into();
+                    s.attempt_branch_head_sha = "mapped".into();
+                    return Ok(RemoteUpdate::Stale {
+                        observed_sha: Some("mapped".into()),
+                    });
                 }
                 if s.head != old {
                     return Ok(RemoteUpdate::Stale {
@@ -1658,10 +2021,19 @@ mod tests {
                 if crash_after_remote {
                     s.crash_injected = true;
                 }
+                provider_error_after_remote = !first && s.provider_error_after_success_on_successor;
+                if provider_error_after_remote {
+                    s.provider_error_after_success_on_successor = false;
+                }
             }
             if crash_after_remote {
                 return Err(anyhow!(
                     "injected crash after remote mutation before SQL acknowledgment"
+                ));
+            }
+            if provider_error_after_remote {
+                return Err(anyhow!(
+                    "injected provider error after successful remote mutation"
                 ));
             }
             if first {
@@ -1903,5 +2275,103 @@ mod tests {
             assert_eq!(s.closure_calls["task"], 1, "{window:?}");
             assert_eq!(s.dependent_release_calls["task"], 1, "{window:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn mapped_head_generation_two_provider_error_replays_without_duplicate_push() {
+        // Execute both delivery passes. The first expected-old update loses to
+        // a mapped head, durably supersedes generation one, and then publishes
+        // generation two while its provider response is lost.
+        let state = Arc::new(Mutex::new(ConcurrentState {
+            head: "base".into(),
+            durable_head: "base".into(),
+            attempt_branch_head_sha: "base".into(),
+            inject_mapped_head_on_base_cas: true,
+            provider_error_after_success_on_successor: true,
+            ..Default::default()
+        }));
+        let engine = DirectDeliveryEngine::new(
+            ConcurrentLedger {
+                state: state.clone(),
+                gate: Arc::new(ConcurrentIntegrationGate::default()),
+            },
+            ConcurrentRemote {
+                state: state.clone(),
+                first_cas: None,
+                second_cas: None,
+            },
+            CrashBuilder,
+        );
+
+        assert!(engine.deliver(source(1)).await.is_err());
+        let retained_successor = {
+            let state = state.lock().unwrap();
+            let first = &state.generations[&("task".into(), 1)];
+            let successor = &state.generations[&("task".into(), 2)];
+            assert_eq!(first.state, ConcurrentGenerationState::Superseded);
+            assert_eq!(first.superseded_by, Some(2));
+            assert_eq!(
+                first.supersede_transition.as_deref(),
+                Some("transition-1:mapped-head:2")
+            );
+            assert_eq!(first.applying_transition.as_deref(), Some("transition-1"));
+            assert_eq!(successor.state, ConcurrentGenerationState::Applying);
+            assert_eq!(
+                successor.applying_transition.as_deref(),
+                Some("transition-1:mapped-head:2")
+            );
+            assert_eq!(successor.candidate.selected_parent_sha, "mapped");
+            assert_eq!(state.head, successor.candidate.candidate_sha);
+            assert_eq!(state.updates.len(), 2);
+            assert_eq!(
+                state.published_commits,
+                std::slice::from_ref(&successor.candidate.candidate_sha)
+            );
+            TaskDelivery {
+                identity: successor.identity.clone(),
+                state: djinn_core::models::TaskDeliveryState::Applying,
+                candidate_sha: successor.candidate.candidate_sha.clone(),
+                source_sha: successor.source.source_sha.clone(),
+                patch_digest: successor.candidate.patch_digest.clone(),
+                selected_parent_sha: successor.candidate.selected_parent_sha.clone(),
+                prepare_transition_id: successor.source.transition_id.clone(),
+                base_sha: successor.candidate.selected_parent_sha.clone(),
+                applied_at: None,
+                conflict_reason: None,
+                supersede_transition_id: None,
+                created_at: "now".into(),
+            }
+        };
+        // This is the production adapter's durable lookup: its current
+        // checkout is deliberately ignored in favor of generation two's
+        // immutable transition/source identity.
+        let replay_source = resume_delivery_source(
+            "task",
+            "newer-checkout-source".into(),
+            "newer-checkout-patch".into(),
+            Some(&retained_successor),
+        );
+        assert_eq!(replay_source.delivery_generation, 2);
+        assert_eq!(replay_source.transition_id, "transition-1:mapped-head:2");
+        assert_eq!(
+            engine.deliver(replay_source).await.unwrap(),
+            DeliveryOutcome::Integrated {
+                candidate_sha: retained_successor.candidate_sha.clone()
+            }
+        );
+        let state = state.lock().unwrap();
+        assert_eq!(state.updates.len(), 2, "exact replay must not push again");
+        assert_eq!(state.head, retained_successor.candidate_sha);
+        assert_eq!(state.durable_head, retained_successor.candidate_sha);
+        assert_eq!(
+            state.generations[&("task".into(), 2)].state,
+            ConcurrentGenerationState::Applied
+        );
+        assert_eq!(state.task_status["task"], "closed");
+        assert_eq!(
+            state.task_merge_commit_sha["task"],
+            retained_successor.candidate_sha
+        );
+        assert_eq!(state.closure_calls["task"], 1);
     }
 }
