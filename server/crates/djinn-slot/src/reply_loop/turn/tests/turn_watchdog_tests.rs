@@ -303,9 +303,19 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
         "model",
         Some(&plan),
     );
+    let winner_owner = model_turn_lease_owner_pod_uid_fixture(&db, &lease.lease_id)
+        .await
+        .expect("winner lease must persist a pod owner");
+    let replacement_owner = model_turn_lease_owner_pod_uid_fixture(&db, &fresh_lease.lease_id)
+        .await
+        .expect("replacement lease must persist a pod owner");
     assert_ne!(slot_a_report.slot_pod_uid, slot_b_report.slot_pod_uid);
-    for (report, identity) in [(&slot_a_report, &winner_identity), (&slot_b_report, &replacement_identity)] {
+    for (report, identity, persisted_owner) in [
+        (&slot_a_report, &winner_identity, winner_owner),
+        (&slot_b_report, &replacement_identity, replacement_owner),
+    ] {
         assert_eq!(report.slot_pod_uid, identity.pod_uid);
+        assert_eq!(report.slot_pod_uid, persisted_owner);
         assert_eq!(report.deployment_revision, identity.deployment_revision);
         assert_eq!(report.provider, plan.scope.provider_id);
         assert_eq!(report.model_scope, plan.scope.model_id);

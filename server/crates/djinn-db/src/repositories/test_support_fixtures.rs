@@ -125,6 +125,21 @@ pub async fn model_turn_lease_lifecycle_fixture(db: &Database, lease_id: &str) -
         .unwrap()
 }
 
+/// Return the pod UID durably bound to one acquired lease.
+///
+/// This reads the repository row rather than reusing an acquisition request so
+/// cross-slot capability tests prove the persisted ownership boundary.
+pub async fn model_turn_lease_owner_pod_uid_fixture(
+    db: &Database,
+    lease_id: &str,
+) -> Option<String> {
+    sqlx::query_scalar("SELECT owner_pod_uid FROM model_turn_leases WHERE lease_id = $1::uuid")
+        .bind(lease_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
+
 /// Return persisted provider-launch identities in generation order.
 pub async fn model_turn_launch_identities_fixture(db: &Database) -> Vec<(String, i64, String)> {
     sqlx::query_as(
