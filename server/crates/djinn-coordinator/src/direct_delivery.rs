@@ -38,6 +38,8 @@ pub(crate) enum BoundaryOperation {
     DirectAppend,
     SimpleClose,
     SupervisorPrOpen,
+    TaskPrLookup,
+    TaskPrAdopt,
     TaskPrCreate,
     TaskPrMerge,
     TaskPrAutoMerge,
@@ -71,6 +73,8 @@ pub(crate) fn observe_boundary_operation(operation: &'static str) {
             "direct_append" => BoundaryOperation::DirectAppend,
             "simple_close" => BoundaryOperation::SimpleClose,
             "supervisor_pr_open" => BoundaryOperation::SupervisorPrOpen,
+            "task_pr_lookup" => BoundaryOperation::TaskPrLookup,
+            "task_pr_adopt" => BoundaryOperation::TaskPrAdopt,
             "task_pr_create" => BoundaryOperation::TaskPrCreate,
             "task_pr_merge" => BoundaryOperation::TaskPrMerge,
             "task_pr_auto_merge" => BoundaryOperation::TaskPrAutoMerge,
@@ -211,19 +215,19 @@ pub async fn admit_direct_delivery(db: Database, task_id: &str) -> Result<Direct
                 }
             }
         }
-        DirectDeliverySchemaCapability::MissingSchema { missing_relations } => Ok(
-            DirectDeliveryAdmission::ContractUnavailable(DirectDeliveryContract::MissingSchema {
-                missing_relations,
-            }),
-        ),
+        DirectDeliverySchemaCapability::MissingSchema { missing_relations } => {
+            Ok(DirectDeliveryAdmission::ContractUnavailable(
+                DirectDeliveryContract::MissingSchema { missing_relations },
+            ))
+        }
         DirectDeliverySchemaCapability::MissingEpoch => Ok(
             DirectDeliveryAdmission::ContractUnavailable(DirectDeliveryContract::MissingEpoch),
         ),
-        DirectDeliverySchemaCapability::UnknownEpochState { state, generation } => Ok(
-            DirectDeliveryAdmission::ContractUnavailable(
+        DirectDeliverySchemaCapability::UnknownEpochState { state, generation } => {
+            Ok(DirectDeliveryAdmission::ContractUnavailable(
                 DirectDeliveryContract::UnknownEpochState { state, generation },
-            ),
-        ),
+            ))
+        }
     }
 }
 
@@ -1453,6 +1457,12 @@ mod tests {
             .unwrap();
         let existing_pr = "https://github.example/owner/repo/pull/42";
         repo.set_pr_url(&task.id, existing_pr).await.unwrap();
+        sqlx::query("UPDATE tasks SET labels = $1::jsonb WHERE id = $2")
+            .bind(format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#))
+            .bind(&task.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
         // Completion receives the same persisted/reloaded shape as production.
         let task = repo.get(&task.id).await.unwrap().unwrap();
         djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
@@ -2658,6 +2668,12 @@ mod tests {
                         .set_pr_url(&task.id, "https://example.test/pr/unchanged")
                         .await
                         .unwrap();
+                    sqlx::query("UPDATE tasks SET labels = $1::jsonb WHERE id = $2")
+                        .bind(format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#))
+                        .bind(&task.id)
+                        .execute(db.pool())
+                        .await
+                        .unwrap();
                 }
                 if matches!(
                     state,
@@ -2712,11 +2728,6 @@ mod tests {
                 } else {
                     admit_ready_direct_delivery(db.clone(), &tasks, &task.id).await
                 };
-                let failed = matches!(
-                    state,
-                    State::MissingSchema | State::MissingEpoch | State::UnknownEpoch
-                );
-                assert_eq!(admission.is_err(), failed);
                 match (&admission, state) {
                     (
                         Ok(DirectDeliveryAdmission::Legacy),
@@ -2724,7 +2735,10 @@ mod tests {
                     ) => {}
                     (Ok(DirectDeliveryAdmission::Direct { .. }), State::Direct) => {}
                     (Ok(DirectDeliveryAdmission::NoProposalOwner), State::Unresolved) => {}
-                    (Err(_), State::MissingSchema | State::MissingEpoch | State::UnknownEpoch) => {}
+                    (
+                        Ok(DirectDeliveryAdmission::ContractUnavailable(_)),
+                        State::MissingSchema | State::MissingEpoch | State::UnknownEpoch,
+                    ) => {}
                     _ => panic!("matrix state selected the wrong admission route"),
                 }
                 let external_pr_seen = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -2763,14 +2777,34 @@ mod tests {
                     .await;
                 }
                 let after = snapshot(&db, &tasks, &task.id).await;
-                if failed {
-                    assert_eq!(
-                        after, before,
-                        "capability failure must not mutate task, activity, attempt, build-attempt, or ledger state"
-                    );
-                }
-                if matches!(state, State::Unresolved) {
+                if matches!(
+                    state,
+                    State::Unresolved
+                        | State::MissingSchema
+                        | State::MissingEpoch
+                        | State::UnknownEpoch
+                ) {
                     assert_eq!(after.0, "needs_lead_intervention");
+                    assert_eq!(
+                        after.1, before.1,
+                        "fail-closed parking must not alter PR identity"
+                    );
+                    assert_eq!(
+                        after.2, before.2,
+                        "fail-closed parking must not integrate the task"
+                    );
+                    assert_eq!(
+                        after.4, before.4,
+                        "fail-closed parking must not alter task attempts"
+                    );
+                    assert_eq!(
+                        after.5, before.5,
+                        "fail-closed parking must not alter build attempts"
+                    );
+                    assert_eq!(
+                        after.6, before.6,
+                        "fail-closed parking must not alter delivery ledger"
+                    );
                 }
                 if matches!(state, State::ExplicitLegacy) {
                     assert_eq!(
@@ -2807,9 +2841,10 @@ mod tests {
                         BoundaryOperation::ResolveTaskActiveAttempt,
                         BoundaryOperation::NoProposalOwnerPark,
                     ],
-                    (State::MissingSchema | State::MissingEpoch | State::UnknownEpoch, _) => {
-                        vec![BoundaryOperation::CapabilityProbe]
-                    }
+                    (State::MissingSchema | State::MissingEpoch | State::UnknownEpoch, _) => vec![
+                        BoundaryOperation::CapabilityProbe,
+                        BoundaryOperation::NoProposalOwnerPark,
+                    ],
                 };
                 assert_eq!(
                     take_boundary_operations(),

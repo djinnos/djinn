@@ -593,3 +593,216 @@ fn pub_failure_suppresses_with_observation_error_unknown_github_head_mirror_unkn
         "reason must make clear the unchanged-head strike is suppressed: {reason}"
     );
 }
+
+/// The production supervisor entry point must decide eligibility before it can
+/// touch its mirror or any GitHub task-PR operation.
+#[tokio::test]
+async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_effects() {
+    use std::collections::HashMap;
+
+    use crate::direct_delivery::{
+        BoundaryOperation, LEGACY_DELIVERY_LABEL, clear_boundary_operations,
+        take_boundary_operations,
+    };
+    use crate::supervisor_impl::{SupervisorCallbackContext, supervisor_pr_open};
+    use djinn_core::events::EventBus;
+    use djinn_core::models::{KnowledgeInjectionConfig, TaskRunTrigger};
+    use djinn_db::{
+        ActivateProposalBuildAttemptInput, Database, EpicRepository,
+        ProposalBuildAttemptRepository, ReserveProposalBuildAttemptInput, TaskRepository,
+    };
+    use djinn_runtime::{SupervisorFlow, TaskRunOutcome, TaskRunSpec};
+    use tokio_util::sync::CancellationToken;
+
+    #[derive(Clone, Copy)]
+    enum Fixture {
+        Disabled,
+        ExplicitLegacy,
+        Direct,
+        Unresolved,
+        MissingContract,
+        UnknownContract,
+    }
+
+    for fixture in [
+        Fixture::Disabled,
+        Fixture::ExplicitLegacy,
+        Fixture::Direct,
+        Fixture::Unresolved,
+        Fixture::MissingContract,
+        Fixture::UnknownContract,
+    ] {
+        let db = Database::open_in_memory().unwrap();
+        let events = EventBus::noop();
+        let epic = EpicRepository::new(db.clone(), events.clone())
+            .create("eligibility", "", "", "", "", None)
+            .await
+            .unwrap();
+        let tasks = TaskRepository::new(db.clone(), events);
+        let task = tasks
+            .create(
+                &epic.id,
+                "task",
+                "",
+                "",
+                "task",
+                0,
+                "worker",
+                Some("approved"),
+            )
+            .await
+            .unwrap();
+        if matches!(fixture, Fixture::ExplicitLegacy) {
+            tasks
+                .set_pr_url(&task.id, "https://example.test/pr/42")
+                .await
+                .unwrap();
+            sqlx::query("UPDATE tasks SET labels = $1::jsonb WHERE id = $2")
+                .bind(format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#))
+                .bind(&task.id)
+                .execute(db.pool())
+                .await
+                .unwrap();
+        }
+        if !matches!(fixture, Fixture::Disabled) {
+            djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
+        }
+        if matches!(fixture, Fixture::Direct) {
+            djinn_db::test_support::seed_direct_delivery_proposal_owner_for_test(
+                &db, &epic.id, "p", "p",
+            )
+            .await;
+            let attempts = ProposalBuildAttemptRepository::new(db.clone());
+            attempts
+                .reserve(&ReserveProposalBuildAttemptInput {
+                    proposal_id: "p".into(),
+                    proposal_short_id: "p".into(),
+                    build_attempt_id: "a".into(),
+                    build_attempt_short_id: "a".into(),
+                    observed_base_sha: "base".into(),
+                })
+                .await
+                .unwrap();
+            attempts
+                .activate(&ActivateProposalBuildAttemptInput {
+                    build_attempt_id: "a".into(),
+                    expected_lifecycle: djinn_core::models::ProposalBuildAttemptLifecycle::Reserved,
+                    expected_branch_head_sha: None,
+                    branch_head_sha: "base".into(),
+                })
+                .await
+                .unwrap();
+        }
+        match fixture {
+            Fixture::MissingContract => {
+                djinn_db::test_support::remove_direct_delivery_epoch_for_test(&db).await
+            }
+            Fixture::UnknownContract => {
+                djinn_db::test_support::seed_unknown_direct_delivery_epoch_for_test(&db).await
+            }
+            _ => {}
+        }
+        let spec = TaskRunSpec {
+            task_run_id: "run".into(),
+            task_attempt_id: None,
+            task_id: task.id.clone(),
+            execution_generation: 0,
+            project_id: task.project_id.clone(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: "task/test".into(),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: HashMap::new(),
+            read_source_project_ids: vec![],
+            knowledge_injection: KnowledgeInjectionConfig::default(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
+        };
+        let callbacks = SupervisorCallbackContext {
+            agent_context: crate::test_helpers::coordinator_context_from_db(
+                db.clone(),
+                CancellationToken::new(),
+            ),
+            cancel: CancellationToken::new(),
+            provider_override: None,
+        };
+        let task = tasks.get(&task.id).await.unwrap().unwrap();
+        clear_boundary_operations();
+        let outcome = supervisor_pr_open(&spec, &task, &callbacks).await;
+        let operations = take_boundary_operations();
+        for forbidden in [
+            BoundaryOperation::TaskPrLookup,
+            BoundaryOperation::TaskPrAdopt,
+            BoundaryOperation::TaskPrCreate,
+        ] {
+            assert!(
+                !operations.contains(&forbidden),
+                "direct-delivery boundary reached forbidden task-PR effect {forbidden:?}"
+            );
+        }
+        match fixture {
+            Fixture::Direct => {
+                assert!(matches!(outcome, TaskRunOutcome::Escalated { .. }));
+                assert_eq!(
+                    operations,
+                    vec![
+                        BoundaryOperation::CapabilityProbe,
+                        BoundaryOperation::ResolveTaskActiveAttempt
+                    ]
+                );
+            }
+            Fixture::Unresolved => {
+                assert!(matches!(outcome, TaskRunOutcome::Escalated { .. }));
+                assert_eq!(
+                    tasks.get(&task.id).await.unwrap().unwrap().status,
+                    "needs_lead_intervention"
+                );
+                assert_eq!(
+                    operations,
+                    vec![
+                        BoundaryOperation::CapabilityProbe,
+                        BoundaryOperation::ResolveTaskActiveAttempt,
+                        BoundaryOperation::NoProposalOwnerPark
+                    ]
+                );
+            }
+            Fixture::MissingContract | Fixture::UnknownContract => {
+                assert!(matches!(outcome, TaskRunOutcome::Escalated { .. }));
+                assert_eq!(
+                    tasks.get(&task.id).await.unwrap().unwrap().status,
+                    "needs_lead_intervention"
+                );
+                assert_eq!(
+                    operations,
+                    vec![
+                        BoundaryOperation::CapabilityProbe,
+                        BoundaryOperation::NoProposalOwnerPark
+                    ]
+                );
+            }
+            Fixture::Disabled | Fixture::ExplicitLegacy => {
+                assert!(
+                    matches!(outcome, TaskRunOutcome::Failed { .. }),
+                    "legacy fixture must pass the eligibility gate"
+                );
+                assert_eq!(operations, vec![BoundaryOperation::CapabilityProbe]);
+                if matches!(fixture, Fixture::ExplicitLegacy) {
+                    assert_eq!(
+                        tasks
+                            .get(&task.id)
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .pr_url
+                            .as_deref(),
+                        Some("https://example.test/pr/42")
+                    );
+                }
+            }
+        }
+    }
+}
