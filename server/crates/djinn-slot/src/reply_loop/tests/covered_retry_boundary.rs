@@ -725,7 +725,9 @@ async fn typed_replacement_preparation_outcome(case: ReplacementPreparationCase)
     );
     let session_id = format!("covered-retry-preparation-{}", uuid::Uuid::now_v7());
     let hooks = Arc::new(ModelTurnAdmissionTestHooks::default());
-    hooks.block_covered_retry_wait.store(true, Ordering::Release);
+    hooks
+        .block_covered_retry_wait
+        .store(true, Ordering::Release);
     if matches!(case, ReplacementPreparationCase::DispatchFenced) {
         hooks
             .block_dispatching_at_prepare
