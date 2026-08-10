@@ -210,6 +210,13 @@ pub(crate) struct ModelTurnAdmissionTestHooks {
     pub reconcile_release: TestNotify,
     pub reconcile_finished: TestNotify,
     pub block_reconcile: std::sync::atomic::AtomicBool,
+    /// Pause one selected acquired lease immediately before its production
+    /// dispatch-fence write. This synchronizes a real repository race; it
+    /// never replaces acquisition or dispatching logic.
+    pub block_dispatching_at_prepare: AtomicUsize,
+    pub acquired_identities: std::sync::Mutex<Vec<ModelTurnLeaseIdentity>>,
+    pub dispatching_reached: TestNotify,
+    pub dispatching_release: TestNotify,
 }
 
 #[cfg(test)]
@@ -234,6 +241,10 @@ impl Default for ModelTurnAdmissionTestHooks {
             reconcile_release: TestNotify::new(),
             reconcile_finished: TestNotify::new(),
             block_reconcile: std::sync::atomic::AtomicBool::new(false),
+            block_dispatching_at_prepare: AtomicUsize::new(usize::MAX),
+            acquired_identities: std::sync::Mutex::new(Vec::new()),
+            dispatching_reached: TestNotify::new(),
+            dispatching_release: TestNotify::new(),
         }
     }
 }
@@ -384,6 +395,21 @@ impl ModelTurnAdmissionCoordinator {
                         #[cfg(test)]
                         self.test_hooks.clone(),
                     );
+                    #[cfg(test)]
+                    if let Some(hooks) = &self.test_hooks {
+                        let ordinal = {
+                            let mut identities = hooks
+                                .acquired_identities
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            identities.push(identity.clone());
+                            identities.len()
+                        };
+                        if hooks.block_dispatching_at_prepare.load(Ordering::Acquire) == ordinal {
+                            hooks.dispatching_reached.notify_waiters();
+                            hooks.dispatching_release.notified().await;
+                        }
+                    }
                     let outcome = self.repository.mark_dispatching(&identity).await?;
                     #[cfg(test)]
                     if let Some(hook) = &self.post_dispatching_hook {
