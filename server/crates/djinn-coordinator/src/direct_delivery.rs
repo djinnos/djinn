@@ -1249,42 +1249,82 @@ mod tests {
         // `prepared_candidate` before this patch is ever rebuilt.
         assert_eq!(successor.candidate_sha, "candidate-task-g2-on-mapped");
     }
-    #[test]
-    fn explicit_legacy_completion_preserves_existing_persisted_pr_identity() {
-        use crate::dispatch::wave_dispatch::route_approved_completion;
+    #[tokio::test]
+    async fn explicit_legacy_completion_preserves_existing_persisted_pr_identity() {
+        use crate::dispatch::wave_dispatch::{
+            route_approved_completion, run_legacy_completion_preserving_pr_identity,
+        };
+        use djinn_core::events::EventBus;
+        use djinn_db::{EpicRepository, TaskRepository};
 
-        // Model the persisted task row and both completion collaborators. The
-        // direct collaborator represents the append engine; the legacy one
-        // records the existing PR identity without replacing it.
-        let task_pr_url = Arc::new(Mutex::new(Some(
-            "https://github.example/owner/repo/pull/42".to_owned(),
-        )));
+        let db = Database::open_in_memory().unwrap();
+        let events = EventBus::noop();
+        let epic = EpicRepository::new(db.clone(), events.clone())
+            .create("Legacy delivery", "", "", "", "", None)
+            .await
+            .unwrap();
+        let repo = TaskRepository::new(db.clone(), events);
+        let task = repo
+            .create(
+                &epic.id,
+                "Approved legacy task",
+                "",
+                "",
+                "task",
+                0,
+                "worker",
+                Some("approved"),
+            )
+            .await
+            .unwrap();
+        let existing_pr = "https://github.example/owner/repo/pull/42";
+        let task = repo.set_pr_url(&task.id, existing_pr).await.unwrap();
+        djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
+
+        let admission = admit_direct_delivery(db.clone(), &task.id).await.unwrap();
+        assert_eq!(admission, DirectDeliveryAdmission::Legacy);
         let legacy_calls = Arc::new(AtomicUsize::new(0));
         let direct_calls = Arc::new(AtomicUsize::new(0));
-        let recorded_legacy_pr = Arc::new(Mutex::new(None));
-        let before = task_pr_url.lock().unwrap().clone();
-
-        let legacy_task_pr_url = task_pr_url.clone();
-        let legacy_recorded_pr = recorded_legacy_pr.clone();
         let legacy_calls_for_route = legacy_calls.clone();
         let direct_calls_for_route = direct_calls.clone();
-        route_approved_completion(
-            DirectDeliveryAdmission::Legacy,
+        let selected_legacy = route_approved_completion(
+            admission,
             move || {
                 direct_calls_for_route.fetch_add(1, Ordering::SeqCst);
+                false
             },
             move || {
                 legacy_calls_for_route.fetch_add(1, Ordering::SeqCst);
-                *legacy_recorded_pr.lock().unwrap() = legacy_task_pr_url.lock().unwrap().clone();
+                true
             },
         );
+        assert!(selected_legacy);
+
+        let external_pr_seen = Arc::new(Mutex::new(None));
+        let external_pr_for_completion = external_pr_seen.clone();
+        let outcome = run_legacy_completion_preserving_pr_identity(&db, &task, || async move {
+            *external_pr_for_completion.lock().unwrap() = Some(existing_pr.to_owned());
+            djinn_runtime::TaskRunOutcome::PrOpened {
+                url: existing_pr.to_owned(),
+                sha: "legacy-head".to_owned(),
+            }
+        })
+        .await
+        .unwrap();
 
         assert_eq!(legacy_calls.load(Ordering::SeqCst), 1);
         assert_eq!(direct_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(*recorded_legacy_pr.lock().unwrap(), before);
+        assert!(matches!(
+            outcome,
+            djinn_runtime::TaskRunOutcome::PrOpened { .. }
+        ));
         assert_eq!(
-            *task_pr_url.lock().unwrap(),
-            before,
+            external_pr_seen.lock().unwrap().as_deref(),
+            Some(existing_pr)
+        );
+        assert_eq!(
+            repo.get(&task.id).await.unwrap().unwrap().pr_url.as_deref(),
+            Some(existing_pr),
             "legacy completion must leave the task's persisted PR identity unchanged"
         );
     }

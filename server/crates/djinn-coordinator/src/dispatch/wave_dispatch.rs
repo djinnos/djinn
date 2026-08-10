@@ -7,6 +7,47 @@ use djinn_core::models::TransitionAction;
 use djinn_core::models::task::IssueType;
 use djinn_core::models::task_attempt::TaskAttemptOutcome;
 
+/// Run the production legacy task-PR collaborator while enforcing the
+/// explicitly persisted PR identity. Tests inject a deterministic collaborator;
+/// production supplies `supervisor_pr_open` below.
+pub(crate) async fn run_legacy_completion_preserving_pr_identity<F, Fut>(
+    db: &djinn_db::Database,
+    task: &djinn_core::models::Task,
+    completion: F,
+) -> anyhow::Result<djinn_runtime::TaskRunOutcome>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = djinn_runtime::TaskRunOutcome>,
+{
+    let expected_pr_url = task.pr_url.clone();
+    let outcome = completion().await;
+    if let (Some(expected), djinn_runtime::TaskRunOutcome::PrOpened { url, .. }) =
+        (expected_pr_url.as_deref(), &outcome)
+    {
+        if url != expected {
+            anyhow::bail!(
+                "legacy completion changed explicit PR identity for task {}: expected {}, observed {}",
+                task.id,
+                expected,
+                url
+            );
+        }
+    }
+    let persisted = djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+        .get(&task.id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("task {} disappeared during legacy completion", task.id))?;
+    if persisted.pr_url != expected_pr_url {
+        anyhow::bail!(
+            "legacy completion mutated persisted PR identity for task {}: expected {:?}, observed {:?}",
+            task.id,
+            expected_pr_url,
+            persisted.pr_url
+        );
+    }
+    Ok(outcome)
+}
+
 /// Select the approved-task writer at the completion boundary. Keeping the
 /// collaborators explicit gives production and tests one fail-closed routing
 /// seam between direct append and legacy task-PR completion.
@@ -332,8 +373,19 @@ impl CoordinatorActor {
                 provider_override: None,
             };
             let pr_url_existed_before = task.pr_url.is_some();
-            let outcome =
-                crate::supervisor_impl::supervisor_pr_open(&spec, &task, &callbacks).await;
+            let outcome = match run_legacy_completion_preserving_pr_identity(
+                &self.db,
+                &task,
+                || crate::supervisor_impl::supervisor_pr_open(&spec, &task, &callbacks),
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    tracing::error!(task_id = %task.short_id, error = %error, "CoordinatorActor: legacy completion violated persisted PR identity");
+                    continue;
+                }
+            };
             match outcome {
                 djinn_runtime::TaskRunOutcome::PrOpened { url, sha } => {
                     self.pr_errors.remove(&task.project_id);
