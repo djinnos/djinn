@@ -23,15 +23,14 @@ where
     let outcome = completion().await;
     if let (Some(expected), djinn_runtime::TaskRunOutcome::PrOpened { url, .. }) =
         (expected_pr_url.as_deref(), &outcome)
+        && url != expected
     {
-        if url != expected {
-            anyhow::bail!(
-                "legacy completion changed explicit PR identity for task {}: expected {}, observed {}",
-                task.id,
-                expected,
-                url
-            );
-        }
+        anyhow::bail!(
+            "legacy completion changed explicit PR identity for task {}: expected {}, observed {}",
+            task.id,
+            expected,
+            url
+        );
     }
     let persisted = djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
         .get(&task.id)

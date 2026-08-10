@@ -671,10 +671,9 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
         let observed = self.remote.observe(&attempt.branch_name).await?;
         if let (Some(head), Some(candidate)) =
             (&observed, self.ledger.prepared_candidate(&identity).await?)
+            && *head == candidate.candidate_sha
         {
-            if *head == candidate.candidate_sha {
-                return self.integrate(identity, candidate.candidate_sha).await;
-            }
+            return self.integrate(identity, candidate.candidate_sha).await;
         }
         // Select and validate the parent before recording immutable preparation
         // facts. A mapped append observed here is a valid candidate parent.
