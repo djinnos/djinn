@@ -388,6 +388,9 @@ pub(crate) async fn execute_route(
                 commit_headline: "",
                 method: MergeMethod::Squash,
             });
+            // CI routing still mutates a legacy task PR. Record the provider
+            // boundary so direct-delivery effect tests prove it was not hit.
+            crate::direct_delivery::observe_boundary_operation("task_pr_auto_merge");
             provider
                 .enable_auto_merge(
                     target.owner,

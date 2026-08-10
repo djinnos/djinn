@@ -681,6 +681,11 @@ impl CoordinatorActor {
                         GitHubApiClient::for_user_token(session.github_access_token.clone())
                     }
                 };
+                // A delegated approval is the task-PR approval/signoff
+                // boundary. Keep both audit labels beside the production
+                // collaborator that performs the mutation.
+                crate::direct_delivery::observe_boundary_operation("task_pr_approval");
+                crate::direct_delivery::observe_boundary_operation("task_pr_signoff");
                 match user_client
                     .approve_pull_request(&owner, &repo, pull_number, &current_sha)
                     .await
@@ -892,6 +897,11 @@ impl CoordinatorActor {
                     // PR via GraphQL `enqueuePullRequest`, which works
                     // regardless of the repo's "Allow auto-merge" setting.
                     if is_merge_queue_405(&e) {
+                        // This GraphQL mutation is the custom legacy enqueue
+                        // operation and is forbidden to direct delivery.
+                        crate::direct_delivery::observe_boundary_operation(
+                            "task_pr_custom_enqueue",
+                        );
                         match gh_client
                             .enqueue_pull_request(&pr.node_id, &current_sha)
                             .await
