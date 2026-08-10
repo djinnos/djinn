@@ -2621,7 +2621,8 @@ mod tests {
                 }
                 match state {
                     State::MissingSchema => {
-                        djinn_db::test_support::drop_table_for_test(&db, "task_deliveries").await
+                        djinn_db::test_support::drop_table_cascade_for_test(&db, "task_deliveries")
+                            .await
                     }
                     State::MissingEpoch => {
                         sqlx::query(
@@ -2632,7 +2633,16 @@ mod tests {
                         .unwrap();
                     }
                     State::UnknownEpoch => {
-                        sqlx::query("UPDATE direct_delivery_epochs SET state = 'unknown' WHERE name = 'direct_delivery_v1'").execute(db.pool()).await.unwrap();
+                        sqlx::query(
+                            "ALTER TABLE direct_delivery_epochs DROP CONSTRAINT direct_delivery_epochs_state_check",
+                        )
+                        .execute(db.pool())
+                        .await
+                        .unwrap();
+                        sqlx::query("UPDATE direct_delivery_epochs SET state = 'unknown' WHERE name = 'direct_delivery_v1'")
+                            .execute(db.pool())
+                            .await
+                            .unwrap();
                     }
                     _ => {}
                 }
@@ -2701,7 +2711,7 @@ mod tests {
                     );
                 }
                 if matches!(state, State::Unresolved) {
-                    assert_eq!(after.0, "escalated");
+                    assert_eq!(after.0, "needs_lead_intervention");
                 }
                 if matches!(state, State::ExplicitLegacy) {
                     assert_eq!(
