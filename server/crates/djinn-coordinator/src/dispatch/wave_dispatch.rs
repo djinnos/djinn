@@ -79,8 +79,9 @@ where
     match admission {
         crate::direct_delivery::DirectDeliveryAdmission::Direct { .. } => direct_delivery().await,
         crate::direct_delivery::DirectDeliveryAdmission::Legacy => legacy_completion().await,
-        crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner => {
-            unreachable!("no-proposal-owner tasks are parked before completion routing")
+        crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner
+        | crate::direct_delivery::DirectDeliveryAdmission::ContractUnavailable(_) => {
+            unreachable!("fail-closed tasks are parked before completion routing")
         }
     }
 }

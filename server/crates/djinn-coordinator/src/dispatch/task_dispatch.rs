@@ -2033,7 +2033,8 @@ impl CoordinatorActor {
             {
                 Ok(crate::direct_delivery::DirectDeliveryAdmission::Legacy)
                 | Ok(crate::direct_delivery::DirectDeliveryAdmission::Direct { .. }) => {}
-                Ok(crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner) => {
+                Ok(crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner)
+                | Ok(crate::direct_delivery::DirectDeliveryAdmission::ContractUnavailable(_)) => {
                     // The production admission wrapper already persisted the
                     // no_proposal_owner park. Do not issue a second Escalate.
                     continue;
