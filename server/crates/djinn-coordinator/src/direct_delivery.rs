@@ -289,8 +289,12 @@ impl DeliveryLedger for RepositoryDeliveryLedger {
                 attempt_id,
                 match reason {
                     ParkReason::TaskAppendConflict => DirectDeliveryParkReason::DeliveryConflict,
-                    ParkReason::UnexpectedBranchHead => DirectDeliveryParkReason::UnexpectedBranchHead,
-                    ParkReason::StaleHeadRetryBound => DirectDeliveryParkReason::MappedHeadRetryBound,
+                    ParkReason::UnexpectedBranchHead => {
+                        DirectDeliveryParkReason::UnexpectedBranchHead
+                    }
+                    ParkReason::StaleHeadRetryBound => {
+                        DirectDeliveryParkReason::MappedHeadRetryBound
+                    }
                 },
             )
             .await?;
@@ -602,9 +606,14 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
                         .await?
                     {
                         CandidateBuild::Clean(candidate)
-                            if candidate.selected_parent_sha == head => candidate,
+                            if candidate.selected_parent_sha == head =>
+                        {
+                            candidate
+                        }
                         CandidateBuild::Clean(_) => {
-                            return Err(anyhow!("candidate builder returned a different selected parent"));
+                            return Err(anyhow!(
+                                "candidate builder returned a different selected parent"
+                            ));
                         }
                         CandidateBuild::Conflict {
                             patch_digest,
@@ -923,7 +932,12 @@ mod tests {
                 .pop()
                 .ok_or_else(|| anyhow!("missing observation"))
         }
-        async fn update_expected_old(&self, _: &str, expected: &str, new: &str) -> Result<RemoteUpdate> {
+        async fn update_expected_old(
+            &self,
+            _: &str,
+            expected: &str,
+            new: &str,
+        ) -> Result<RemoteUpdate> {
             if let Some(calls) = &self.calls {
                 calls
                     .lock()
@@ -1119,7 +1133,8 @@ mod tests {
             }],
             vec![Some("base")],
         );
-        let engine = DirectDeliveryEngine::new(ledger(calls.clone()), remote, Builder { conflict: false });
+        let engine =
+            DirectDeliveryEngine::new(ledger(calls.clone()), remote, Builder { conflict: false });
         assert!(matches!(
             engine.deliver(source(1)).await.unwrap(),
             DeliveryOutcome::Integrated { candidate_sha } if candidate_sha == "commit-base"
@@ -1150,7 +1165,10 @@ mod tests {
         let mut state = ledger(calls.clone());
         state.mapped = true;
         let engine = DirectDeliveryEngine::new(state, remote, Builder { conflict: false });
-        assert!(matches!(engine.deliver(source(1)).await.unwrap(), DeliveryOutcome::Integrated { .. }));
+        assert!(matches!(
+            engine.deliver(source(1)).await.unwrap(),
+            DeliveryOutcome::Integrated { .. }
+        ));
         assert_eq!(
             *calls.lock().unwrap(),
             [
@@ -1170,10 +1188,18 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let (remote, updates) = remote(
             vec![
-                RemoteUpdate::Stale { observed_sha: Some("h4".into()) },
-                RemoteUpdate::Stale { observed_sha: Some("h3".into()) },
-                RemoteUpdate::Stale { observed_sha: Some("h2".into()) },
-                RemoteUpdate::Stale { observed_sha: Some("h1".into()) },
+                RemoteUpdate::Stale {
+                    observed_sha: Some("h4".into()),
+                },
+                RemoteUpdate::Stale {
+                    observed_sha: Some("h3".into()),
+                },
+                RemoteUpdate::Stale {
+                    observed_sha: Some("h2".into()),
+                },
+                RemoteUpdate::Stale {
+                    observed_sha: Some("h1".into()),
+                },
             ],
             vec![Some("base")],
         );

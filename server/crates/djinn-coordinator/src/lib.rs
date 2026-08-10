@@ -59,10 +59,10 @@ pub mod cargo_warm_base_gc;
 pub(crate) mod ci_preflight_gate;
 pub mod ci_reproduction;
 pub mod context;
-pub mod disk_admission;
-pub mod dispatch_pause;
 /// Crash-convergent direct append engine, unreachable while its epoch is off.
 pub mod direct_delivery;
+pub mod disk_admission;
+pub mod dispatch_pause;
 pub mod doctor;
 pub mod environment;
 pub mod events;
