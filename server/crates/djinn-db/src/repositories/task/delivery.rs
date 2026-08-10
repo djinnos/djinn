@@ -135,6 +135,27 @@ impl TaskRepository {
         .transpose()
     }
 
+    /// Return the newest immutable delivery generation for this task on this
+    /// exact attempt. Replayers must retain this identity rather than restart
+    /// at generation one after a mapped-head successor was recorded.
+    pub async fn latest_delivery_for_attempt(
+        &self,
+        build_attempt_id: &str,
+        task_id: &str,
+    ) -> Result<Option<TaskDelivery>> {
+        nonblank("build_attempt_id", build_attempt_id)?;
+        nonblank("task_id", task_id)?;
+        sqlx::query_as::<_, DeliveryRow>(&format!(
+            "SELECT {COLS} FROM task_deliveries WHERE build_attempt_id=$1 AND task_id=$2 ORDER BY delivery_generation DESC LIMIT 1"
+        ))
+        .bind(build_attempt_id)
+        .bind(task_id)
+        .fetch_optional(self.db.pool())
+        .await?
+        .map(DeliveryRow::into_delivery)
+        .transpose()
+    }
+
     /// Whether a SHA is an immutable candidate previously recorded for this
     /// attempt. Reconciliation uses this to distinguish ledger-proven history
     /// from an arbitrary remote ref head.

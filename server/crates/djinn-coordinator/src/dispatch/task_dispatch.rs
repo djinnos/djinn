@@ -2021,6 +2021,33 @@ impl CoordinatorActor {
                 tracing::error!(task_id = %task.short_id, project_id = %task.project_id, "CoordinatorActor: dispatch blocked by failed legacy settings import");
                 continue;
             }
+            // Ready admission and approved completion share this read-only
+            // epoch/ownership boundary. Active unresolved ownership is parked,
+            // never allowed to fall through to legacy behavior.
+            match crate::direct_delivery::admit_direct_delivery(self.db.clone(), &task.id).await {
+                Ok(crate::direct_delivery::DirectDeliveryAdmission::Legacy)
+                | Ok(crate::direct_delivery::DirectDeliveryAdmission::Direct { .. }) => {}
+                Ok(crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner) => {
+                    match crate::direct_delivery::park_no_proposal_owner(
+                        &self.task_repo(),
+                        &task.id,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            tracing::warn!(task_id = %task.short_id, "CoordinatorActor: dispatch durably parked as no_proposal_owner")
+                        }
+                        Err(error) => {
+                            tracing::error!(task_id = %task.short_id, error = %error, "CoordinatorActor: failed to persist no_proposal_owner park")
+                        }
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    tracing::error!(task_id = %task.short_id, error = %error, "CoordinatorActor: dispatch denied because direct-delivery capability is unavailable or unknown");
+                    continue;
+                }
+            }
             if let Some((pause_scope, pause_target_id, pause)) =
                 matching_task_dispatch_pause(&pause_state, &task)
             {
