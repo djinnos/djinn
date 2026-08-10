@@ -86,7 +86,21 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
         other => panic!("target-one must yield exactly one permit and typed wait: {other:?}"),
     };
     let lease = winner.lease.clone().expect("winner lease");
-    assert_eq!(model_turn_decision_count_fixture(&db, pool).await, 1);
+    let launch_identities = model_turn_launch_identities_fixture(&db).await;
+    assert_eq!(
+        launch_identities.as_slice(),
+        &[(
+            lease.lease_id.clone(),
+            lease.generation,
+            lease.request_id.clone(),
+        )],
+        "enforced preparation persists exactly one fenced lease identity"
+    );
+    assert_eq!(
+        model_turn_lease_lifecycle_fixture(&db, &lease.lease_id).await,
+        "dispatching",
+        "the winning enforced preparation commits its dispatch fence before B1 network launch"
+    );
 
     let launches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let launch_count = Arc::clone(&launches);
