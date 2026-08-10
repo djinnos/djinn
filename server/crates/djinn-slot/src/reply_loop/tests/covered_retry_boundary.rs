@@ -713,7 +713,7 @@ enum ReplacementPreparationCase {
 }
 
 async fn typed_replacement_preparation_outcome(case: ReplacementPreparationCase) {
-    // Database setup deliberately completes before Tokio time is paused.
+    // Database setup deliberately completes under real Tokio time.
     let db = Database::ephemeral().await.expect("database");
     let pool = seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
     let session_cancel = CancellationToken::new();
@@ -721,10 +721,11 @@ async fn typed_replacement_preparation_outcome(case: ReplacementPreparationCase)
     let slot_ctx = crate::test_helpers::agent_context_from_db(db.clone(), session_cancel.clone());
     let provider = ScriptedCoveredB1Provider::with_first_terminal_and_deadline(
         ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Transport),
-        Some(60_000),
+        Some(0),
     );
     let session_id = format!("covered-retry-preparation-{}", uuid::Uuid::now_v7());
     let hooks = Arc::new(ModelTurnAdmissionTestHooks::default());
+    hooks.block_covered_retry_wait.store(true, Ordering::Release);
     if matches!(case, ReplacementPreparationCase::DispatchFenced) {
         hooks
             .block_dispatching_at_prepare
@@ -751,7 +752,8 @@ async fn typed_replacement_preparation_outcome(case: ReplacementPreparationCase)
     );
     let settled = settled.notified();
     let waited = waited.notified();
-    tokio::pin!(settled, waited);
+    let retry_wait_reached = hooks.covered_retry_wait_reached.notified();
+    tokio::pin!(settled, waited, retry_wait_reached);
     let mut conversation = Conversation::new();
     conversation.push(Message::user("exercise typed replacement preparation"));
     let compaction_cs = crate::reply_loop::CompactionCriticalSection::new();
@@ -784,6 +786,7 @@ async fn typed_replacement_preparation_outcome(case: ReplacementPreparationCase)
     tokio::pin!(run);
     tokio::select! { _ = &mut settled => {}, result = &mut run => panic!("old attempt did not settle: {:?}", result.0) }
     tokio::select! { _ = &mut waited => {}, result = &mut run => panic!("retry wait missing: {:?}", result.0) }
+    tokio::select! { _ = &mut retry_wait_reached => {}, result = &mut run => panic!("retry wait synchronization missing: {:?}", result.0) }
     let old_request = format!("{session_id}:covered:1");
     let old = model_turn_launch_identities_fixture(&db)
         .await
@@ -802,12 +805,15 @@ async fn typed_replacement_preparation_outcome(case: ReplacementPreparationCase)
         ReplacementPreparationCase::Rejected => set_pool_capability(&db, pool, "unsupported").await,
         ReplacementPreparationCase::DispatchFenced => {}
     }
-    // Register before advancing time so the run-scoped hook cannot notify
-    // between the replacement acquire and this test's await.
+    // Register before releasing the run-scoped retry boundary so the
+    // dispatching hook cannot notify between replacement acquire and await.
     let reached = hooks.dispatching_reached.notified();
     tokio::pin!(reached);
-    tokio::time::pause();
-    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    // The initial terminal is settled and the production retry boundary is
+    // blocked above. Allow its elapsed retry timer and the real repository
+    // preparation to proceed under real Tokio time rather than advancing SQLx
+    // pool timeouts with a virtual retry clock.
+    hooks.covered_retry_wait_release.notify_one();
     if matches!(case, ReplacementPreparationCase::DispatchFenced) {
         tokio::select! { _ = &mut reached => {}, result = &mut run => panic!("replacement did not acquire before fence: {:?}", result.0) }
         let replacement = hooks.acquired_identities.lock().expect("identities")[1].clone();
@@ -820,7 +826,6 @@ async fn typed_replacement_preparation_outcome(case: ReplacementPreparationCase)
         );
         hooks.dispatching_release.notify_waiters();
     }
-    tokio::time::resume();
     let (result, ..) = run.await;
     let error = result.expect_err("typed preparation must terminate replacement scheduling");
     let outcome = error

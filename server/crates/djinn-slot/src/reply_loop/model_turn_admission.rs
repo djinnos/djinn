@@ -210,6 +210,12 @@ pub(crate) struct ModelTurnAdmissionTestHooks {
     pub reconcile_release: TestNotify,
     pub reconcile_finished: TestNotify,
     pub block_reconcile: std::sync::atomic::AtomicBool,
+    /// Pause a run-scoped reply loop after it has authoritatively entered its
+    /// covered retry wait. This only synchronizes test setup before the normal
+    /// retry timer and replacement preparation continue.
+    pub block_covered_retry_wait: std::sync::atomic::AtomicBool,
+    pub covered_retry_wait_reached: TestNotify,
+    pub covered_retry_wait_release: TestNotify,
     /// Pause one selected acquired lease immediately before its production
     /// dispatch-fence write. This synchronizes a real repository race; it
     /// never replaces acquisition or dispatching logic.
@@ -241,6 +247,9 @@ impl Default for ModelTurnAdmissionTestHooks {
             reconcile_release: TestNotify::new(),
             reconcile_finished: TestNotify::new(),
             block_reconcile: std::sync::atomic::AtomicBool::new(false),
+            block_covered_retry_wait: std::sync::atomic::AtomicBool::new(false),
+            covered_retry_wait_reached: TestNotify::new(),
+            covered_retry_wait_release: TestNotify::new(),
             block_dispatching_at_prepare: AtomicUsize::new(usize::MAX),
             acquired_identities: std::sync::Mutex::new(Vec::new()),
             dispatching_reached: TestNotify::new(),
@@ -406,7 +415,7 @@ impl ModelTurnAdmissionCoordinator {
                             identities.len()
                         };
                         if hooks.block_dispatching_at_prepare.load(Ordering::Acquire) == ordinal {
-                            hooks.dispatching_reached.notify_waiters();
+                            hooks.dispatching_reached.notify_one();
                             hooks.dispatching_release.notified().await;
                         }
                     }
