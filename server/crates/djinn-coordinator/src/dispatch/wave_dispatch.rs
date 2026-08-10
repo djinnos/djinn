@@ -20,6 +20,7 @@ where
     Fut: std::future::Future<Output = djinn_runtime::TaskRunOutcome>,
 {
     let expected_pr_url = task.pr_url.clone();
+    crate::direct_delivery::observe_boundary_operation("supervisor_pr_open");
     let outcome = completion().await;
     if let (Some(expected), djinn_runtime::TaskRunOutcome::PrOpened { url, .. }) =
         (expected_pr_url.as_deref(), &outcome)
@@ -55,14 +56,18 @@ where
 /// Select the approved-task writer at the completion boundary. Keeping the
 /// collaborators explicit gives production and tests one fail-closed routing
 /// seam between direct append and legacy task-PR completion.
-pub(crate) fn route_approved_completion<T>(
+pub(crate) async fn route_approved_completion<T, DirectFuture, LegacyFuture>(
     admission: crate::direct_delivery::DirectDeliveryAdmission,
-    direct_delivery: impl FnOnce() -> T,
-    legacy_completion: impl FnOnce() -> T,
-) -> T {
+    direct_delivery: impl FnOnce() -> DirectFuture,
+    legacy_completion: impl FnOnce() -> LegacyFuture,
+) -> T
+where
+    DirectFuture: std::future::Future<Output = T>,
+    LegacyFuture: std::future::Future<Output = T>,
+{
     match admission {
-        crate::direct_delivery::DirectDeliveryAdmission::Direct { .. } => direct_delivery(),
-        crate::direct_delivery::DirectDeliveryAdmission::Legacy => legacy_completion(),
+        crate::direct_delivery::DirectDeliveryAdmission::Direct { .. } => direct_delivery().await,
+        crate::direct_delivery::DirectDeliveryAdmission::Legacy => legacy_completion().await,
         crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner => {
             unreachable!("no-proposal-owner tasks are parked before completion routing")
         }
@@ -219,6 +224,7 @@ impl CoordinatorActor {
                     .await
                 {
                     Ok(_) => {
+                        crate::direct_delivery::observe_boundary_operation("simple_close");
                         poll_stack::boxed(|| {
                             self.cleanup_pr_and_branch_on_close(&task, CloseKind::NonMerge)
                         })
@@ -245,7 +251,10 @@ impl CoordinatorActor {
 
             // Direct work returns before any supervisor task-PR operation. The
             // selection seam is shared with the explicit-legacy boundary test.
-            let direct_completion = route_approved_completion(admission, || true, || false);
+            let direct_completion = matches!(
+                &admission,
+                crate::direct_delivery::DirectDeliveryAdmission::Direct { .. }
+            );
             if direct_completion {
                 let task_branch = format!("task/{}", task.short_id);
                 let Some(mirror) = self.mirror.as_ref() else {
@@ -272,17 +281,28 @@ impl CoordinatorActor {
                     Ok(Some(config)) => config.target_branch,
                     _ => "main".into(),
                 };
-                match crate::direct_delivery::deliver_task_branch(
-                    self.db.clone(),
-                    crate::events::event_bus_for(&self.events_tx),
-                    mirror,
-                    &task.id,
-                    &task.project_id,
-                    &task_branch,
-                    &base_branch,
-                    owner,
-                    repo_name,
-                    djinn_provider::github_api::GitHubApiClient::for_installation(installation_id),
+                match route_approved_completion(
+                    admission.clone(),
+                    || async {
+                        crate::direct_delivery::deliver_task_branch(
+                            self.db.clone(),
+                            crate::events::event_bus_for(&self.events_tx),
+                            mirror,
+                            &task.id,
+                            &task.project_id,
+                            &task_branch,
+                            &base_branch,
+                            owner,
+                            repo_name,
+                            djinn_provider::github_api::GitHubApiClient::for_installation(
+                                installation_id,
+                            ),
+                        )
+                        .await
+                    },
+                    || async {
+                        unreachable!("legacy completion cannot run after direct admission")
+                    },
                 )
                 .await
                 {
@@ -377,10 +397,15 @@ impl CoordinatorActor {
                 provider_override: None,
             };
             let pr_url_existed_before = task.pr_url.is_some();
-            let outcome = match run_legacy_completion_preserving_pr_identity(
-                &self.db,
-                &task,
-                || crate::supervisor_impl::supervisor_pr_open(&spec, &task, &callbacks),
+            let outcome = match route_approved_completion(
+                admission,
+                || async { unreachable!("direct append cannot run after legacy admission") },
+                || async {
+                    run_legacy_completion_preserving_pr_identity(&self.db, &task, || {
+                        crate::supervisor_impl::supervisor_pr_open(&spec, &task, &callbacks)
+                    })
+                    .await
+                },
             )
             .await
             {
