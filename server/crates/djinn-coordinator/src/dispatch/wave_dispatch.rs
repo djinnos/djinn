@@ -20,6 +20,7 @@ where
     Fut: std::future::Future<Output = djinn_runtime::TaskRunOutcome>,
 {
     let expected_pr_url = task.pr_url.clone();
+    crate::direct_delivery::observe_boundary_operation("supervisor_pr_open");
     let outcome = completion().await;
     if let (Some(expected), djinn_runtime::TaskRunOutcome::PrOpened { url, .. }) =
         (expected_pr_url.as_deref(), &outcome)
@@ -219,6 +220,7 @@ impl CoordinatorActor {
                     .await
                 {
                     Ok(_) => {
+                        crate::direct_delivery::observe_boundary_operation("simple_close");
                         poll_stack::boxed(|| {
                             self.cleanup_pr_and_branch_on_close(&task, CloseKind::NonMerge)
                         })
