@@ -265,6 +265,30 @@ async fn reconciliation_parks_adopted_branch_and_resolver_routes_only_authorized
 }
 
 #[tokio::test]
+async fn mapped_head_retry_bound_is_a_persistable_terminal_park_reason() {
+    let db = db().await;
+    proposal(&db, "p", None).await;
+    let repo = ProposalBuildAttemptRepository::new(db.clone());
+    reserve(&repo, "p", "a").await;
+    activate(&repo, "a").await;
+
+    let parked = repo
+        .park("a", DirectDeliveryParkReason::MappedHeadRetryBound)
+        .await
+        .unwrap();
+    assert_eq!(
+        parked.park_reason,
+        Some(DirectDeliveryParkReason::MappedHeadRetryBound)
+    );
+    let persisted: Option<String> =
+        sqlx::query_scalar("SELECT park_reason FROM proposal_build_attempts WHERE id = 'a'")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(persisted.as_deref(), Some("mapped_head_retry_bound"));
+}
+
+#[tokio::test]
 async fn capability_mismatches_reject_writes_before_attempt_mutation() {
     let db = db().await;
     proposal(&db, "p", None).await;
