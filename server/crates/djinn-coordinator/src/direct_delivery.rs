@@ -2514,23 +2514,16 @@ mod tests {
             let task = tasks.get(task_id).await.unwrap().unwrap();
             let activities = djinn_db::test_support::activity_row_count_for_test(db, task_id).await;
             let attempts = djinn_db::test_support::task_attempt_count_for_test(db, task_id).await;
-            let build_attempts =
-                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM proposal_build_attempts")
-                    .fetch_one(db.pool())
-                    .await
-                    .ok();
-            let ledger = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM task_deliveries")
-                .fetch_one(db.pool())
-                .await
-                .ok();
+            let direct_delivery_counts =
+                djinn_db::test_support::direct_delivery_matrix_counts_for_test(db).await;
             (
                 task.status,
                 task.pr_url,
                 task.merge_commit_sha,
                 activities,
                 attempts,
-                build_attempts,
-                ledger,
+                direct_delivery_counts.build_attempts,
+                direct_delivery_counts.deliveries,
             )
         }
 
@@ -2587,17 +2580,10 @@ mod tests {
                     djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
                 }
                 if matches!(state, State::Direct) {
-                    sqlx::query(
-                        "INSERT INTO proposals (id, short_id, title) VALUES ('p', 'p', 'p')",
+                    djinn_db::test_support::seed_direct_delivery_proposal_owner_for_test(
+                        &db, &epic.id, "p", "p",
                     )
-                    .execute(db.pool())
-                    .await
-                    .unwrap();
-                    sqlx::query("UPDATE epics SET proposal_id = 'p' WHERE id = $1")
-                        .bind(&epic.id)
-                        .execute(db.pool())
-                        .await
-                        .unwrap();
+                    .await;
                     let attempts = ProposalBuildAttemptRepository::new(db.clone());
                     attempts
                         .reserve(&ReserveProposalBuildAttemptInput {
@@ -2625,24 +2611,11 @@ mod tests {
                             .await
                     }
                     State::MissingEpoch => {
-                        sqlx::query(
-                            "DELETE FROM direct_delivery_epochs WHERE name = 'direct_delivery_v1'",
-                        )
-                        .execute(db.pool())
-                        .await
-                        .unwrap();
+                        djinn_db::test_support::remove_direct_delivery_epoch_for_test(&db).await;
                     }
                     State::UnknownEpoch => {
-                        sqlx::query(
-                            "ALTER TABLE direct_delivery_epochs DROP CONSTRAINT direct_delivery_epochs_state_check",
-                        )
-                        .execute(db.pool())
-                        .await
-                        .unwrap();
-                        sqlx::query("UPDATE direct_delivery_epochs SET state = 'unknown' WHERE name = 'direct_delivery_v1'")
-                            .execute(db.pool())
-                            .await
-                            .unwrap();
+                        djinn_db::test_support::seed_unknown_direct_delivery_epoch_for_test(&db)
+                            .await;
                     }
                     _ => {}
                 }

@@ -58,7 +58,6 @@ libc = "0.2"
 workspace-hack.workspace = true
 
 [dev-dependencies]
-sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
 djinn-agent = { path = "../djinn-agent", features = ["test-support"] }
 djinn-db = { path = "../djinn-db", features = ["test-support"] }
 # `pod_resize_fixture` — a stored `Pod` driven through the PRODUCTION observation,

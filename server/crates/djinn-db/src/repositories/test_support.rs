@@ -20,6 +20,86 @@ pub async fn activate_direct_delivery_epoch_for_test(db: &Database) {
     .expect("failed to activate direct-delivery test epoch");
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectDeliveryMatrixCountsForTest {
+    pub build_attempts: Option<i64>,
+    pub deliveries: Option<i64>,
+}
+
+/// Snapshot direct-delivery attempt and ledger counts for coordinator tests.
+/// **Not for production use.**
+pub async fn direct_delivery_matrix_counts_for_test(
+    db: &Database,
+) -> DirectDeliveryMatrixCountsForTest {
+    db.ensure_initialized().await.unwrap();
+    let build_attempts =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM proposal_build_attempts")
+            .fetch_one(db.pool())
+            .await
+            .ok();
+    let deliveries = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM task_deliveries")
+        .fetch_one(db.pool())
+        .await
+        .ok();
+    DirectDeliveryMatrixCountsForTest {
+        build_attempts,
+        deliveries,
+    }
+}
+
+/// Seed the canonical `task.epic_id -> epic.proposal_id` ownership edge.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn seed_direct_delivery_proposal_owner_for_test(
+    db: &Database,
+    epic_id: &str,
+    proposal_id: &str,
+    proposal_short_id: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    let mut tx = db.pool().begin().await.unwrap();
+    sqlx::query("INSERT INTO proposals (id, short_id, title) VALUES ($1, $2, $2)")
+        .bind(proposal_id)
+        .bind(proposal_short_id)
+        .execute(&mut *tx)
+        .await
+        .expect("failed to seed direct-delivery proposal");
+    sqlx::query("UPDATE epics SET proposal_id = $1 WHERE id = $2")
+        .bind(proposal_id)
+        .bind(epic_id)
+        .execute(&mut *tx)
+        .await
+        .expect("failed to wire direct-delivery epic ownership");
+    tx.commit().await.unwrap();
+}
+
+/// Remove the persisted direct-delivery epoch for a fail-closed fixture.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn remove_direct_delivery_epoch_for_test(db: &Database) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("DELETE FROM direct_delivery_epochs WHERE name = 'direct_delivery_v1'")
+        .execute(db.pool())
+        .await
+        .expect("failed to remove direct-delivery test epoch");
+}
+
+/// Persist an unknown epoch state after dropping the shipped check constraint.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn seed_unknown_direct_delivery_epoch_for_test(db: &Database) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "ALTER TABLE direct_delivery_epochs DROP CONSTRAINT direct_delivery_epochs_state_check",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to drop direct-delivery epoch state constraint");
+    sqlx::query(
+        "UPDATE direct_delivery_epochs SET state = 'unknown' WHERE name = 'direct_delivery_v1'",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to seed unknown direct-delivery epoch state");
+}
+
 mod evidence_dispatch_recovery;
 mod refinement_read_only;
 mod test_support_retry;
