@@ -4,7 +4,7 @@
 //! expected-old update, and finalizes conflict generations before parking their
 //! build attempt.
 
-use std::{collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, path::PathBuf, time::Duration};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -552,10 +552,6 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
                 .await?
             {
                 RemoteUpdate::Updated { sha } if sha == candidate.candidate_sha => {
-                    let observed = self.remote.observe(&attempt.branch_name).await?;
-                    if observed.as_deref() != Some(candidate.candidate_sha.as_str()) {
-                        return self.park_unexpected(&attempt, &identity, observed).await;
-                    }
                     return self.integrate(identity, candidate.candidate_sha).await;
                 }
                 RemoteUpdate::Updated { sha } => {
@@ -572,8 +568,17 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
                     if !self.ledger.is_mapped_first_parent(&attempt, &head).await? {
                         return self.park_unexpected(&attempt, &identity, Some(head)).await;
                     }
-                    observed_mapped_heads.insert(head.clone());
-                    if observed_mapped_heads.len() > 3 {
+                    // A replayed stale response for the same mapped head is not
+                    // another topology change. Retry its prepared successor,
+                    // rather than minting another immutable generation.
+                    if !observed_mapped_heads.insert(head.clone()) {
+                        debug_assert_eq!(candidate.selected_parent_sha, head);
+                        parent = head;
+                        continue;
+                    }
+                    // The retry budget is a bound on distinct mapped heads; do
+                    // not prepare a successor after observing the third one.
+                    if observed_mapped_heads.len() >= 3 {
                         self.ledger
                             .park(
                                 &attempt.build_attempt_id,
@@ -719,17 +724,29 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
         identity: TaskDeliveryIdentity,
         sha: String,
     ) -> Result<DeliveryOutcome> {
-        if self
-            .ledger
-            .integrate(TaskIntegrated::new(identity, &sha, &sha, &sha)?)
-            .await?
-            == LedgerResult::Stale
-        {
-            return Ok(DeliveryOutcome::UnexpectedHeadParked {
-                observed_sha: Some(sha),
-            });
+        // A concurrent append can advance the remote through this candidate
+        // before its selected parent has finalized the durable attempt head.
+        // Reconcile the exact system-only fact until its durable predecessor
+        // commits. This is deliberately not a scheduler-yield budget: a real
+        // database transaction can remain in progress longer than an arbitrary
+        // number of executor turns. No replay here can mutate the remote ref
+        // or change this generation's identity.
+        loop {
+            if self
+                .ledger
+                .integrate(TaskIntegrated::new(identity.clone(), &sha, &sha, &sha)?)
+                .await?
+                != LedgerResult::Stale
+            {
+                return Ok(DeliveryOutcome::Integrated { candidate_sha: sha });
+            }
+            // `TaskIntegrated` performs the transactional durable-head check.
+            // A stale result means its selected parent has not finalized yet;
+            // wait before asking that transaction to reconcile again rather
+            // than misclassifying a transient parent transaction as an
+            // unexpected remote head.
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        Ok(DeliveryOutcome::Integrated { candidate_sha: sha })
     }
     async fn park_unexpected(
         &self,
@@ -754,7 +771,10 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
     #[derive(Clone)]
     struct Ledger {
         calls: Arc<Mutex<Vec<String>>>,
@@ -1146,9 +1166,9 @@ mod tests {
         assert!(updates.lock().unwrap().is_empty());
     }
     #[tokio::test]
-    async fn duplicate_mapped_heads_do_not_consume_distinct_retry_budget() {
+    async fn duplicate_mapped_heads_retry_the_prepared_candidate_without_a_new_generation() {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let (remote, updates) = remote(
+        let (mut remote, updates) = remote(
             vec![
                 RemoteUpdate::Updated {
                     sha: "commit-mapped".into(),
@@ -1162,35 +1182,34 @@ mod tests {
             ],
             vec![Some("commit-mapped"), Some("base")],
         );
+        remote.calls = Some(calls.clone());
         let mut state = ledger(calls.clone());
         state.mapped = true;
         let engine = DirectDeliveryEngine::new(state, remote, Builder { conflict: false });
         assert!(matches!(
             engine.deliver(source(1)).await.unwrap(),
-            DeliveryOutcome::Integrated { .. }
+            DeliveryOutcome::Integrated { candidate_sha } if candidate_sha == "commit-mapped"
         ));
         assert_eq!(
             *calls.lock().unwrap(),
             [
                 "prepare:commit-base",
                 "applying",
+                "update:base:commit-base",
                 "mapped-retry:1:2",
                 "applying",
-                "mapped-retry:2:3",
-                "applying",
-                "integrate:3"
+                "update:mapped:commit-mapped",
+                "update:mapped:commit-mapped",
+                "integrate:2"
             ]
         );
         assert!(updates.lock().unwrap().is_empty());
     }
     #[tokio::test]
-    async fn fourth_distinct_mapped_head_parks_at_retry_bound() {
+    async fn third_distinct_mapped_head_parks_at_retry_bound() {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let (remote, updates) = remote(
+        let (mut remote, updates) = remote(
             vec![
-                RemoteUpdate::Stale {
-                    observed_sha: Some("h4".into()),
-                },
                 RemoteUpdate::Stale {
                     observed_sha: Some("h3".into()),
                 },
@@ -1203,16 +1222,22 @@ mod tests {
             ],
             vec![Some("base")],
         );
+        remote.calls = Some(calls.clone());
         let mut state = ledger(calls.clone());
         state.mapped = true;
         let engine = DirectDeliveryEngine::new(state, remote, Builder { conflict: false });
         assert_eq!(
             engine.deliver(source(1)).await.unwrap(),
-            DeliveryOutcome::RetryBoundParked { observed_heads: 4 }
+            DeliveryOutcome::RetryBoundParked { observed_heads: 3 }
         );
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.last().unwrap(), "park:StaleHeadRetryBound");
         assert_eq!(
-            calls.lock().unwrap().last().unwrap(),
-            "park:StaleHeadRetryBound"
+            calls
+                .iter()
+                .filter(|call| call.starts_with("update:"))
+                .count(),
+            3
         );
         assert!(updates.lock().unwrap().is_empty());
     }
@@ -1261,5 +1286,418 @@ mod tests {
             "park:UnexpectedBranchHead"
         );
         assert!(updates.lock().unwrap().is_empty());
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ConcurrentGenerationState {
+        Prepared,
+        Applying,
+        Superseded,
+        Applied,
+    }
+    #[derive(Clone)]
+    struct ConcurrentGeneration {
+        identity: TaskDeliveryIdentity,
+        source: DeliverySource,
+        candidate: Candidate,
+        state: ConcurrentGenerationState,
+        superseded_by: Option<i64>,
+        supersede_transition: Option<String>,
+        applying_transition: Option<String>,
+    }
+    #[derive(Default)]
+    struct ConcurrentState {
+        head: String,
+        durable_head: String,
+        parents: std::collections::HashMap<String, String>,
+        updates: Vec<(String, String)>,
+        generations: std::collections::HashMap<(String, i64), ConcurrentGeneration>,
+        integrated: std::collections::HashMap<String, String>,
+        closure_calls: std::collections::HashMap<String, usize>,
+        integration_attempts: usize,
+    }
+    #[derive(Default)]
+    struct ConcurrentIntegrationGate {
+        block_predecessor_once: AtomicBool,
+        successor_stale_attempts: AtomicUsize,
+        release_predecessor: tokio::sync::Notify,
+    }
+    #[derive(Clone)]
+    struct ConcurrentLedger {
+        state: Arc<Mutex<ConcurrentState>>,
+        gate: Arc<ConcurrentIntegrationGate>,
+    }
+    #[async_trait]
+    impl DeliveryLedger for ConcurrentLedger {
+        async fn direct_delivery_enabled(&self) -> Result<bool> {
+            Ok(true)
+        }
+        async fn resolve_active_attempt(&self, _: &str) -> Result<ActiveAttempt> {
+            Ok(ActiveAttempt {
+                build_attempt_id: "attempt".into(),
+                branch_name: "proposal/p/a".into(),
+                branch_head_sha: "base".into(),
+            })
+        }
+        async fn prepare(
+            &self,
+            identity: &TaskDeliveryIdentity,
+            source: &DeliverySource,
+            candidate: &Candidate,
+        ) -> Result<LedgerResult> {
+            let mut s = self.state.lock().map_err(|_| anyhow!("poison"))?;
+            let key = (identity.task_id.clone(), identity.delivery_generation);
+            if let Some(existing) = s.generations.get(&key) {
+                return Ok(
+                    if existing.candidate == *candidate && existing.source == *source {
+                        LedgerResult::Replayed
+                    } else {
+                        LedgerResult::Stale
+                    },
+                );
+            }
+            s.generations.insert(
+                key,
+                ConcurrentGeneration {
+                    identity: identity.clone(),
+                    source: source.clone(),
+                    candidate: candidate.clone(),
+                    state: ConcurrentGenerationState::Prepared,
+                    superseded_by: None,
+                    supersede_transition: None,
+                    applying_transition: None,
+                },
+            );
+            Ok(LedgerResult::Applied)
+        }
+        async fn retry_from_mapped_head(
+            &self,
+            retry: MappedHeadRetryDelivery,
+            source: &DeliverySource,
+            candidate: &Candidate,
+        ) -> Result<LedgerResult> {
+            let mut s = self.state.lock().map_err(|_| anyhow!("poison"))?;
+            let old_key = (retry.task_id.clone(), retry.expected_generation);
+            let new_key = (retry.task_id.clone(), retry.delivery_generation);
+            if source.task_id != retry.task_id
+                || source.delivery_generation != retry.delivery_generation
+                || source.transition_id != retry.transition_id
+                || candidate.selected_parent_sha == "base"
+                || !s.parents.contains_key(&candidate.selected_parent_sha)
+            {
+                return Ok(LedgerResult::Stale);
+            }
+            if s.generations.contains_key(&new_key) {
+                return Ok(LedgerResult::Stale);
+            }
+            let Some(old) = s.generations.get_mut(&old_key) else {
+                return Ok(LedgerResult::Stale);
+            };
+            if old.identity.build_attempt_id != retry.build_attempt_id
+                || old.identity.task_id != retry.task_id
+                || old.identity.delivery_generation != retry.expected_generation
+                || old.state != ConcurrentGenerationState::Applying
+                || old.source.source_sha != source.source_sha
+                || old.source.normalized_patch != source.normalized_patch
+                || old.candidate.patch_digest != candidate.patch_digest
+            {
+                return Ok(LedgerResult::Stale);
+            }
+            old.state = ConcurrentGenerationState::Superseded;
+            old.superseded_by = Some(retry.delivery_generation);
+            old.supersede_transition = Some(retry.transition_id.clone());
+            s.generations.insert(
+                new_key,
+                ConcurrentGeneration {
+                    identity: TaskDeliveryIdentity::new(
+                        &retry.build_attempt_id,
+                        &retry.task_id,
+                        retry.delivery_generation,
+                    )?,
+                    source: source.clone(),
+                    candidate: candidate.clone(),
+                    state: ConcurrentGenerationState::Prepared,
+                    superseded_by: None,
+                    supersede_transition: None,
+                    applying_transition: None,
+                },
+            );
+            Ok(LedgerResult::Applied)
+        }
+        async fn begin_apply(
+            &self,
+            identity: &TaskDeliveryIdentity,
+            transition: &str,
+        ) -> Result<LedgerResult> {
+            let mut s = self.state.lock().map_err(|_| anyhow!("poison"))?;
+            let Some(generation) = s
+                .generations
+                .get_mut(&(identity.task_id.clone(), identity.delivery_generation))
+            else {
+                return Ok(LedgerResult::Stale);
+            };
+            if generation.identity != *identity || generation.source.transition_id != transition {
+                return Ok(LedgerResult::Stale);
+            }
+            match generation.state {
+                ConcurrentGenerationState::Prepared => {
+                    generation.state = ConcurrentGenerationState::Applying;
+                    generation.applying_transition = Some(transition.into());
+                    Ok(LedgerResult::Applied)
+                }
+                ConcurrentGenerationState::Applying => Ok(LedgerResult::Replayed),
+                _ => Ok(LedgerResult::Stale),
+            }
+        }
+        async fn finalize_conflict(
+            &self,
+            _: &TaskDeliveryIdentity,
+            _: &str,
+            _: &str,
+        ) -> Result<LedgerResult> {
+            Ok(LedgerResult::Applied)
+        }
+        async fn integrate(&self, i: TaskIntegrated) -> Result<LedgerResult> {
+            let key = (i.identity.task_id.clone(), i.identity.delivery_generation);
+            // Hold the predecessor transaction until the successor has observed
+            // four durable-head misses. This makes the post-CAS ordering
+            // deterministic and proves the engine is not relying on three
+            // scheduler yields.
+            let block_predecessor = {
+                let s = self.state.lock().map_err(|_| anyhow!("poison"))?;
+                s.generations.get(&key).is_some_and(|generation| {
+                    generation.candidate.selected_parent_sha == "base"
+                        && generation.candidate.candidate_sha == i.candidate_sha
+                })
+            };
+            if block_predecessor
+                && !self
+                    .gate
+                    .block_predecessor_once
+                    .swap(true, Ordering::SeqCst)
+            {
+                self.gate.release_predecessor.notified().await;
+            }
+
+            let mut s = self.state.lock().map_err(|_| anyhow!("poison"))?;
+            s.integration_attempts += 1;
+            if let Some(sha) = s.integrated.get(&i.identity.task_id) {
+                return Ok(if sha == &i.candidate_sha {
+                    LedgerResult::Replayed
+                } else {
+                    LedgerResult::Stale
+                });
+            }
+            let Some(generation) = s.generations.get(&key).cloned() else {
+                return Ok(LedgerResult::Stale);
+            };
+            if generation.identity != i.identity
+                || generation.state != ConcurrentGenerationState::Applying
+                || generation.candidate.candidate_sha != i.candidate_sha
+                || i.candidate_sha != i.observed_applied_candidate_sha
+                || i.candidate_sha != i.merge_commit_sha
+            {
+                return Ok(LedgerResult::Stale);
+            }
+            if s.durable_head != generation.candidate.selected_parent_sha {
+                if generation.candidate.selected_parent_sha != "base"
+                    && self
+                        .gate
+                        .successor_stale_attempts
+                        .fetch_add(1, Ordering::SeqCst)
+                        + 1
+                        == 4
+                {
+                    self.gate.release_predecessor.notify_one();
+                }
+                return Ok(LedgerResult::Stale);
+            }
+            s.durable_head = i.candidate_sha.clone();
+            s.generations.get_mut(&key).unwrap().state = ConcurrentGenerationState::Applied;
+            s.integrated
+                .insert(i.identity.task_id.clone(), i.candidate_sha);
+            *s.closure_calls.entry(i.identity.task_id).or_default() += 1;
+            Ok(LedgerResult::Applied)
+        }
+        async fn is_mapped_first_parent(&self, _: &ActiveAttempt, sha: &str) -> Result<bool> {
+            let s = self.state.lock().map_err(|_| anyhow!("poison"))?;
+            Ok(sha == "base" || s.parents.contains_key(sha))
+        }
+        async fn rework(
+            &self,
+            r: ReworkDelivery,
+            source: &DeliverySource,
+            candidate: &Candidate,
+        ) -> Result<LedgerResult> {
+            self.prepare(
+                &TaskDeliveryIdentity::new(&r.build_attempt_id, &r.task_id, r.delivery_generation)?,
+                source,
+                candidate,
+            )
+            .await
+        }
+        async fn park(
+            &self,
+            _: &str,
+            _: &TaskDeliveryIdentity,
+            _: ParkReason,
+            _: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+    #[derive(Clone)]
+    struct ConcurrentRemote {
+        state: Arc<Mutex<ConcurrentState>>,
+        first_cas: Arc<tokio::sync::Notify>,
+        second_cas: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait]
+    impl AttemptRef for ConcurrentRemote {
+        async fn observe(&self, _: &str) -> Result<Option<String>> {
+            Ok(Some(
+                self.state
+                    .lock()
+                    .map_err(|_| anyhow!("poison"))?
+                    .head
+                    .clone(),
+            ))
+        }
+        async fn update_expected_old(&self, _: &str, old: &str, new: &str) -> Result<RemoteUpdate> {
+            let first = old == "base";
+            {
+                let mut s = self.state.lock().map_err(|_| anyhow!("poison"))?;
+                s.updates.push((old.into(), new.into()));
+                if s.head != old {
+                    return Ok(RemoteUpdate::Stale {
+                        observed_sha: Some(s.head.clone()),
+                    });
+                }
+                s.parents.insert(new.into(), old.into());
+                s.head = new.into();
+            }
+            if first {
+                self.first_cas.notify_one();
+                self.second_cas.notified().await;
+            } else {
+                self.second_cas.notify_one();
+            }
+            Ok(RemoteUpdate::Updated { sha: new.into() })
+        }
+    }
+    #[derive(Clone)]
+    struct ConcurrentBuilder(Arc<tokio::sync::Barrier>);
+    #[async_trait]
+    impl CandidateBuilder for ConcurrentBuilder {
+        async fn build(
+            &self,
+            i: &TaskDeliveryIdentity,
+            _: &DeliverySource,
+            parent: &str,
+        ) -> Result<CandidateBuild> {
+            if i.delivery_generation == 1 {
+                self.0.wait().await;
+            }
+            Ok(CandidateBuild::Clean(Candidate {
+                candidate_sha: format!(
+                    "candidate-{}-g{}-on-{parent}",
+                    i.task_id, i.delivery_generation
+                ),
+                patch_digest: "digest".into(),
+                selected_parent_sha: parent.into(),
+            }))
+        }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_clean_completions_share_cas_graph_and_rebuild_loser() {
+        let state = Arc::new(Mutex::new(ConcurrentState {
+            head: "base".into(),
+            durable_head: "base".into(),
+            ..Default::default()
+        }));
+        let gate = Arc::new(ConcurrentIntegrationGate::default());
+        let ledger = ConcurrentLedger {
+            state: state.clone(),
+            gate: gate.clone(),
+        };
+        let remote = ConcurrentRemote {
+            state: state.clone(),
+            first_cas: Arc::new(tokio::sync::Notify::new()),
+            second_cas: Arc::new(tokio::sync::Notify::new()),
+        };
+        let builder = ConcurrentBuilder(Arc::new(tokio::sync::Barrier::new(2)));
+        let a = DirectDeliveryEngine::new(ledger.clone(), remote.clone(), builder.clone());
+        let b = DirectDeliveryEngine::new(ledger, remote, builder);
+        let (a, b) = tokio::join!(
+            a.deliver(DeliverySource {
+                task_id: "a".into(),
+                delivery_generation: 1,
+                transition_id: "a".into(),
+                source_sha: "a".into(),
+                normalized_patch: "a".into()
+            }),
+            b.deliver(DeliverySource {
+                task_id: "b".into(),
+                delivery_generation: 1,
+                transition_id: "b".into(),
+                source_sha: "b".into(),
+                normalized_patch: "b".into()
+            })
+        );
+        assert!(matches!(a.unwrap(), DeliveryOutcome::Integrated { .. }));
+        assert!(matches!(b.unwrap(), DeliveryOutcome::Integrated { .. }));
+        let s = state.lock().unwrap();
+        assert_eq!(s.integrated.len(), 2);
+        assert_eq!(s.updates.len(), 3);
+        assert!(s.updates.iter().all(|(old, new)| old != new));
+        assert_eq!(s.parents.len(), 2);
+        assert_eq!(s.durable_head, s.head);
+        assert_eq!(s.generations.len(), 3);
+        // More than two attempts proves the successor tried to integrate before
+        // the winner had advanced the durable parent head and then replayed.
+        assert!(s.integration_attempts >= 6);
+        assert_eq!(gate.successor_stale_attempts.load(Ordering::SeqCst), 4);
+        assert!(s.integrated.values().all(|sha| s.parents.contains_key(sha)));
+        assert!(s.closure_calls.values().all(|calls| *calls == 1));
+        let superseded = s
+            .generations
+            .values()
+            .find(|g| g.state == ConcurrentGenerationState::Superseded)
+            .unwrap();
+        let retry = s
+            .generations
+            .get(&(
+                superseded.identity.task_id.clone(),
+                superseded.superseded_by.unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(retry.state, ConcurrentGenerationState::Applied);
+        assert_eq!(
+            superseded.superseded_by,
+            Some(retry.identity.delivery_generation)
+        );
+        assert_eq!(
+            superseded.supersede_transition,
+            Some(retry.source.transition_id.clone())
+        );
+        assert_eq!(
+            retry.applying_transition,
+            Some(retry.source.transition_id.clone())
+        );
+        let winner = s
+            .generations
+            .values()
+            .find(|generation| {
+                generation.state == ConcurrentGenerationState::Applied
+                    && generation.identity.task_id != retry.identity.task_id
+            })
+            .unwrap();
+        assert_eq!(
+            retry.candidate.selected_parent_sha,
+            winner.candidate.candidate_sha
+        );
+        assert_eq!(
+            s.parents[&retry.candidate.candidate_sha],
+            retry.candidate.selected_parent_sha
+        );
     }
 }
