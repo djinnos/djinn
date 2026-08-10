@@ -195,6 +195,16 @@ impl DeliveryLedger for RepositoryDeliveryLedger {
             )),
         }
     }
+    async fn prepared_candidate(
+        &self,
+        identity: &TaskDeliveryIdentity,
+    ) -> Result<Option<Candidate>> {
+        Ok(self.tasks.get_delivery(identity).await?.map(|delivery| Candidate {
+            candidate_sha: delivery.candidate_sha,
+            patch_digest: delivery.patch_digest,
+            selected_parent_sha: delivery.selected_parent_sha,
+        }))
+    }
     async fn prepare(
         &self,
         identity: &TaskDeliveryIdentity,
@@ -354,6 +364,13 @@ pub enum DeliveryOutcome {
 pub trait DeliveryLedger: Send + Sync {
     async fn direct_delivery_enabled(&self) -> Result<bool>;
     async fn resolve_active_attempt(&self, task_id: &str) -> Result<ActiveAttempt>;
+    /// Immutable candidate already recorded for this exact generation.
+    async fn prepared_candidate(
+        &self,
+        _: &TaskDeliveryIdentity,
+    ) -> Result<Option<Candidate>> {
+        Ok(None)
+    }
     async fn prepare(
         &self,
         identity: &TaskDeliveryIdentity,
@@ -463,9 +480,18 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
             &source.task_id,
             source.delivery_generation,
         )?;
+        // A crash after remote success can leave the ref at this generation's
+        // exact durable candidate. Reconcile it before selecting a new parent;
+        // otherwise rebuilding would produce a second commit on top of it.
+        let observed = self.remote.observe(&attempt.branch_name).await?;
+        if let (Some(head), Some(candidate)) = (&observed, self.ledger.prepared_candidate(&identity).await?)
+            && *head == candidate.candidate_sha
+        {
+            return self.integrate(identity, candidate.candidate_sha).await;
+        }
         // Select and validate the parent before recording immutable preparation
         // facts. A mapped append observed here is a valid candidate parent.
-        let parent = match self.remote.observe(&attempt.branch_name).await? {
+        let parent = match observed {
             Some(head) if self.ledger.is_mapped_first_parent(&attempt, &head).await? => head,
             observed => return self.park_unexpected(&attempt, &identity, observed).await,
         };
@@ -1337,6 +1363,18 @@ mod tests {
                 branch_name: "proposal/p/a".into(),
                 branch_head_sha: "base".into(),
             })
+        }
+        async fn prepared_candidate(
+            &self,
+            identity: &TaskDeliveryIdentity,
+        ) -> Result<Option<Candidate>> {
+            Ok(self
+                .state
+                .lock()
+                .map_err(|_| anyhow!("poison"))?
+                .generations
+                .get(&(identity.task_id.clone(), identity.delivery_generation))
+                .map(|generation| generation.candidate.clone()))
         }
         async fn prepare(
             &self,
