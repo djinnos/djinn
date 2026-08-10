@@ -103,7 +103,7 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
     );
     let started = hooks.watchdog_started.notified();
     tokio::pin!(started);
-    let guard = launch_prepared_covered_attempt_with_lease(
+    let mut guard = launch_prepared_covered_attempt_with_lease(
         ModelTurnPreparation::Permit(winner),
         move || {
             launch_count.fetch_add(1, Ordering::AcqRel);
@@ -133,6 +133,7 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
         "active",
         "the sole B1 launch follows one committed dispatch fence and active hand-off"
     );
+    let watchdog_signal = guard.watchdog_abort_signal();
 
     let cancel = tokio_util::sync::CancellationToken::new();
     let slot_ctx = crate::test_helpers::agent_context_from_db(
@@ -210,7 +211,6 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
     tokio::pin!(failed);
     tokio::time::advance(Duration::from_secs(20)).await;
     failed.await;
-    let watchdog_signal = guard.watchdog_abort_signal();
     let watchdog_abort = watchdog_signal.cancelled();
     tokio::pin!(watchdog_abort);
     tokio::time::advance(Duration::from_secs(20)).await;
