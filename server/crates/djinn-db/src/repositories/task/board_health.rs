@@ -305,6 +305,9 @@ pub(super) async fn direct_delivery_section(pool: &sqlx::PgPool) -> serde_json::
            ) latest
            WHERE EXISTS (SELECT 1 FROM direct_delivery_epochs dde
                          WHERE dde.name = 'direct_delivery_v1' AND dde.state = 'active')
+             -- A task-PR identity is explicitly legacy. Do not let an
+             -- accidental ledger row opt it into this additive section.
+             AND t.pr_url IS NULL
            ORDER BY t.updated_at ASC"#,
     )
     .fetch_all(pool)
