@@ -333,6 +333,7 @@ pub async fn supervisor_pr_open(
                         error = %render_github_write_error("GitHub PR reopen failed", &reopen_err),
                         "supervisor PR-open: failed to reopen closed PR; creating a new one"
                     );
+                    crate::direct_delivery::observe_boundary_operation("task_pr_create");
                     match github_client
                         .create_pull_request(
                             &owner,
@@ -377,6 +378,7 @@ pub async fn supervisor_pr_open(
             }
         }
     } else {
+        crate::direct_delivery::observe_boundary_operation("task_pr_create");
         match github_client
             .create_pull_request(
                 &owner,
