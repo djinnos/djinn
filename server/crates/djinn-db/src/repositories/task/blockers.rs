@@ -252,7 +252,8 @@ impl TaskRepository {
     }
 
     /// Emit `TaskUpdated` for tasks that were blocked by `completed_task_id` and
-    /// are now fully unblocked (all blockers are in resolved post-merge/closed states).
+    /// are now fully unblocked. Active direct-delivery blockers additionally
+    /// require the exact applied candidate recorded by `TaskIntegrated`.
     pub(super) async fn emit_unblocked_tasks(&self, completed_task_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
         // NOTE: Task has #[sqlx(default)] fields that a macro-typed query cannot satisfy without repeating the SELECT with NULLs; keep runtime.
@@ -298,7 +299,33 @@ impl TaskRepository {
                    SELECT 1 FROM blockers b2
                    JOIN tasks bt ON bt.id = b2.blocking_task_id
                     WHERE b2.task_id = t.id
-                       AND bt.status != 'closed'
+                       AND (
+                           bt.status != 'closed'
+                           OR (
+                               -- A task-PR identity is explicitly legacy.
+                               bt.pr_url IS NULL
+                               AND EXISTS (
+                                   SELECT 1 FROM direct_delivery_epochs dde
+                                   JOIN epics be ON be.id = bt.epic_id
+                                   JOIN proposal_build_attempts pba
+                                     ON pba.proposal_id = be.proposal_id
+                                    AND pba.lifecycle = 'active'
+                                   WHERE dde.name = 'direct_delivery_v1'
+                                     AND dde.state = 'active'
+                               )
+                               AND NOT EXISTS (
+                                   SELECT 1 FROM task_deliveries td
+                                   JOIN epics be ON be.id = bt.epic_id
+                                   JOIN proposal_build_attempts pba
+                                     ON pba.id = td.build_attempt_id
+                                    AND pba.proposal_id = be.proposal_id
+                                    AND pba.lifecycle = 'active'
+                                   WHERE td.task_id = bt.id
+                                     AND td.state = 'applied'
+                                     AND td.candidate_sha = bt.merge_commit_sha
+                               )
+                           )
+                       )
                 )",
         )
         .bind(completed_task_id)

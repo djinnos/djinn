@@ -286,6 +286,62 @@ pub(super) async fn attribution_findings_section(pool: &sqlx::PgPool) -> serde_j
     serde_json::json!({ "total": findings.len(), "findings": findings })
 }
 
+/// Active direct-delivery tasks and their latest immutable-generation state.
+/// Nullable rows cannot opt a task into this section: it requires the active
+/// epoch, canonical epic owner, and active build attempt. `integrated` is only
+/// emitted for the exact applied candidate persisted by `TaskIntegrated`.
+pub(super) async fn direct_delivery_section(pool: &sqlx::PgPool) -> serde_json::Value {
+    let rows = sqlx::query(
+        r#"SELECT t.id, t.short_id, t.status, t.merge_commit_sha,
+                  pba.id AS build_attempt_id, latest.state, latest.candidate_sha
+           FROM tasks t
+           JOIN epics e ON e.id = t.epic_id
+           JOIN proposal_build_attempts pba
+             ON pba.proposal_id = e.proposal_id AND pba.lifecycle = 'active'
+           CROSS JOIN LATERAL (
+               SELECT td.state, td.candidate_sha FROM task_deliveries td
+                WHERE td.build_attempt_id = pba.id AND td.task_id = t.id
+                ORDER BY td.delivery_generation DESC LIMIT 1
+           ) latest
+           WHERE EXISTS (SELECT 1 FROM direct_delivery_epochs dde
+                         WHERE dde.name = 'direct_delivery_v1' AND dde.state = 'active')
+           ORDER BY t.updated_at ASC"#,
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let findings: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|row| {
+            let status: String = row.get("status");
+            let state: String = row.get("state");
+            let candidate_sha: String = row.get("candidate_sha");
+            let merge_commit_sha: Option<String> = row.get("merge_commit_sha");
+            let classification = if state == "applied"
+                && status == "closed"
+                && merge_commit_sha.as_deref() == Some(candidate_sha.as_str())
+            {
+                "integrated"
+            } else if matches!(state.as_str(), "prepared" | "applying" | "conflict") {
+                state.as_str()
+            } else {
+                "unknown"
+            };
+            serde_json::json!({
+                "id": row.get::<String, _>("id"),
+                "short_id": row.get::<String, _>("short_id"),
+                "status": status,
+                "build_attempt_id": row.get::<String, _>("build_attempt_id"),
+                "ledger_state": state,
+                "candidate_sha": candidate_sha,
+                "merge_commit_sha": merge_commit_sha,
+                "classification": classification,
+            })
+        })
+        .collect();
+    serde_json::json!({ "total": findings.len(), "findings": findings })
+}
+
 /// Ready/dispatchable tasks with no active running session whose unclaimed
 /// duration exceeds the stranded threshold, each annotated with dispatch-gate
 /// evidence.
