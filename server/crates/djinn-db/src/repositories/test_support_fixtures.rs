@@ -107,6 +107,16 @@ pub async fn set_model_turn_capability_fixture(db: &Database, pool_id: i64, capa
         .unwrap();
 }
 
+/// Set a pool phase after fixture setup to exercise a real admission branch.
+pub async fn set_model_turn_phase_fixture(db: &Database, pool_id: i64, phase: &str) {
+    sqlx::query("UPDATE model_turn_pools SET phase = $2 WHERE id = $1")
+        .bind(pool_id)
+        .bind(phase)
+        .execute(db.pool())
+        .await
+        .unwrap();
+}
+
 pub async fn model_turn_lease_lifecycle_fixture(db: &Database, lease_id: &str) -> String {
     sqlx::query_scalar("SELECT lifecycle FROM model_turn_leases WHERE lease_id = $1::uuid")
         .bind(lease_id)

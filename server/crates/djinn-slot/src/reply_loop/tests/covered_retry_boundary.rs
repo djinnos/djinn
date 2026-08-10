@@ -8,7 +8,8 @@ use crate::reply_loop::turn::{
 use djinn_db::test_support::{
     model_turn_accounting_fixture, model_turn_decision_count_fixture,
     model_turn_launch_identities_fixture, model_turn_terminal_fixture,
-    seed_model_turn_admission_fixture,
+    seed_model_turn_admission_fixture, set_model_turn_capability_fixture,
+    set_model_turn_phase_fixture,
 };
 use djinn_db::{Database, ModelTurnBucketDebit, ModelTurnBucketKind};
 use djinn_provider::provider::client::{ProviderAttemptContextV1, ProviderSseAttemptV1, SseFrame};
@@ -21,24 +22,6 @@ use djinn_provider::{
     ProviderObservationDiagnosticsV1, ProviderOutcomeV1, ProviderOutputReservationSourceV1,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-async fn set_pool_phase(db: &Database, pool: i64, phase: &str) {
-    sqlx::query("UPDATE model_turn_pools SET phase = $2 WHERE id = $1")
-        .bind(pool)
-        .bind(phase)
-        .execute(db.pool())
-        .await
-        .expect("update pool phase");
-}
-
-async fn set_pool_capability(db: &Database, pool: i64, capability: &str) {
-    sqlx::query("UPDATE model_turn_pools SET capability_state = $2 WHERE id = $1")
-        .bind(pool)
-        .bind(capability)
-        .execute(db.pool())
-        .await
-        .expect("update pool capability");
-}
 
 fn covered_plan() -> ProviderAttemptPlanV1 {
     ProviderAttemptPlanV1 {
@@ -803,8 +786,12 @@ async fn typed_replacement_preparation_outcome(case: ReplacementPreparationCase)
     );
 
     match case {
-        ReplacementPreparationCase::Wait => set_pool_phase(&db, pool, "draining").await,
-        ReplacementPreparationCase::Rejected => set_pool_capability(&db, pool, "unsupported").await,
+        ReplacementPreparationCase::Wait => {
+            set_model_turn_phase_fixture(&db, pool, "draining").await
+        }
+        ReplacementPreparationCase::Rejected => {
+            set_model_turn_capability_fixture(&db, pool, "unsupported").await;
+        }
         ReplacementPreparationCase::DispatchFenced => {}
     }
     // Register before releasing the run-scoped retry boundary so the
