@@ -2744,7 +2744,10 @@ mod tests {
                 let external_pr_seen = std::sync::Arc::new(std::sync::Mutex::new(None));
                 if let Ok(admission) = admission
                     && completion
-                    && !matches!(admission, DirectDeliveryAdmission::NoProposalOwner)
+                    && matches!(
+                        admission,
+                        DirectDeliveryAdmission::Legacy | DirectDeliveryAdmission::Direct { .. }
+                    )
                 {
                     let completion_task = tasks.get(&task.id).await.unwrap().unwrap();
                     let legacy_pr = completion_task
