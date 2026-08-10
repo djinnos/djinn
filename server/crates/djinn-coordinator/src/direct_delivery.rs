@@ -606,8 +606,67 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
                         CandidateBuild::Clean(_) => {
                             return Err(anyhow!("candidate builder returned a different selected parent"));
                         }
-                        CandidateBuild::Conflict { reason, .. } => {
-                            return Err(anyhow!("mapped-head retry candidate conflicts: {reason}"));
+                        CandidateBuild::Conflict {
+                            patch_digest,
+                            reason,
+                        } => {
+                            // A topology retry is a distinct immutable generation:
+                            // persist its conflict sentinel and terminal fact before
+                            // parking, leaving the prior generation superseded.
+                            let conflict = Candidate {
+                                candidate_sha: format!("conflict:{patch_digest}"),
+                                patch_digest,
+                                selected_parent_sha: head.clone(),
+                            };
+                            if self
+                                .ledger
+                                .retry_from_mapped_head(
+                                    MappedHeadRetryDelivery::new(
+                                        &next_source.transition_id,
+                                        &attempt.build_attempt_id,
+                                        &next_source.task_id,
+                                        identity.delivery_generation,
+                                        next_generation,
+                                    )?,
+                                    &next_source,
+                                    &conflict,
+                                )
+                                .await?
+                                == LedgerResult::Stale
+                            {
+                                return Ok(DeliveryOutcome::RetryBoundParked {
+                                    observed_heads: observed_mapped_heads.len(),
+                                });
+                            }
+                            let applying = self
+                                .ledger
+                                .begin_apply(&next_identity, &next_source.transition_id)
+                                .await?;
+                            let finalized = self
+                                .ledger
+                                .finalize_conflict(
+                                    &next_identity,
+                                    &format!("{}:conflict", next_source.transition_id),
+                                    &reason,
+                                )
+                                .await?;
+                            if finalized == LedgerResult::Stale
+                                || (applying == LedgerResult::Stale
+                                    && finalized != LedgerResult::Replayed)
+                            {
+                                return Ok(DeliveryOutcome::RetryBoundParked {
+                                    observed_heads: observed_mapped_heads.len(),
+                                });
+                            }
+                            self.ledger
+                                .park(
+                                    &attempt.build_attempt_id,
+                                    &next_identity,
+                                    ParkReason::TaskAppendConflict,
+                                    &reason,
+                                )
+                                .await?;
+                            return Ok(DeliveryOutcome::ConflictParked { reason });
                         }
                     };
                     if self
@@ -828,9 +887,32 @@ mod tests {
             }
         }
     }
+    struct MappedConflictBuilder;
+    #[async_trait]
+    impl CandidateBuilder for MappedConflictBuilder {
+        async fn build(
+            &self,
+            _: &TaskDeliveryIdentity,
+            _: &DeliverySource,
+            parent: &str,
+        ) -> Result<CandidateBuild> {
+            if parent == "mapped" {
+                return Ok(CandidateBuild::Conflict {
+                    patch_digest: "digest".into(),
+                    reason: "mapped conflict".into(),
+                });
+            }
+            Ok(CandidateBuild::Clean(Candidate {
+                candidate_sha: format!("commit-{parent}"),
+                patch_digest: "digest".into(),
+                selected_parent_sha: parent.into(),
+            }))
+        }
+    }
     struct Remote {
         update: Arc<Mutex<Vec<RemoteUpdate>>>,
         observed: Mutex<Vec<Option<String>>>,
+        calls: Option<Arc<Mutex<Vec<String>>>>,
     }
     #[async_trait]
     impl AttemptRef for Remote {
@@ -841,7 +923,13 @@ mod tests {
                 .pop()
                 .ok_or_else(|| anyhow!("missing observation"))
         }
-        async fn update_expected_old(&self, _: &str, _: &str, _: &str) -> Result<RemoteUpdate> {
+        async fn update_expected_old(&self, _: &str, expected: &str, new: &str) -> Result<RemoteUpdate> {
+            if let Some(calls) = &self.calls {
+                calls
+                    .lock()
+                    .map_err(|_| anyhow!("poison"))?
+                    .push(format!("update:{expected}:{new}"));
+            }
             self.update
                 .lock()
                 .map_err(|_| anyhow!("poison"))?
@@ -874,6 +962,7 @@ mod tests {
         (
             Remote {
                 update: updates.clone(),
+                calls: None,
                 observed: Mutex::new(
                     observations
                         .into_iter()
@@ -984,6 +1073,153 @@ mod tests {
         assert_eq!(*calls.lock().unwrap(), ["rework:1:2"]);
         assert_eq!(updates.lock().unwrap().len(), 1);
     }
+    #[tokio::test]
+    async fn post_prepare_mapped_stale_retries_new_generation_then_integrates() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        // `Remote` pops, so the stale first update precedes the successful retry.
+        let (mut remote, updates) = remote(
+            vec![
+                RemoteUpdate::Updated {
+                    sha: "commit-mapped".into(),
+                },
+                RemoteUpdate::Stale {
+                    observed_sha: Some("mapped".into()),
+                },
+            ],
+            vec![Some("commit-mapped"), Some("base")],
+        );
+        remote.calls = Some(calls.clone());
+        let mut state = ledger(calls.clone());
+        state.mapped = true;
+        let engine = DirectDeliveryEngine::new(state, remote, Builder { conflict: false });
+        assert!(matches!(
+            engine.deliver(source(1)).await.unwrap(),
+            DeliveryOutcome::Integrated { candidate_sha } if candidate_sha == "commit-mapped"
+        ));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                "prepare:commit-base",
+                "applying",
+                "update:base:commit-base",
+                "mapped-retry:1:2",
+                "applying",
+                "update:mapped:commit-mapped",
+                "integrate:2"
+            ]
+        );
+        assert!(updates.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn exact_candidate_stale_integrates_without_another_ref_update() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let (remote, updates) = remote(
+            vec![RemoteUpdate::Stale {
+                observed_sha: Some("commit-base".into()),
+            }],
+            vec![Some("base")],
+        );
+        let engine = DirectDeliveryEngine::new(ledger(calls.clone()), remote, Builder { conflict: false });
+        assert!(matches!(
+            engine.deliver(source(1)).await.unwrap(),
+            DeliveryOutcome::Integrated { candidate_sha } if candidate_sha == "commit-base"
+        ));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["prepare:commit-base", "applying", "integrate:1"]
+        );
+        assert!(updates.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn duplicate_mapped_heads_do_not_consume_distinct_retry_budget() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let (remote, updates) = remote(
+            vec![
+                RemoteUpdate::Updated {
+                    sha: "commit-mapped".into(),
+                },
+                RemoteUpdate::Stale {
+                    observed_sha: Some("mapped".into()),
+                },
+                RemoteUpdate::Stale {
+                    observed_sha: Some("mapped".into()),
+                },
+            ],
+            vec![Some("commit-mapped"), Some("base")],
+        );
+        let mut state = ledger(calls.clone());
+        state.mapped = true;
+        let engine = DirectDeliveryEngine::new(state, remote, Builder { conflict: false });
+        assert!(matches!(engine.deliver(source(1)).await.unwrap(), DeliveryOutcome::Integrated { .. }));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                "prepare:commit-base",
+                "applying",
+                "mapped-retry:1:2",
+                "applying",
+                "mapped-retry:2:3",
+                "applying",
+                "integrate:3"
+            ]
+        );
+        assert!(updates.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn fourth_distinct_mapped_head_parks_at_retry_bound() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let (remote, updates) = remote(
+            vec![
+                RemoteUpdate::Stale { observed_sha: Some("h4".into()) },
+                RemoteUpdate::Stale { observed_sha: Some("h3".into()) },
+                RemoteUpdate::Stale { observed_sha: Some("h2".into()) },
+                RemoteUpdate::Stale { observed_sha: Some("h1".into()) },
+            ],
+            vec![Some("base")],
+        );
+        let mut state = ledger(calls.clone());
+        state.mapped = true;
+        let engine = DirectDeliveryEngine::new(state, remote, Builder { conflict: false });
+        assert_eq!(
+            engine.deliver(source(1)).await.unwrap(),
+            DeliveryOutcome::RetryBoundParked { observed_heads: 4 }
+        );
+        assert_eq!(
+            calls.lock().unwrap().last().unwrap(),
+            "park:StaleHeadRetryBound"
+        );
+        assert!(updates.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn mapped_retry_conflict_is_finalized_before_parking() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let (remote, updates) = remote(
+            vec![RemoteUpdate::Stale {
+                observed_sha: Some("mapped".into()),
+            }],
+            vec![Some("base")],
+        );
+        let mut state = ledger(calls.clone());
+        state.mapped = true;
+        let engine = DirectDeliveryEngine::new(state, remote, MappedConflictBuilder);
+        assert!(matches!(
+            engine.deliver(source(1)).await.unwrap(),
+            DeliveryOutcome::ConflictParked { reason } if reason == "mapped conflict"
+        ));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                "prepare:commit-base",
+                "applying",
+                "mapped-retry:1:2",
+                "applying",
+                "conflict:mapped conflict",
+                "park:TaskAppendConflict"
+            ]
+        );
+        assert!(updates.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn arbitrary_unmapped_head_parks_as_unexpected() {
         let calls = Arc::new(Mutex::new(Vec::new()));
