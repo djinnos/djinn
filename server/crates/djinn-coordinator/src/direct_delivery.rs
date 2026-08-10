@@ -199,11 +199,15 @@ impl DeliveryLedger for RepositoryDeliveryLedger {
         &self,
         identity: &TaskDeliveryIdentity,
     ) -> Result<Option<Candidate>> {
-        Ok(self.tasks.get_delivery(identity).await?.map(|delivery| Candidate {
-            candidate_sha: delivery.candidate_sha,
-            patch_digest: delivery.patch_digest,
-            selected_parent_sha: delivery.selected_parent_sha,
-        }))
+        Ok(self
+            .tasks
+            .get_delivery(identity)
+            .await?
+            .map(|delivery| Candidate {
+                candidate_sha: delivery.candidate_sha,
+                patch_digest: delivery.patch_digest,
+                selected_parent_sha: delivery.selected_parent_sha,
+            }))
     }
     async fn prepare(
         &self,
@@ -365,10 +369,7 @@ pub trait DeliveryLedger: Send + Sync {
     async fn direct_delivery_enabled(&self) -> Result<bool>;
     async fn resolve_active_attempt(&self, task_id: &str) -> Result<ActiveAttempt>;
     /// Immutable candidate already recorded for this exact generation.
-    async fn prepared_candidate(
-        &self,
-        _: &TaskDeliveryIdentity,
-    ) -> Result<Option<Candidate>> {
+    async fn prepared_candidate(&self, _: &TaskDeliveryIdentity) -> Result<Option<Candidate>> {
         Ok(None)
     }
     async fn prepare(
@@ -484,7 +485,8 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
         // exact durable candidate. Reconcile it before selecting a new parent;
         // otherwise rebuilding would produce a second commit on top of it.
         let observed = self.remote.observe(&attempt.branch_name).await?;
-        if let (Some(head), Some(candidate)) = (&observed, self.ledger.prepared_candidate(&identity).await?)
+        if let (Some(head), Some(candidate)) =
+            (&observed, self.ledger.prepared_candidate(&identity).await?)
             && *head == candidate.candidate_sha
         {
             return self.integrate(identity, candidate.candidate_sha).await;
@@ -1572,13 +1574,16 @@ mod tests {
             s.generations.get_mut(&key).unwrap().state = ConcurrentGenerationState::Applied;
             s.integrated
                 .insert(i.identity.task_id.clone(), i.candidate_sha.clone());
-            s.task_status.insert(i.identity.task_id.clone(), "closed".into());
+            s.task_status
+                .insert(i.identity.task_id.clone(), "closed".into());
             s.task_merge_commit_sha
                 .insert(i.identity.task_id.clone(), i.merge_commit_sha.clone());
             *s.closure_calls
                 .entry(i.identity.task_id.clone())
                 .or_default() += 1;
-            *s.dependent_release_calls.entry(i.identity.task_id).or_default() += 1;
+            *s.dependent_release_calls
+                .entry(i.identity.task_id)
+                .or_default() += 1;
             if s.crash_window == Some(CrashWindow::AfterSqlFinalization) && !s.crash_injected {
                 s.crash_injected = true;
                 return Err(anyhow!("injected crash after SQL finalization"));
@@ -1655,7 +1660,9 @@ mod tests {
                 }
             }
             if crash_after_remote {
-                return Err(anyhow!("injected crash after remote mutation before SQL acknowledgment"));
+                return Err(anyhow!(
+                    "injected crash after remote mutation before SQL acknowledgment"
+                ));
             }
             if first {
                 if let (Some(first_cas), Some(second_cas)) = (&self.first_cas, &self.second_cas) {
@@ -1842,7 +1849,10 @@ mod tests {
                 assert_eq!(s.head, "base");
                 assert!(s.published_commits.is_empty());
                 assert_eq!(prepared.state, ConcurrentGenerationState::Applying);
-                assert_eq!(prepared.candidate.candidate_sha, "candidate-task-g1-on-base");
+                assert_eq!(
+                    prepared.candidate.candidate_sha,
+                    "candidate-task-g1-on-base"
+                );
             }
             let outcome = engine.deliver(immutable_source).await.unwrap();
             let candidate = "candidate-task-g1-on-base";
@@ -1883,7 +1893,10 @@ mod tests {
                 "{window:?}"
             );
             assert_eq!(generation.candidate.candidate_sha, candidate, "{window:?}");
-            assert_eq!(generation.candidate.selected_parent_sha, "base", "{window:?}");
+            assert_eq!(
+                generation.candidate.selected_parent_sha, "base",
+                "{window:?}"
+            );
             assert_eq!(s.integrated["task"], candidate, "{window:?}");
             assert_eq!(s.task_status["task"], "closed", "{window:?}");
             assert_eq!(s.task_merge_commit_sha["task"], candidate, "{window:?}");
