@@ -1250,19 +1250,42 @@ mod tests {
         assert_eq!(successor.candidate_sha, "candidate-task-g2-on-mapped");
     }
     #[test]
-    fn explicit_legacy_admission_preserves_existing_pr_identity_for_completion() {
-        // Completion receives the same task PR identity after the shared
-        // admission decision. Its legacy route, rather than the direct engine,
-        // remains responsible for the existing PR.
-        let existing_pr_url = "https://github.example/owner/repo/pull/42".to_owned();
-        let labels = vec![LEGACY_DELIVERY_LABEL.to_owned()];
-        assert!(has_explicit_legacy_delivery(
-            Some(existing_pr_url.as_str()),
-            &labels
-        ));
+    fn explicit_legacy_completion_preserves_existing_persisted_pr_identity() {
+        use crate::dispatch::wave_dispatch::route_approved_completion;
+
+        // Model the persisted task row and both completion collaborators. The
+        // direct collaborator represents the append engine; the legacy one
+        // records the existing PR identity without replacing it.
+        let task_pr_url = Arc::new(Mutex::new(Some(
+            "https://github.example/owner/repo/pull/42".to_owned(),
+        )));
+        let legacy_calls = Arc::new(AtomicUsize::new(0));
+        let direct_calls = Arc::new(AtomicUsize::new(0));
+        let recorded_legacy_pr = Arc::new(Mutex::new(None));
+        let before = task_pr_url.lock().unwrap().clone();
+
+        let legacy_task_pr_url = task_pr_url.clone();
+        let legacy_recorded_pr = recorded_legacy_pr.clone();
+        let legacy_calls_for_route = legacy_calls.clone();
+        let direct_calls_for_route = direct_calls.clone();
+        route_approved_completion(
+            DirectDeliveryAdmission::Legacy,
+            move || {
+                direct_calls_for_route.fetch_add(1, Ordering::SeqCst);
+            },
+            move || {
+                legacy_calls_for_route.fetch_add(1, Ordering::SeqCst);
+                *legacy_recorded_pr.lock().unwrap() = legacy_task_pr_url.lock().unwrap().clone();
+            },
+        );
+
+        assert_eq!(legacy_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(direct_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(*recorded_legacy_pr.lock().unwrap(), before);
         assert_eq!(
-            existing_pr_url, "https://github.example/owner/repo/pull/42",
-            "legacy admission must not mutate the task PR identity before completion"
+            *task_pr_url.lock().unwrap(),
+            before,
+            "legacy completion must leave the task's persisted PR identity unchanged"
         );
     }
     #[tokio::test]

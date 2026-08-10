@@ -28,7 +28,7 @@ mod task_dispatch;
 /// freshness facts, bounds the wait, and labels the dispatch decision without
 /// owning any warm state.
 pub(crate) mod warm_dispatch_gate;
-mod wave_dispatch;
+pub(crate) mod wave_dispatch;
 
 #[cfg(test)]
 mod wave_dispatch_tests;

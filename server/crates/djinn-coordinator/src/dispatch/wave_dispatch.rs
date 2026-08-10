@@ -7,6 +7,23 @@ use djinn_core::models::TransitionAction;
 use djinn_core::models::task::IssueType;
 use djinn_core::models::task_attempt::TaskAttemptOutcome;
 
+/// Select the approved-task writer at the completion boundary. Keeping the
+/// collaborators explicit gives production and tests one fail-closed routing
+/// seam between direct append and legacy task-PR completion.
+pub(crate) fn route_approved_completion<T>(
+    admission: crate::direct_delivery::DirectDeliveryAdmission,
+    direct_delivery: impl FnOnce() -> T,
+    legacy_completion: impl FnOnce() -> T,
+) -> T {
+    match admission {
+        crate::direct_delivery::DirectDeliveryAdmission::Direct { .. } => direct_delivery(),
+        crate::direct_delivery::DirectDeliveryAdmission::Legacy => legacy_completion(),
+        crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner => {
+            unreachable!("no-proposal-owner tasks are parked before completion routing")
+        }
+    }
+}
+
 /// Classify a `supervisor_pr_open` push failure as "an oversized blob is
 /// committed in the branch history" (GitHub's 100 MB hard limit, enforced by
 /// the remote pre-receive hook). Such a push is rejected identically on every
@@ -181,63 +198,57 @@ impl CoordinatorActor {
                 );
             }
 
-            // Direct work returns before any supervisor task-PR operation.
-            match admission {
-                crate::direct_delivery::DirectDeliveryAdmission::Legacy => {}
-                crate::direct_delivery::DirectDeliveryAdmission::Direct { .. } => {
-                    let task_branch = format!("task/{}", task.short_id);
-                    let Some(mirror) = self.mirror.as_ref() else {
-                        tracing::error!(task_id = %task.short_id, "CoordinatorActor: direct delivery admitted without a mirror; refusing task-PR fallback");
-                        continue;
-                    };
-                    let project_repo = djinn_db::ProjectRepository::new(
-                        self.db.clone(),
-                        crate::events::event_bus_for(&self.events_tx),
-                    );
-                    let (owner, repo_name, installation_id) = match (
-                        project_repo.get_github_coords(&task.project_id).await,
-                        project_repo.get_installation_id(&task.project_id).await,
-                    ) {
-                        (Ok(Some((owner, repo_name))), Ok(Some(installation_id))) => {
-                            (owner, repo_name, installation_id)
-                        }
-                        _ => {
-                            tracing::error!(task_id = %task.short_id, "CoordinatorActor: direct delivery admitted without GitHub identity; refusing task-PR fallback");
-                            continue;
-                        }
-                    };
-                    let base_branch = match project_repo.get_config(&task.project_id).await {
-                        Ok(Some(config)) => config.target_branch,
-                        _ => "main".into(),
-                    };
-                    match crate::direct_delivery::deliver_task_branch(
-                        self.db.clone(),
-                        crate::events::event_bus_for(&self.events_tx),
-                        mirror,
-                        &task.id,
-                        &task.project_id,
-                        &task_branch,
-                        &base_branch,
-                        owner,
-                        repo_name,
-                        djinn_provider::github_api::GitHubApiClient::for_installation(
-                            installation_id,
-                        ),
-                    )
-                    .await
-                    {
-                        Ok(outcome) => {
-                            tracing::info!(task_id = %task.short_id, outcome = ?outcome, "CoordinatorActor: completed task routed through direct append engine")
-                        }
-                        Err(error) => {
-                            tracing::error!(task_id = %task.short_id, error = %error, "CoordinatorActor: direct append failed; task-PR identity was left untouched")
-                        }
-                    }
+            // Direct work returns before any supervisor task-PR operation. The
+            // selection seam is shared with the explicit-legacy boundary test.
+            let direct_completion = route_approved_completion(admission, || true, || false);
+            if direct_completion {
+                let task_branch = format!("task/{}", task.short_id);
+                let Some(mirror) = self.mirror.as_ref() else {
+                    tracing::error!(task_id = %task.short_id, "CoordinatorActor: direct delivery admitted without a mirror; refusing task-PR fallback");
                     continue;
+                };
+                let project_repo = djinn_db::ProjectRepository::new(
+                    self.db.clone(),
+                    crate::events::event_bus_for(&self.events_tx),
+                );
+                let (owner, repo_name, installation_id) = match (
+                    project_repo.get_github_coords(&task.project_id).await,
+                    project_repo.get_installation_id(&task.project_id).await,
+                ) {
+                    (Ok(Some((owner, repo_name))), Ok(Some(installation_id))) => {
+                        (owner, repo_name, installation_id)
+                    }
+                    _ => {
+                        tracing::error!(task_id = %task.short_id, "CoordinatorActor: direct delivery admitted without GitHub identity; refusing task-PR fallback");
+                        continue;
+                    }
+                };
+                let base_branch = match project_repo.get_config(&task.project_id).await {
+                    Ok(Some(config)) => config.target_branch,
+                    _ => "main".into(),
+                };
+                match crate::direct_delivery::deliver_task_branch(
+                    self.db.clone(),
+                    crate::events::event_bus_for(&self.events_tx),
+                    mirror,
+                    &task.id,
+                    &task.project_id,
+                    &task_branch,
+                    &base_branch,
+                    owner,
+                    repo_name,
+                    djinn_provider::github_api::GitHubApiClient::for_installation(installation_id),
+                )
+                .await
+                {
+                    Ok(outcome) => {
+                        tracing::info!(task_id = %task.short_id, outcome = ?outcome, "CoordinatorActor: completed task routed through direct append engine")
+                    }
+                    Err(error) => {
+                        tracing::error!(task_id = %task.short_id, error = %error, "CoordinatorActor: direct append failed; task-PR identity was left untouched")
+                    }
                 }
-                crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner => {
-                    unreachable!("parked before completion mutation")
-                }
+                continue;
             }
 
             tracing::info!(
