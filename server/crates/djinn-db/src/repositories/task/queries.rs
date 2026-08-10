@@ -810,6 +810,14 @@ pub(super) fn build_where(
                         AND pba.proposal_id = e.proposal_id\
                         AND pba.lifecycle = 'active'\
                        WHERE td.task_id = tasks.id\
+                         -- The newest immutable generation is authoritative.\
+                         -- A prior applied row cannot prove integration after a\
+                         -- later prepared, applying, conflict, or unknown row.\
+                         AND td.delivery_generation = (\
+                           SELECT MAX(latest.delivery_generation) FROM task_deliveries latest\
+                            WHERE latest.build_attempt_id = td.build_attempt_id\
+                              AND latest.task_id = td.task_id\
+                         )\
                          AND td.state = 'applied'\
                          AND td.candidate_sha = tasks.merge_commit_sha\
                      ))\

@@ -321,6 +321,15 @@ impl TaskRepository {
                                     AND pba.proposal_id = be.proposal_id
                                     AND pba.lifecycle = 'active'
                                    WHERE td.task_id = bt.id
+                                     -- Only the newest immutable generation can
+                                     -- release a dependent. Later nonterminal or
+                                     -- unknown generations fail closed.
+                                     AND td.delivery_generation = (
+                                         SELECT MAX(latest.delivery_generation)
+                                           FROM task_deliveries latest
+                                          WHERE latest.build_attempt_id = td.build_attempt_id
+                                            AND latest.task_id = td.task_id
+                                     )
                                      AND td.state = 'applied'
                                      AND td.candidate_sha = bt.merge_commit_sha
                                )

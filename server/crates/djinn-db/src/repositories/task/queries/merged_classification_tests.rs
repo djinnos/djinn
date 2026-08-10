@@ -286,7 +286,14 @@ async fn active_direct_merged_and_board_health_require_exact_applied_evidence() 
     sqlx::query("UPDATE direct_delivery_epochs SET state = 'active', generation = 1 WHERE name = 'direct_delivery_v1'").execute(db.pool()).await.unwrap();
 
     let mut ids = Vec::new();
-    for name in ["applied", "applying", "conflict", "unknown", "legacy"] {
+    for name in [
+        "applied",
+        "applying",
+        "conflict",
+        "unknown",
+        "legacy",
+        "stale-applied",
+    ] {
         let task = repo
             .create_fixture_in_project(
                 &project_id,
@@ -349,6 +356,12 @@ async fn active_direct_merged_and_board_health_require_exact_applied_evidence() 
             "legacy-sha",
             ") VALUES ('direct-attempt', $1, 1, $2, $3, 'base')",
         ),
+        (
+            &ids[5],
+            "applied",
+            "stale-applied-sha",
+            ", applied_at) VALUES ('direct-attempt', $1, 1, $2, $3, 'base', now())",
+        ),
     ] {
         let head = "INSERT INTO task_deliveries (build_attempt_id, task_id, delivery_generation, state, candidate_sha, base_sha";
         sqlx::query(&format!("{head}{tail}"))
@@ -359,6 +372,12 @@ async fn active_direct_merged_and_board_health_require_exact_applied_evidence() 
             .await
             .unwrap();
     }
+    // A later unknown generation makes the old applied evidence nonterminal.
+    sqlx::query("INSERT INTO task_deliveries (build_attempt_id, task_id, delivery_generation, state, candidate_sha, base_sha) VALUES ('direct-attempt', $1, 2, 'mystery', 'later-unknown-sha', 'base')")
+        .bind(&ids[5])
+        .execute(db.pool())
+        .await
+        .unwrap();
 
     let merged = repo
         .list_filtered(merged_query(project_id.clone()))
@@ -370,7 +389,7 @@ async fn active_direct_merged_and_board_health_require_exact_applied_evidence() 
         merged_ids.contains(&ids[4].as_str()),
         "explicit legacy PR stays legacy"
     );
-    for id in &ids[1..4] {
+    for id in [&ids[1], &ids[2], &ids[3], &ids[5]] {
         assert!(
             !merged_ids.contains(&id.as_str()),
             "nonterminal or unknown direct evidence must fail closed"
@@ -381,7 +400,7 @@ async fn active_direct_merged_and_board_health_require_exact_applied_evidence() 
     let findings = health["direct_delivery"]["findings"].as_array().unwrap();
     assert_eq!(
         findings.len(),
-        4,
+        5,
         "explicit legacy task is absent from direct reporting"
     );
     let classification = |id: &str| {
@@ -393,6 +412,7 @@ async fn active_direct_merged_and_board_health_require_exact_applied_evidence() 
     assert_eq!(classification(&ids[1]), "applying");
     assert_eq!(classification(&ids[2]), "conflict");
     assert_eq!(classification(&ids[3]), "unknown");
+    assert_eq!(classification(&ids[5]), "unknown");
 
     sqlx::query(
         "UPDATE direct_delivery_epochs SET state = 'disabled' WHERE name = 'direct_delivery_v1'",
@@ -403,7 +423,7 @@ async fn active_direct_merged_and_board_health_require_exact_applied_evidence() 
     let disabled = repo.list_filtered(merged_query(project_id)).await.unwrap();
     assert_eq!(
         disabled.tasks.len(),
-        5,
+        6,
         "disabled epoch preserves legacy SHA classification"
     );
 }
