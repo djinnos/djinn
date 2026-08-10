@@ -135,6 +135,25 @@ impl TaskRepository {
         .transpose()
     }
 
+    /// Whether a SHA is an immutable candidate previously recorded for this
+    /// attempt. Reconciliation uses this to distinguish ledger-proven history
+    /// from an arbitrary remote ref head.
+    pub async fn is_delivery_candidate_for_attempt(
+        &self,
+        build_attempt_id: &str,
+        candidate_sha: &str,
+    ) -> Result<bool> {
+        nonblank("build_attempt_id", build_attempt_id)?;
+        nonblank("candidate_sha", candidate_sha)?;
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM task_deliveries WHERE build_attempt_id=$1 AND candidate_sha=$2)",
+        )
+        .bind(build_attempt_id)
+        .bind(candidate_sha)
+        .fetch_one(self.db.pool())
+        .await?)
+    }
+
     pub async fn prepare_delivery(
         &self,
         input: &DeliveryPrepareInput,
@@ -346,7 +365,10 @@ impl TaskRepository {
             return Ok(DeliveryTransitionResult::Stale { current: None });
         };
         let latest: Option<i64> = sqlx::query_scalar("SELECT max(delivery_generation) FROM task_deliveries WHERE build_attempt_id=$1 AND task_id=$2").bind(&old_id.build_attempt_id).bind(&old_id.task_id).fetch_one(&mut *tx).await?;
-        let mapped: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_deliveries WHERE build_attempt_id=$1 AND candidate_sha=$2)").bind(&old_id.build_attempt_id).bind(&input.selected_parent_sha).fetch_one(&mut *tx).await?;
+        // The first attempt base is a valid mapped first parent even before a
+        // previous delivery candidate has been recorded.
+        let mapped: bool = old.selected_parent_sha == input.selected_parent_sha
+            || sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_deliveries WHERE build_attempt_id=$1 AND candidate_sha=$2)").bind(&old_id.build_attempt_id).bind(&input.selected_parent_sha).fetch_one(&mut *tx).await?;
         if !matches!(
             old.state,
             TaskDeliveryState::Prepared | TaskDeliveryState::Applying

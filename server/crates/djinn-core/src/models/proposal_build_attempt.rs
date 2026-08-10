@@ -57,6 +57,7 @@ pub enum DirectDeliveryParkReason {
     BranchIdentityMismatch,
     ProposalPrIdentityMismatch,
     UnexpectedBranchHead,
+    MappedHeadRetryBound,
     DeliveryConflict,
     NoProposalOwner,
     CapabilityUnavailable,
@@ -65,10 +66,11 @@ pub enum DirectDeliveryParkReason {
 }
 
 impl DirectDeliveryParkReason {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::BranchIdentityMismatch,
         Self::ProposalPrIdentityMismatch,
         Self::UnexpectedBranchHead,
+        Self::MappedHeadRetryBound,
         Self::DeliveryConflict,
         Self::NoProposalOwner,
         Self::CapabilityUnavailable,
@@ -81,6 +83,7 @@ impl DirectDeliveryParkReason {
             Self::BranchIdentityMismatch => "branch_identity_mismatch",
             Self::ProposalPrIdentityMismatch => "proposal_pr_identity_mismatch",
             Self::UnexpectedBranchHead => "unexpected_branch_head",
+            Self::MappedHeadRetryBound => "mapped_head_retry_bound",
             Self::DeliveryConflict => "delivery_conflict",
             Self::NoProposalOwner => "no_proposal_owner",
             Self::CapabilityUnavailable => "capability_unavailable",
@@ -104,6 +107,7 @@ impl FromStr for DirectDeliveryParkReason {
             "branch_identity_mismatch" => Ok(Self::BranchIdentityMismatch),
             "proposal_pr_identity_mismatch" => Ok(Self::ProposalPrIdentityMismatch),
             "unexpected_branch_head" => Ok(Self::UnexpectedBranchHead),
+            "mapped_head_retry_bound" => Ok(Self::MappedHeadRetryBound),
             "delivery_conflict" => Ok(Self::DeliveryConflict),
             "no_proposal_owner" => Ok(Self::NoProposalOwner),
             "capability_unavailable" => Ok(Self::CapabilityUnavailable),
