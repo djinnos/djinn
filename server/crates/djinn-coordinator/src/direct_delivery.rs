@@ -1328,6 +1328,60 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn fresh_legacy_completion_may_persist_its_first_pr_identity() {
+        use crate::dispatch::wave_dispatch::run_legacy_completion_preserving_pr_identity;
+        use djinn_core::events::EventBus;
+        use djinn_db::{EpicRepository, TaskRepository};
+
+        let db = Database::open_in_memory().unwrap();
+        let events = EventBus::noop();
+        let epic = EpicRepository::new(db.clone(), events.clone())
+            .create("Fresh legacy delivery", "", "", "", "", None)
+            .await
+            .unwrap();
+        let repo = TaskRepository::new(db.clone(), events);
+        let task = repo
+            .create(
+                &epic.id,
+                "Approved fresh legacy task",
+                "",
+                "",
+                "task",
+                0,
+                "worker",
+                Some("approved"),
+            )
+            .await
+            .unwrap();
+        assert!(task.pr_url.is_none());
+        let first_pr = "https://github.example/owner/repo/pull/43";
+
+        let db_for_completion = db.clone();
+        let task_id = task.id.clone();
+        let outcome = run_legacy_completion_preserving_pr_identity(&db, &task, || async move {
+            TaskRepository::new(db_for_completion, EventBus::noop())
+                .set_pr_url(&task_id, first_pr)
+                .await
+                .unwrap();
+            djinn_runtime::TaskRunOutcome::PrOpened {
+                url: first_pr.to_owned(),
+                sha: "legacy-head".to_owned(),
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            djinn_runtime::TaskRunOutcome::PrOpened { .. }
+        ));
+        assert_eq!(
+            repo.get(&task.id).await.unwrap().unwrap().pr_url.as_deref(),
+            Some(first_pr),
+            "fresh legacy completion must be allowed to persist its first PR identity"
+        );
+    }
+    #[tokio::test]
     async fn conflict_is_finalized_before_parking() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let (remote, _) = remote(vec![], vec![Some("base")]);
@@ -2271,7 +2325,7 @@ mod tests {
             assert_eq!(state.updates.len(), 2);
             assert_eq!(
                 state.published_commits,
-                [successor.candidate.candidate_sha.clone()]
+                std::slice::from_ref(&successor.candidate.candidate_sha)
             );
             TaskDelivery {
                 identity: successor.identity.clone(),

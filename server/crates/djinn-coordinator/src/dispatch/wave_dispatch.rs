@@ -32,17 +32,22 @@ where
             url
         );
     }
-    let persisted = djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
-        .get(&task.id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("task {} disappeared during legacy completion", task.id))?;
-    if persisted.pr_url != expected_pr_url {
-        anyhow::bail!(
-            "legacy completion mutated persisted PR identity for task {}: expected {:?}, observed {:?}",
-            task.id,
-            expected_pr_url,
-            persisted.pr_url
-        );
+    if expected_pr_url.is_some() {
+        let persisted =
+            djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+                .get(&task.id)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("task {} disappeared during legacy completion", task.id)
+                })?;
+        if persisted.pr_url != expected_pr_url {
+            anyhow::bail!(
+                "legacy completion mutated persisted PR identity for task {}: expected {:?}, observed {:?}",
+                task.id,
+                expected_pr_url,
+                persisted.pr_url
+            );
+        }
     }
     Ok(outcome)
 }
