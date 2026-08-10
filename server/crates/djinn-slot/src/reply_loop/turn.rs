@@ -1531,15 +1531,18 @@ pub async fn run_reply_loop(
                 );
                 observe_reply_loop_boundary("covered_retry_wait", session_id);
                 #[cfg(test)]
-                if let Some(hooks) = reply_loop_admission_test_hooks()
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .get(session_id)
-                    .cloned()
-                    && hooks.block_covered_retry_wait.load(Ordering::Acquire)
                 {
-                    hooks.covered_retry_wait_reached.notify_one();
-                    hooks.covered_retry_wait_release.notified().await;
+                    let hooks = reply_loop_admission_test_hooks()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(session_id)
+                        .cloned();
+                    if let Some(hooks) = hooks
+                        && hooks.block_covered_retry_wait.load(Ordering::Acquire)
+                    {
+                        hooks.covered_retry_wait_reached.notify_one();
+                        hooks.covered_retry_wait_release.notified().await;
+                    }
                 }
                 tokio::select! {
                     biased;
