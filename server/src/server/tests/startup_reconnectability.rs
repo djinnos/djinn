@@ -7,7 +7,10 @@
 //! blanket-interruption mutation runs.
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::events::EventBus;
 use crate::server::AppState;
@@ -22,12 +25,93 @@ use djinn_k8s::{
     ObjectPresence, UidGetResult, WorkloadInventory, WorkloadObjectKind, WorkloadRecord,
 };
 use djinn_supervisor::ConnectionRegistry;
+use tracing::instrument::WithSubscriber;
+
+#[derive(Clone, Default)]
+struct TraceBuffer(Arc<Mutex<Vec<u8>>>);
+
+struct TraceBufferWriter(TraceBuffer);
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceBuffer {
+    type Writer = TraceBufferWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        TraceBufferWriter(self.clone())
+    }
+}
+
+impl Write for TraceBufferWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.0.lock().expect("trace buffer lock").extend(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl TraceBuffer {
+    fn contents(&self) -> String {
+        String::from_utf8(self.0.lock().expect("trace buffer lock").clone())
+            .expect("structured tracing is UTF-8")
+    }
+}
 
 /// The configured-inventory fixture is consumed only by census acquisition.
 /// Stage A receives the immutable result, so it has no opportunity to relist.
 struct MatrixInventory {
     listed: Vec<WorkloadRecord>,
     presence: HashMap<String, ObjectPresence>,
+}
+
+/// Server-level inventory fixture. It records census acquisition calls so the
+/// following Stage A/B/C handoff can prove it consumed immutable evidence.
+struct CountingInventory {
+    listed: Result<Vec<WorkloadRecord>, String>,
+    presence: HashMap<String, ObjectPresence>,
+    list_calls: AtomicUsize,
+    presence_calls: AtomicUsize,
+}
+
+impl CountingInventory {
+    fn listed(records: Vec<WorkloadRecord>, presence: HashMap<String, ObjectPresence>) -> Self {
+        Self {
+            listed: Ok(records),
+            presence,
+            list_calls: AtomicUsize::new(0),
+            presence_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn unavailable() -> Self {
+        Self {
+            listed: Err("apiserver unavailable".to_owned()),
+            presence: HashMap::new(),
+            list_calls: AtomicUsize::new(0),
+            presence_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl WorkloadInventory for CountingInventory {
+    async fn list(&self) -> Result<Vec<WorkloadRecord>, String> {
+        self.list_calls.fetch_add(1, Ordering::SeqCst);
+        self.listed.clone()
+    }
+
+    async fn get_uid(&self, _: WorkloadObjectKind, _: &str, _: &str) -> UidGetResult {
+        UidGetResult::Uncertain
+    }
+
+    async fn presence(&self, _: WorkloadObjectKind, name: &str) -> ObjectPresence {
+        self.presence_calls.fetch_add(1, Ordering::SeqCst);
+        self.presence
+            .get(name)
+            .cloned()
+            .unwrap_or(ObjectPresence::Uncertain)
+    }
 }
 
 /// The configured Stage A identity table is exact: only disconnected,
@@ -267,7 +351,16 @@ impl WorkloadInventory for UnavailableInventory {
 }
 
 async fn seed_startup_rows(db: &Database, events: &EventBus, run_id: &str) -> (String, String) {
-    seed_running_session_with_task_run(db, events, run_id).await;
+    seed_startup_rows_with_status(db, events, run_id, "running").await
+}
+
+async fn seed_startup_rows_with_status(
+    db: &Database,
+    events: &EventBus,
+    run_id: &str,
+    status: &str,
+) -> (String, String) {
+    seed_session_with_task_run_status(db, events, run_id, status).await;
     let run = TaskRunRepository::new(db.clone())
         .get(run_id)
         .await
@@ -295,6 +388,284 @@ async fn seed_startup_rows(db: &Database, events: &EventBus, run_id: &str) -> (S
         .await
         .unwrap();
     (session, attempt)
+}
+
+/// A complete server-owned startup lifecycle fixture.  Its `run` method is
+/// deliberately the only place these regressions invoke the reapers: census
+/// capture happens first, Stage A consumes that immutable value, and then the
+/// coordinator's production Stage B/C handoff consumes the same value.
+struct FullStartupFixture {
+    db: Database,
+    events: EventBus,
+    run_id: String,
+    session_id: String,
+    attempt_id: String,
+    inventory: Arc<CountingInventory>,
+}
+
+impl FullStartupFixture {
+    async fn seeded(run_id: &str, inventory: CountingInventory) -> Self {
+        Self::seeded_with_status(run_id, "running", inventory).await
+    }
+
+    async fn seeded_with_status(run_id: &str, status: &str, inventory: CountingInventory) -> Self {
+        let db = create_test_db();
+        let events = test_events();
+        let (session_id, attempt_id) =
+            seed_startup_rows_with_status(&db, &events, run_id, status).await;
+        Self {
+            db,
+            events,
+            run_id: run_id.to_owned(),
+            session_id,
+            attempt_id,
+            inventory: Arc::new(inventory),
+        }
+    }
+
+    async fn run(&self, age_attempt: bool) -> StartupCensus {
+        let census = StartupCensus::acquire(self.db.clone(), Some(self.inventory.clone()))
+            .await
+            .expect("capture startup census before every lifecycle mutation");
+        let state = AppState::new(self.db.clone(), tokio_util::sync::CancellationToken::new());
+        state
+            .interrupt_stale_sessions_on_startup_with_census(&census)
+            .await;
+        if age_attempt {
+            tokio::time::sleep(std::time::Duration::from_secs(11)).await;
+        }
+        djinn_coordinator::complete_startup_reaper_phase(
+            &self.db,
+            "startup-census-fixture-incarnation",
+            Some(&census),
+        )
+        .await;
+        census
+    }
+
+    async fn durable_statuses(&self) -> (String, String, String) {
+        let session = SessionRepository::new(self.db.clone(), self.events.clone())
+            .get(&self.session_id)
+            .await
+            .expect("read fixture session")
+            .expect("fixture session exists");
+        let run = TaskRunRepository::new(self.db.clone())
+            .get(&self.run_id)
+            .await
+            .expect("read fixture task run")
+            .expect("fixture task run exists");
+        let attempt = TaskAttemptRepository::new(self.db.clone())
+            .get(&self.attempt_id)
+            .await
+            .expect("read fixture attempt")
+            .expect("fixture attempt exists");
+        (session.status, run.status, attempt.outcome)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reaper_preserves_live_pods() {
+    let run_id = "startup-live-pod";
+    let fixture = FullStartupFixture::seeded(
+        run_id,
+        CountingInventory::listed(vec![job(run_id, false)], HashMap::new()),
+    )
+    .await;
+
+    let census = fixture.run(false).await;
+
+    assert!(
+        census
+            .runs()
+            .iter()
+            .any(|run| run.task_run_id == run_id && run.witness == TaskRunWitness::Live)
+    );
+    assert_eq!(
+        fixture.durable_statuses().await,
+        ("running".into(), "running".into(), "pending".into())
+    );
+    assert_eq!(fixture.inventory.list_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.inventory.presence_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reaper_still_reaps_absent_running_job() {
+    let run_id = "startup-absent-running";
+    let mut presence = HashMap::new();
+    presence.insert(djinn_k8s::taskrun_job_name(run_id), ObjectPresence::Absent);
+    let fixture =
+        FullStartupFixture::seeded(run_id, CountingInventory::listed(vec![], presence)).await;
+
+    let census = fixture.run(true).await;
+
+    assert!(census.runs().iter().any(|run| run.task_run_id == run_id
+        && run.witness == TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent)));
+    assert_eq!(
+        fixture.durable_statuses().await,
+        (
+            "interrupted".into(),
+            "interrupted".into(),
+            "interrupted".into()
+        )
+    );
+    let attempt = TaskAttemptRepository::new(fixture.db.clone())
+        .get(&fixture.attempt_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let evidence: serde_json::Value = serde_json::from_str(
+        attempt
+            .summary_json
+            .as_deref()
+            .expect("startup reap records durable environmental evidence"),
+    )
+    .expect("startup environmental evidence is structured JSON");
+    assert_eq!(evidence["failure_class"], "environmental_restart_orphan");
+    assert_eq!(evidence["reason"], "startup");
+    assert!(
+        evidence["boot_incarnation_id"].is_string(),
+        "restart-orphan evidence must identify the boot that proved absence"
+    );
+    assert_eq!(
+        evidence["owner_classification"],
+        "restart_orphan_null_owner"
+    );
+    // Exercise the actual retry policy against the exact row Stage C just
+    // terminalized, rather than reconstructing similar JSON in a unit test.
+    let (actor, cancel) = djinn_coordinator::test_helpers::make_coordinator_actor_cancellable(
+        &fixture.db,
+        &tokio::sync::broadcast::channel(8).0,
+    );
+    let task_id = TaskRunRepository::new(fixture.db.clone())
+        .get(run_id)
+        .await
+        .expect("read reaped task run")
+        .expect("reaped task run exists")
+        .task_id;
+    let decision = actor
+        .latest_attempt_strike_decision(&task_id, "worker")
+        .await
+        .expect("reaper-produced attempt has a strike decision");
+    assert!(
+        decision.exempted,
+        "startup restart orphan must be strike-exempt"
+    );
+    assert_eq!(
+        decision.decision,
+        djinn_telemetry::dispatch::STRIKE_DECISION_EXEMPTED
+    );
+    assert_eq!(
+        decision.source,
+        djinn_telemetry::dispatch::STRIKE_SOURCE_ENVIRONMENTAL_RESTART_ORPHAN
+    );
+    cancel.cancel();
+    assert_eq!(fixture.inventory.list_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.inventory.presence_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reaper_still_reaps_terminal_job() {
+    for (run_id, status) in [
+        ("startup-terminal-starting", "starting"),
+        ("startup-terminal-running", "running"),
+    ] {
+        let fixture = FullStartupFixture::seeded_with_status(
+            run_id,
+            status,
+            CountingInventory::listed(vec![job(run_id, true)], HashMap::new()),
+        )
+        .await;
+        let census = fixture.run(true).await;
+
+        assert!(census.runs().iter().any(|run| run.task_run_id == run_id
+            && run.witness == TaskRunWitness::Gone(GoneProvenance::TerminalPresent)));
+        assert_eq!(
+            fixture.durable_statuses().await,
+            (
+                "interrupted".into(),
+                "interrupted".into(),
+                "interrupted".into()
+            ),
+            "terminal Job must reap the {status} fixture"
+        );
+        assert_eq!(fixture.inventory.list_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.inventory.presence_calls.load(Ordering::SeqCst), 0);
+    }
+
+    // The present, non-terminal starting control is otherwise identical to the
+    // terminal-starting case and proves terminal provenance—not mere presence—
+    // authorizes all three startup stages.
+    let run_id = "startup-live-starting";
+    let fixture = FullStartupFixture::seeded_with_status(
+        run_id,
+        "starting",
+        CountingInventory::listed(vec![job(run_id, false)], HashMap::new()),
+    )
+    .await;
+    let census = fixture.run(true).await;
+    assert!(
+        census
+            .runs()
+            .iter()
+            .any(|run| run.task_run_id == run_id && run.witness == TaskRunWitness::Live)
+    );
+    assert_eq!(
+        fixture.durable_statuses().await,
+        ("running".into(), "starting".into(), "pending".into()),
+        "a present non-terminal starting Job must produce 0/0/0 transitions"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reaper_fails_closed_on_unknown() {
+    let traces = TraceBuffer::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(traces.clone())
+        .finish();
+
+    async {
+        // A dependency callsite may have been cached as disabled by another
+        // concurrently-running test's crate-scoped subscriber. Re-evaluate it
+        // while this future's all-crate collector is the active dispatch.
+        tracing::callsite::rebuild_interest_cache();
+        for (run_id, inventory) in [
+            ("startup-list-unavailable", CountingInventory::unavailable()),
+            (
+                "startup-get-uncertain",
+                CountingInventory::listed(vec![], HashMap::new()),
+            ),
+        ] {
+            let fixture = FullStartupFixture::seeded(run_id, inventory).await;
+            // Stage C intentionally considers only aged pending attempts. Age this
+            // linked row so the full sequence reaches its fail-closed projection.
+            let census = fixture.run(true).await;
+            assert!(
+                census
+                    .runs()
+                    .iter()
+                    .any(|run| run.task_run_id == run_id && run.witness == TaskRunWitness::Unknown)
+            );
+            assert_eq!(
+                fixture.durable_statuses().await,
+                ("running".into(), "running".into(), "pending".into())
+            );
+            assert_eq!(fixture.inventory.list_calls.load(Ordering::SeqCst), 1);
+        }
+    }
+    .with_subscriber(subscriber)
+    .await;
+
+    let logs = traces.contents();
+    for stage in ["startup_stage_a", "startup_stage_b", "startup_stage_c"] {
+        assert!(
+            logs.lines().any(|line| {
+                line.contains(&format!("stage=\"{stage}\"")) && line.contains("reason=\"unknown\"")
+            }),
+            "{stage} must emit a structured reason=unknown startup deferral"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -439,6 +810,15 @@ async fn seed_running_session_with_task_run(
     events: &EventBus,
     task_run_id: &str,
 ) -> String {
+    seed_session_with_task_run_status(db, events, task_run_id, "running").await
+}
+
+async fn seed_session_with_task_run_status(
+    db: &Database,
+    events: &EventBus,
+    task_run_id: &str,
+    status: &str,
+) -> String {
     use djinn_db::{EpicCreateInput, EpicRepository, ProjectRepository};
 
     let project_repo = ProjectRepository::new(db.clone(), events.clone());
@@ -480,7 +860,7 @@ async fn seed_running_session_with_task_run(
             project_id: &project.id,
             task_id: &task.id,
             trigger_type: "manual",
-            status: Some("running"),
+            status: Some(status),
             workspace_path: None,
             mirror_ref: None,
             dispatch_group_id: None,
@@ -503,6 +883,16 @@ async fn seed_running_session_with_task_run(
         })
         .await
         .expect("create test session");
+
+    // Session creation represents a connected worker and promotes a linked
+    // dispatch row to `running`. Starting-state startup fixtures model the
+    // earlier durable-commit/CREATE window, so restore that requested state.
+    if status == "starting" {
+        TaskRunRepository::new(db.clone())
+            .update_status(task_run_id, djinn_core::models::TaskRunStatus::Starting)
+            .await
+            .expect("restore requested starting task-run fixture state");
+    }
 
     project.id
 }
