@@ -1783,6 +1783,36 @@ impl CoordinatorActor {
                             );
                         }
                         Ok(Some(task)) => {
+                            match crate::direct_delivery::admit_direct_delivery_liveness(
+                                self.db.clone(),
+                                &task_repo,
+                                &task.id,
+                            )
+                            .await
+                            {
+                                Ok(crate::direct_delivery::DirectDeliveryLiveness::Legacy)
+                                | Ok(crate::direct_delivery::DirectDeliveryLiveness::Dispatch) => {}
+                                Ok(crate::direct_delivery::DirectDeliveryLiveness::Reconcile) => {
+                                    match self.reconcile_direct_delivery_task(&task).await {
+                                        Ok(outcome) => {
+                                            tracing::info!(task_id = %task_id, ?outcome, "CoordinatorActor: reconciled applying direct delivery instead of zombie-release")
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(task_id = %task_id, %error, "CoordinatorActor: direct reconciliation failed; refusing zombie-release")
+                                        }
+                                    }
+                                    continue;
+                                }
+                                Ok(crate::direct_delivery::DirectDeliveryLiveness::Settled)
+                                | Ok(crate::direct_delivery::DirectDeliveryLiveness::Parked) => {
+                                    tracing::info!(task_id = %task_id, "CoordinatorActor: direct delivery is settled or parked; refusing zombie-release");
+                                    continue;
+                                }
+                                Err(error) => {
+                                    tracing::error!(task_id = %task_id, %error, "CoordinatorActor: direct-delivery admission unavailable; refusing zombie-release");
+                                    continue;
+                                }
+                            }
                             let release = match task.status.as_str() {
                                 "in_progress" => Some((TransitionAction::Release, "open")),
                                 "in_task_review" => {
@@ -2378,6 +2408,37 @@ impl CoordinatorActor {
                             evidence: serde_json::to_value(&result.evidence).unwrap_or_default(),
                         };
                         let _ = liveness_repo.persist_evidence(&snapshot).await;
+                    }
+                }
+
+                match crate::direct_delivery::admit_direct_delivery_liveness(
+                    self.db.clone(),
+                    &repo,
+                    &task.id,
+                )
+                .await
+                {
+                    Ok(crate::direct_delivery::DirectDeliveryLiveness::Legacy)
+                    | Ok(crate::direct_delivery::DirectDeliveryLiveness::Dispatch) => {}
+                    Ok(crate::direct_delivery::DirectDeliveryLiveness::Reconcile) => {
+                        match self.reconcile_direct_delivery_task(&task).await {
+                            Ok(outcome) => {
+                                tracing::info!(task_id = %task.short_id, ?outcome, "CoordinatorActor: reconciled applying direct delivery instead of orphan-release")
+                            }
+                            Err(error) => {
+                                tracing::error!(task_id = %task.short_id, %error, "CoordinatorActor: direct reconciliation failed; refusing orphan-release")
+                            }
+                        }
+                        continue;
+                    }
+                    Ok(crate::direct_delivery::DirectDeliveryLiveness::Settled)
+                    | Ok(crate::direct_delivery::DirectDeliveryLiveness::Parked) => {
+                        tracing::info!(task_id = %task.short_id, "CoordinatorActor: direct delivery is settled or parked; refusing orphan-release");
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::error!(task_id = %task.short_id, %error, "CoordinatorActor: direct-delivery admission unavailable; refusing orphan-release");
+                        continue;
                     }
                 }
 

@@ -38,6 +38,8 @@ pub(crate) enum BoundaryOperation {
     DirectAppend,
     SimpleClose,
     SupervisorPrOpen,
+    TaskPrLookup,
+    TaskPrAdopt,
     TaskPrCreate,
     TaskPrMerge,
     TaskPrAutoMerge,
@@ -71,6 +73,8 @@ pub(crate) fn observe_boundary_operation(operation: &'static str) {
             "direct_append" => BoundaryOperation::DirectAppend,
             "simple_close" => BoundaryOperation::SimpleClose,
             "supervisor_pr_open" => BoundaryOperation::SupervisorPrOpen,
+            "task_pr_lookup" => BoundaryOperation::TaskPrLookup,
+            "task_pr_adopt" => BoundaryOperation::TaskPrAdopt,
             "task_pr_create" => BoundaryOperation::TaskPrCreate,
             "task_pr_merge" => BoundaryOperation::TaskPrMerge,
             "task_pr_auto_merge" => BoundaryOperation::TaskPrAutoMerge,
@@ -91,20 +95,94 @@ pub enum DirectDeliveryAdmission {
     Legacy,
     Direct { attempt: ActiveAttempt },
     NoProposalOwner,
+    ContractUnavailable(DirectDeliveryContract),
+}
+
+/// A persisted epoch contract which cannot safely select either delivery mode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DirectDeliveryContract {
+    MissingSchema { missing_relations: Vec<String> },
+    MissingEpoch,
+    UnknownEpochState { state: String, generation: i64 },
+}
+
+/// The sole task-PR routing decision. Direct identities are ineligible for all
+/// task-PR effects; explicit legacy labels keep the legacy route eligible.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TaskPrEligibility {
+    LegacyAllowed,
+    DirectDeliveryIneligible { attempt: ActiveAttempt },
+    NoProposalOwner,
+    ContractUnavailable(DirectDeliveryContract),
+}
+
+impl TaskPrEligibility {
+    fn park_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::NoProposalOwner => Some("no_proposal_owner"),
+            Self::ContractUnavailable(DirectDeliveryContract::MissingSchema { .. }) => {
+                Some("direct_delivery_contract_missing_schema")
+            }
+            Self::ContractUnavailable(DirectDeliveryContract::MissingEpoch) => {
+                Some("direct_delivery_contract_missing_epoch")
+            }
+            Self::ContractUnavailable(DirectDeliveryContract::UnknownEpochState { .. }) => {
+                Some("direct_delivery_contract_unknown_epoch")
+            }
+            Self::LegacyAllowed | Self::DirectDeliveryIneligible { .. } => None,
+        }
+    }
+}
+
+/// Liveness decision for a canonical direct-delivery attempt. This deliberately
+/// reads the immutable ledger rather than any nullable task-PR field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DirectDeliveryLiveness {
+    Legacy,
+    Dispatch,
+    /// A prepared/applying generation is owned by the direct engine and must be
+    /// reconciled before a worker may be spawned or a task reopened.
+    Reconcile,
+    /// Applied, conflict, and superseded generations are immutable historical
+    /// facts and must never re-enter task-PR liveness handling.
+    Settled,
+    /// The shared admission wrapper already persisted no_proposal_owner.
+    Parked,
 }
 
 /// Persist the active-epoch ownership failure before any task-PR side effect.
 pub async fn park_no_proposal_owner(repo: &TaskRepository, task_id: &str) -> Result<()> {
+    park_direct_delivery_boundary(repo, task_id, "no_proposal_owner").await
+}
+
+async fn park_direct_delivery_boundary(
+    repo: &TaskRepository,
+    task_id: &str,
+    reason: &'static str,
+) -> Result<()> {
     repo.transition(
         task_id,
         TransitionAction::Escalate,
         "coordinator",
         "system",
-        Some("no_proposal_owner"),
+        Some(reason),
         None,
     )
     .await?;
     observe_boundary_operation("no_proposal_owner_park");
+    Ok(())
+}
+
+/// Persist a fail-closed task-PR result before a caller can reach any mirror or
+/// forge effect. Direct identities retain their active attempt lifecycle.
+pub async fn park_task_pr_ineligibility(
+    repo: &TaskRepository,
+    task_id: &str,
+    eligibility: &TaskPrEligibility,
+) -> Result<()> {
+    if let Some(reason) = eligibility.park_reason() {
+        park_direct_delivery_boundary(repo, task_id, reason).await?;
+    }
     Ok(())
 }
 
@@ -126,7 +204,7 @@ pub async fn admit_direct_delivery(db: Database, task_id: &str) -> Result<Direct
                 .ok_or_else(|| anyhow!("task {task_id} disappeared during delivery admission"))?;
             let labels: Vec<String> = serde_json::from_str(&task.labels)
                 .map_err(|error| anyhow!("task {task_id} has invalid labels: {error}"))?;
-            if has_explicit_legacy_delivery(task.pr_url.as_deref(), &labels) {
+            if has_explicit_legacy_delivery(&labels) {
                 return Ok(DirectDeliveryAdmission::Legacy);
             }
             let resolved = ProposalBuildAttemptRepository::new(db)
@@ -153,16 +231,19 @@ pub async fn admit_direct_delivery(db: Database, task_id: &str) -> Result<Direct
                 }
             }
         }
-        DirectDeliverySchemaCapability::MissingSchema { missing_relations } => Err(anyhow!(
-            "direct_delivery_v1 schema unavailable: {}",
-            missing_relations.join(", ")
-        )),
-        DirectDeliverySchemaCapability::MissingEpoch => {
-            Err(anyhow!("direct_delivery_v1 epoch is unavailable"))
+        DirectDeliverySchemaCapability::MissingSchema { missing_relations } => {
+            Ok(DirectDeliveryAdmission::ContractUnavailable(
+                DirectDeliveryContract::MissingSchema { missing_relations },
+            ))
         }
-        DirectDeliverySchemaCapability::UnknownEpochState { state, generation } => Err(anyhow!(
-            "direct_delivery_v1 has unknown state {state} at generation {generation}"
-        )),
+        DirectDeliverySchemaCapability::MissingEpoch => Ok(
+            DirectDeliveryAdmission::ContractUnavailable(DirectDeliveryContract::MissingEpoch),
+        ),
+        DirectDeliverySchemaCapability::UnknownEpochState { state, generation } => {
+            Ok(DirectDeliveryAdmission::ContractUnavailable(
+                DirectDeliveryContract::UnknownEpochState { state, generation },
+            ))
+        }
     }
 }
 
@@ -174,10 +255,42 @@ pub(crate) async fn admit_ready_direct_delivery(
     task_id: &str,
 ) -> Result<DirectDeliveryAdmission> {
     let admission = admit_direct_delivery(db, task_id).await?;
-    if admission == DirectDeliveryAdmission::NoProposalOwner {
-        park_no_proposal_owner(tasks, task_id).await?;
+    if let Some(eligibility) = fail_closed_task_pr_eligibility(&admission) {
+        park_task_pr_ineligibility(tasks, task_id, &eligibility).await?;
     }
     Ok(admission)
+}
+
+/// Production liveness fence used before ready-task spawn and respawn handling.
+/// It shares the epoch gate and canonical active-attempt resolver with
+/// completion, then makes the ledger authoritative for direct task liveness.
+pub(crate) async fn admit_direct_delivery_liveness(
+    db: Database,
+    tasks: &TaskRepository,
+    task_id: &str,
+) -> Result<DirectDeliveryLiveness> {
+    match admit_ready_direct_delivery(db.clone(), tasks, task_id).await? {
+        DirectDeliveryAdmission::Legacy => Ok(DirectDeliveryLiveness::Legacy),
+        DirectDeliveryAdmission::NoProposalOwner
+        | DirectDeliveryAdmission::ContractUnavailable(_) => Ok(DirectDeliveryLiveness::Parked),
+        DirectDeliveryAdmission::Direct { attempt } => {
+            let delivery = tasks
+                .latest_delivery_for_attempt(&attempt.build_attempt_id, task_id)
+                .await?;
+            Ok(match delivery.map(|delivery| delivery.state) {
+                None => DirectDeliveryLiveness::Dispatch,
+                Some(
+                    djinn_core::models::TaskDeliveryState::Prepared
+                    | djinn_core::models::TaskDeliveryState::Applying,
+                ) => DirectDeliveryLiveness::Reconcile,
+                Some(
+                    djinn_core::models::TaskDeliveryState::Applied
+                    | djinn_core::models::TaskDeliveryState::Conflict
+                    | djinn_core::models::TaskDeliveryState::Superseded,
+                ) => DirectDeliveryLiveness::Settled,
+            })
+        }
+    }
 }
 
 /// Production approved-task boundary. Completion cannot bypass the same
@@ -188,16 +301,41 @@ pub(crate) async fn admit_approved_direct_delivery(
     task_id: &str,
 ) -> Result<DirectDeliveryAdmission> {
     let admission = admit_direct_delivery(db, task_id).await?;
-    if admission == DirectDeliveryAdmission::NoProposalOwner {
-        park_no_proposal_owner(tasks, task_id).await?;
+    if let Some(eligibility) = fail_closed_task_pr_eligibility(&admission) {
+        park_task_pr_ineligibility(tasks, task_id, &eligibility).await?;
     }
     Ok(admission)
 }
 
-/// Legacy identities are an explicit routing boundary: admission may inspect a
-/// task PR, but direct delivery must never replace or otherwise mutate it.
-fn has_explicit_legacy_delivery(pr_url: Option<&str>, labels: &[String]) -> bool {
-    pr_url.is_some() || labels.iter().any(|label| label == LEGACY_DELIVERY_LABEL)
+/// Derive task-PR eligibility from the landed epoch admission and canonical
+/// active-attempt resolver, never from a nullable task PR identity.
+pub async fn task_pr_eligibility(db: Database, task_id: &str) -> Result<TaskPrEligibility> {
+    Ok(match admit_direct_delivery(db, task_id).await? {
+        DirectDeliveryAdmission::Legacy => TaskPrEligibility::LegacyAllowed,
+        DirectDeliveryAdmission::Direct { attempt } => {
+            TaskPrEligibility::DirectDeliveryIneligible { attempt }
+        }
+        DirectDeliveryAdmission::NoProposalOwner => TaskPrEligibility::NoProposalOwner,
+        DirectDeliveryAdmission::ContractUnavailable(contract) => {
+            TaskPrEligibility::ContractUnavailable(contract)
+        }
+    })
+}
+
+fn fail_closed_task_pr_eligibility(
+    admission: &DirectDeliveryAdmission,
+) -> Option<TaskPrEligibility> {
+    match admission {
+        DirectDeliveryAdmission::NoProposalOwner => Some(TaskPrEligibility::NoProposalOwner),
+        DirectDeliveryAdmission::ContractUnavailable(contract) => {
+            Some(TaskPrEligibility::ContractUnavailable(contract.clone()))
+        }
+        DirectDeliveryAdmission::Legacy | DirectDeliveryAdmission::Direct { .. } => None,
+    }
+}
+
+fn has_explicit_legacy_delivery(labels: &[String]) -> bool {
+    labels.iter().any(|label| label == LEGACY_DELIVERY_LABEL)
 }
 
 /// Direct completion adapter; it exposes no legacy task-PR operation.
@@ -1337,6 +1475,21 @@ mod tests {
         // `prepared_candidate` before this patch is ever rebuilt.
         assert_eq!(successor.candidate_sha, "candidate-task-g2-on-mapped");
     }
+
+    #[tokio::test]
+    async fn reconciliation_collaborator_records_the_real_direct_engine_effect() {
+        use crate::dispatch::wave_dispatch::run_direct_completion;
+
+        clear_boundary_operations();
+        let outcome = run_direct_completion(|| async { "reconciled" }).await;
+
+        assert_eq!(outcome, "reconciled");
+        assert_eq!(
+            take_boundary_operations(),
+            [BoundaryOperation::DirectAppend]
+        );
+    }
+
     #[tokio::test]
     async fn explicit_legacy_completion_preserves_existing_persisted_pr_identity() {
         use crate::dispatch::wave_dispatch::{
@@ -1367,6 +1520,9 @@ mod tests {
             .unwrap();
         let existing_pr = "https://github.example/owner/repo/pull/42";
         repo.set_pr_url(&task.id, existing_pr).await.unwrap();
+        repo.update_labels(&task.id, &format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#))
+            .await
+            .unwrap();
         // Completion receives the same persisted/reloaded shape as production.
         let task = repo.get(&task.id).await.unwrap().unwrap();
         djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
@@ -2572,6 +2728,10 @@ mod tests {
                         .set_pr_url(&task.id, "https://example.test/pr/unchanged")
                         .await
                         .unwrap();
+                    tasks
+                        .update_labels(&task.id, &format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#))
+                        .await
+                        .unwrap();
                 }
                 if matches!(
                     state,
@@ -2626,11 +2786,6 @@ mod tests {
                 } else {
                     admit_ready_direct_delivery(db.clone(), &tasks, &task.id).await
                 };
-                let failed = matches!(
-                    state,
-                    State::MissingSchema | State::MissingEpoch | State::UnknownEpoch
-                );
-                assert_eq!(admission.is_err(), failed);
                 match (&admission, state) {
                     (
                         Ok(DirectDeliveryAdmission::Legacy),
@@ -2638,13 +2793,19 @@ mod tests {
                     ) => {}
                     (Ok(DirectDeliveryAdmission::Direct { .. }), State::Direct) => {}
                     (Ok(DirectDeliveryAdmission::NoProposalOwner), State::Unresolved) => {}
-                    (Err(_), State::MissingSchema | State::MissingEpoch | State::UnknownEpoch) => {}
+                    (
+                        Ok(DirectDeliveryAdmission::ContractUnavailable(_)),
+                        State::MissingSchema | State::MissingEpoch | State::UnknownEpoch,
+                    ) => {}
                     _ => panic!("matrix state selected the wrong admission route"),
                 }
                 let external_pr_seen = std::sync::Arc::new(std::sync::Mutex::new(None));
                 if let Ok(admission) = admission
                     && completion
-                    && !matches!(admission, DirectDeliveryAdmission::NoProposalOwner)
+                    && matches!(
+                        admission,
+                        DirectDeliveryAdmission::Legacy | DirectDeliveryAdmission::Direct { .. }
+                    )
                 {
                     let completion_task = tasks.get(&task.id).await.unwrap().unwrap();
                     let legacy_pr = completion_task
@@ -2677,14 +2838,34 @@ mod tests {
                     .await;
                 }
                 let after = snapshot(&db, &tasks, &task.id).await;
-                if failed {
-                    assert_eq!(
-                        after, before,
-                        "capability failure must not mutate task, activity, attempt, build-attempt, or ledger state"
-                    );
-                }
-                if matches!(state, State::Unresolved) {
+                if matches!(
+                    state,
+                    State::Unresolved
+                        | State::MissingSchema
+                        | State::MissingEpoch
+                        | State::UnknownEpoch
+                ) {
                     assert_eq!(after.0, "needs_lead_intervention");
+                    assert_eq!(
+                        after.1, before.1,
+                        "fail-closed parking must not alter PR identity"
+                    );
+                    assert_eq!(
+                        after.2, before.2,
+                        "fail-closed parking must not integrate the task"
+                    );
+                    assert_eq!(
+                        after.4, before.4,
+                        "fail-closed parking must not alter task attempts"
+                    );
+                    assert_eq!(
+                        after.5, before.5,
+                        "fail-closed parking must not alter build attempts"
+                    );
+                    assert_eq!(
+                        after.6, before.6,
+                        "fail-closed parking must not alter delivery ledger"
+                    );
                 }
                 if matches!(state, State::ExplicitLegacy) {
                     assert_eq!(
@@ -2721,9 +2902,10 @@ mod tests {
                         BoundaryOperation::ResolveTaskActiveAttempt,
                         BoundaryOperation::NoProposalOwnerPark,
                     ],
-                    (State::MissingSchema | State::MissingEpoch | State::UnknownEpoch, _) => {
-                        vec![BoundaryOperation::CapabilityProbe]
-                    }
+                    (State::MissingSchema | State::MissingEpoch | State::UnknownEpoch, _) => vec![
+                        BoundaryOperation::CapabilityProbe,
+                        BoundaryOperation::NoProposalOwnerPark,
+                    ],
                 };
                 assert_eq!(
                     take_boundary_operations(),

@@ -227,3 +227,203 @@ async fn true_merged_classifications_still_count_as_merged() {
         "completed PR task counts as merged"
     );
 }
+
+fn merged_query(project_id: String) -> ListQuery {
+    ListQuery {
+        project_id: Some(project_id),
+        status: Some("merged".to_owned()),
+        issue_type: None,
+        priority: None,
+        label: None,
+        text: None,
+        parent: None,
+        sort: "priority".to_owned(),
+        limit: 50,
+        offset: 0,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_direct_merged_and_board_health_require_exact_applied_evidence() {
+    let db = Database::open_in_memory().unwrap();
+    db.ensure_initialized().await.unwrap();
+    let project_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, 'p', 'owner', $2)",
+    )
+    .bind(&project_id)
+    .bind(format!("direct-merged-{project_id}"))
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let epic_repo = crate::repositories::epic::EpicRepository::new(db.clone(), EventBus::noop());
+    let repo = TaskRepository::new(db.clone(), EventBus::noop());
+    let epic = epic_repo
+        .create_for_project(
+            &project_id,
+            EpicCreateInput {
+                title: "direct epic",
+                description: "",
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: None,
+                status: None,
+                auto_breakdown: None,
+                originating_adr_id: None,
+                blocked_by: None,
+            },
+        )
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO proposals (id, short_id, title) VALUES ('direct-proposal', 'direct-proposal', 'direct proposal')").execute(db.pool()).await.unwrap();
+    sqlx::query("UPDATE epics SET proposal_id = 'direct-proposal' WHERE id = $1")
+        .bind(&epic.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO proposal_build_attempts (id, proposal_id, short_id, lifecycle, base_sha, branch_name, branch_head_sha) VALUES ('direct-attempt', 'direct-proposal', 'attempt', 'active', 'base', 'proposal/direct/attempt', 'base')").execute(db.pool()).await.unwrap();
+    sqlx::query("UPDATE direct_delivery_epochs SET state = 'active', generation = 1 WHERE name = 'direct_delivery_v1'").execute(db.pool()).await.unwrap();
+
+    let mut ids = Vec::new();
+    for name in [
+        "applied",
+        "applying",
+        "conflict",
+        "unknown",
+        "legacy",
+        "stale-applied",
+    ] {
+        let task = repo
+            .create_fixture_in_project(
+                &project_id,
+                Some(&epic.id),
+                name,
+                "",
+                "",
+                "task",
+                0,
+                "",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE tasks SET status = 'closed', close_reason = 'completed', merge_commit_sha = $1, closed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $2").bind(format!("{name}-sha")).bind(&task.id).execute(db.pool()).await.unwrap();
+        ids.push(task.id);
+    }
+    sqlx::query("UPDATE tasks SET pr_url = 'https://github.com/owner/repo/pull/1' WHERE id = $1")
+        .bind(&ids[4])
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE task_deliveries DROP CONSTRAINT task_deliveries_state_check")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE task_deliveries DROP CONSTRAINT task_deliveries_applied_shape")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    for (id, state, candidate, tail) in [
+        (
+            &ids[0],
+            "applied",
+            "applied-sha",
+            ", applied_at) VALUES ('direct-attempt', $1, 1, $2, $3, 'base', 'source', 'patch', 'parent', 'prepare-1', now())",
+        ),
+        (
+            &ids[1],
+            "applying",
+            "applying-sha",
+            ") VALUES ('direct-attempt', $1, 1, $2, $3, 'base', 'source', 'patch', 'parent', 'prepare-1')",
+        ),
+        (
+            &ids[2],
+            "conflict",
+            "conflict-sha",
+            ", conflict_reason) VALUES ('direct-attempt', $1, 1, $2, $3, 'base', 'source', 'patch', 'parent', 'prepare-1', 'conflict')",
+        ),
+        (
+            &ids[3],
+            "mystery",
+            "unknown-sha",
+            ") VALUES ('direct-attempt', $1, 1, $2, $3, 'base', 'source', 'patch', 'parent', 'prepare-1')",
+        ),
+        (
+            &ids[4],
+            "applying",
+            "legacy-sha",
+            ") VALUES ('direct-attempt', $1, 1, $2, $3, 'base', 'source', 'patch', 'parent', 'prepare-1')",
+        ),
+        (
+            &ids[5],
+            "applied",
+            "stale-applied-sha",
+            ", applied_at) VALUES ('direct-attempt', $1, 1, $2, $3, 'base', 'source', 'patch', 'parent', 'prepare-1', now())",
+        ),
+    ] {
+        let head = "INSERT INTO task_deliveries (build_attempt_id, task_id, delivery_generation, state, candidate_sha, base_sha, source_sha, patch_digest, selected_parent_sha, prepare_transition_id";
+        sqlx::query(&format!("{head}{tail}"))
+            .bind(id)
+            .bind(state)
+            .bind(candidate)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+    // A later unknown generation makes the old applied evidence nonterminal.
+    sqlx::query("INSERT INTO task_deliveries (build_attempt_id, task_id, delivery_generation, state, candidate_sha, base_sha, source_sha, patch_digest, selected_parent_sha, prepare_transition_id) VALUES ('direct-attempt', $1, 2, 'mystery', 'later-unknown-sha', 'base', 'source', 'patch', 'parent', 'prepare-2')")
+        .bind(&ids[5])
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let merged = repo
+        .list_filtered(merged_query(project_id.clone()))
+        .await
+        .unwrap();
+    let merged_ids: Vec<&str> = merged.tasks.iter().map(|task| task.id.as_str()).collect();
+    assert!(merged_ids.contains(&ids[0].as_str()));
+    assert!(
+        merged_ids.contains(&ids[4].as_str()),
+        "explicit legacy PR stays legacy"
+    );
+    for id in [&ids[1], &ids[2], &ids[3], &ids[5]] {
+        assert!(
+            !merged_ids.contains(&id.as_str()),
+            "nonterminal or unknown direct evidence must fail closed"
+        );
+    }
+
+    let health = repo.board_health(24).await.unwrap();
+    let findings = health["direct_delivery"]["findings"].as_array().unwrap();
+    assert_eq!(
+        findings.len(),
+        5,
+        "explicit legacy task is absent from direct reporting"
+    );
+    let classification = |id: &str| {
+        findings.iter().find(|f| f["id"] == id).unwrap()["classification"]
+            .as_str()
+            .unwrap()
+    };
+    assert_eq!(classification(&ids[0]), "integrated");
+    assert_eq!(classification(&ids[1]), "applying");
+    assert_eq!(classification(&ids[2]), "conflict");
+    assert_eq!(classification(&ids[3]), "unknown");
+    assert_eq!(classification(&ids[5]), "unknown");
+
+    sqlx::query(
+        "UPDATE direct_delivery_epochs SET state = 'disabled' WHERE name = 'direct_delivery_v1'",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let disabled = repo.list_filtered(merged_query(project_id)).await.unwrap();
+    assert_eq!(
+        disabled.tasks.len(),
+        6,
+        "disabled epoch preserves legacy SHA classification"
+    );
+}
