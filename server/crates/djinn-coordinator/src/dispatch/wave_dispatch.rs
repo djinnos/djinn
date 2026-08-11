@@ -64,6 +64,54 @@ where
     completion().await
 }
 
+impl CoordinatorActor {
+    /// Re-enter the landed direct-delivery engine for an Applying generation
+    /// instead of reopening its task through task-PR liveness.
+    pub(crate) async fn reconcile_direct_delivery_task(
+        &self,
+        task: &djinn_core::models::Task,
+    ) -> anyhow::Result<crate::direct_delivery::DeliveryOutcome> {
+        let mirror = self
+            .mirror
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("direct delivery admitted without a mirror"))?;
+        let project_repo = djinn_db::ProjectRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let (owner, repo_name) = project_repo
+            .get_github_coords(&task.project_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("direct delivery admitted without GitHub identity"))?;
+        let installation_id = project_repo
+            .get_installation_id(&task.project_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("direct delivery admitted without installation"))?;
+        let base_branch = project_repo
+            .get_config(&task.project_id)
+            .await?
+            .map(|config| config.target_branch)
+            .unwrap_or_else(|| "main".into());
+
+        run_direct_completion(|| async {
+            crate::direct_delivery::deliver_task_branch(
+                self.db.clone(),
+                crate::events::event_bus_for(&self.events_tx),
+                mirror,
+                &task.id,
+                &task.project_id,
+                &format!("task/{}", task.short_id),
+                &base_branch,
+                owner,
+                repo_name,
+                djinn_provider::github_api::GitHubApiClient::for_installation(installation_id),
+            )
+            .await
+        })
+        .await
+    }
+}
+
 /// Select the approved-task writer at the completion boundary. Keeping the
 /// collaborators explicit gives production and tests one fail-closed routing
 /// seam between direct append and legacy task-PR completion.
