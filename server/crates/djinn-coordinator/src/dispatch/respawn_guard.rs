@@ -61,6 +61,16 @@ use djinn_db::{
 
 use super::attempt_lifecycle::make_dispatch_key;
 
+/// Admission used by the production respawn-guard caller. Direct ownership is
+/// derived only by the shared epoch/ledger boundary, never from `pr_url`.
+pub(crate) async fn admit_respawn_guard_liveness(
+    db: djinn_db::Database,
+    tasks: &TaskRepository,
+    task_id: &str,
+) -> anyhow::Result<crate::direct_delivery::DirectDeliveryLiveness> {
+    crate::direct_delivery::admit_direct_delivery_liveness(db, tasks, task_id).await
+}
+
 /// The role whose dispatches carry PR-write intent.  Open-PR adoption applies
 /// ONLY to worker dispatches: vd4w's intent was "before spawning a duplicate
 /// WORKER".  Reviewer / planner / arbiter / lead dispatches for a task that
@@ -179,6 +189,31 @@ pub async fn run_respawn_guard(
     pr_url: Option<&str>,
     rework_signal: Option<PrReworkSignal>,
 ) -> RespawnGuardDecision {
+    // Direct ownership and liveness are canonical ledger facts, not nullable
+    // task-PR facts. This guard is also invoked outside ready dispatch, so it
+    // must not let a settled, applying, or unknown direct contract fall through
+    // to the legacy PR/admission decisions below.
+    let tasks = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    match admit_respawn_guard_liveness(db.clone(), &tasks, task_id).await {
+        Ok(crate::direct_delivery::DirectDeliveryLiveness::Legacy)
+        | Ok(crate::direct_delivery::DirectDeliveryLiveness::Dispatch) => {}
+        Ok(crate::direct_delivery::DirectDeliveryLiveness::Reconcile) => {
+            tracing::info!(task_id = %task_id, "respawn_guard: applying direct delivery requires reconciliation — deferring");
+            return RespawnGuardDecision::Defer(GuardReason::RespawnGuard);
+        }
+        Ok(crate::direct_delivery::DirectDeliveryLiveness::Settled)
+        | Ok(crate::direct_delivery::DirectDeliveryLiveness::Parked) => {
+            tracing::info!(task_id = %task_id, "respawn_guard: settled or parked direct delivery — deferring");
+            return RespawnGuardDecision::Defer(GuardReason::RespawnGuard);
+        }
+        Err(error) => {
+            // This is a lifecycle-mutation fence, unlike the best-effort
+            // attempt-history lookup below: unavailable/unknown contracts must
+            // fail closed before a spawn or PR adoption effect.
+            tracing::error!(task_id = %task_id, %error, "respawn_guard: direct-delivery admission unavailable — deferring");
+            return RespawnGuardDecision::Defer(GuardReason::RespawnGuard);
+        }
+    }
     // 1. Open-PR adoption: when the task already has an open PR, adopt it
     //    and skip dispatch.  This prevents spawning a duplicate worker when
     //    a PR is already in review — unless the PR needs rework, in which

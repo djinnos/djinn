@@ -2024,19 +2024,33 @@ impl CoordinatorActor {
             // Ready admission and approved completion share this read-only
             // epoch/ownership boundary. Active unresolved ownership is parked,
             // never allowed to fall through to legacy behavior.
-            match crate::direct_delivery::admit_ready_direct_delivery(
+            match super::respawn_guard::admit_respawn_guard_liveness(
                 self.db.clone(),
                 &self.task_repo(),
                 &task.id,
             )
             .await
             {
-                Ok(crate::direct_delivery::DirectDeliveryAdmission::Legacy)
-                | Ok(crate::direct_delivery::DirectDeliveryAdmission::Direct { .. }) => {}
-                Ok(crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner)
-                | Ok(crate::direct_delivery::DirectDeliveryAdmission::ContractUnavailable(_)) => {
+                Ok(crate::direct_delivery::DirectDeliveryLiveness::Legacy)
+                | Ok(crate::direct_delivery::DirectDeliveryLiveness::Dispatch) => {}
+                Ok(crate::direct_delivery::DirectDeliveryLiveness::Parked) => {
                     // The production admission wrapper already persisted the
-                    // no_proposal_owner park. Do not issue a second Escalate.
+                    // fail-closed park. Do not issue a second Escalate.
+                    continue;
+                }
+                Ok(crate::direct_delivery::DirectDeliveryLiveness::Reconcile) => {
+                    match self.reconcile_direct_delivery_task(&task).await {
+                        Ok(outcome) => {
+                            tracing::info!(task_id = %task.short_id, ?outcome, "CoordinatorActor: reconciled applying direct delivery before refusing spawn")
+                        }
+                        Err(error) => {
+                            tracing::error!(task_id = %task.short_id, %error, "CoordinatorActor: direct delivery reconciliation failed; refusing spawn")
+                        }
+                    }
+                    continue;
+                }
+                Ok(crate::direct_delivery::DirectDeliveryLiveness::Settled) => {
+                    tracing::info!(task_id = %task.short_id, "CoordinatorActor: immutable direct delivery is settled; refusing respawn");
                     continue;
                 }
                 Err(error) => {

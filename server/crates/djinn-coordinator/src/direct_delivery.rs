@@ -134,6 +134,22 @@ impl TaskPrEligibility {
     }
 }
 
+/// Liveness decision for a canonical direct-delivery attempt. This deliberately
+/// reads the immutable ledger rather than any nullable task-PR field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DirectDeliveryLiveness {
+    Legacy,
+    Dispatch,
+    /// A prepared/applying generation is owned by the direct engine and must be
+    /// reconciled before a worker may be spawned or a task reopened.
+    Reconcile,
+    /// Applied, conflict, and superseded generations are immutable historical
+    /// facts and must never re-enter task-PR liveness handling.
+    Settled,
+    /// The shared admission wrapper already persisted no_proposal_owner.
+    Parked,
+}
+
 /// Persist the active-epoch ownership failure before any task-PR side effect.
 pub async fn park_no_proposal_owner(repo: &TaskRepository, task_id: &str) -> Result<()> {
     park_direct_delivery_boundary(repo, task_id, "no_proposal_owner").await
@@ -243,6 +259,38 @@ pub(crate) async fn admit_ready_direct_delivery(
         park_task_pr_ineligibility(tasks, task_id, &eligibility).await?;
     }
     Ok(admission)
+}
+
+/// Production liveness fence used before ready-task spawn and respawn handling.
+/// It shares the epoch gate and canonical active-attempt resolver with
+/// completion, then makes the ledger authoritative for direct task liveness.
+pub(crate) async fn admit_direct_delivery_liveness(
+    db: Database,
+    tasks: &TaskRepository,
+    task_id: &str,
+) -> Result<DirectDeliveryLiveness> {
+    match admit_ready_direct_delivery(db.clone(), tasks, task_id).await? {
+        DirectDeliveryAdmission::Legacy => Ok(DirectDeliveryLiveness::Legacy),
+        DirectDeliveryAdmission::NoProposalOwner
+        | DirectDeliveryAdmission::ContractUnavailable(_) => Ok(DirectDeliveryLiveness::Parked),
+        DirectDeliveryAdmission::Direct { attempt } => {
+            let delivery = tasks
+                .latest_delivery_for_attempt(&attempt.build_attempt_id, task_id)
+                .await?;
+            Ok(match delivery.map(|delivery| delivery.state) {
+                None => DirectDeliveryLiveness::Dispatch,
+                Some(
+                    djinn_core::models::TaskDeliveryState::Prepared
+                    | djinn_core::models::TaskDeliveryState::Applying,
+                ) => DirectDeliveryLiveness::Reconcile,
+                Some(
+                    djinn_core::models::TaskDeliveryState::Applied
+                    | djinn_core::models::TaskDeliveryState::Conflict
+                    | djinn_core::models::TaskDeliveryState::Superseded,
+                ) => DirectDeliveryLiveness::Settled,
+            })
+        }
+    }
 }
 
 /// Production approved-task boundary. Completion cannot bypass the same
@@ -1427,6 +1475,21 @@ mod tests {
         // `prepared_candidate` before this patch is ever rebuilt.
         assert_eq!(successor.candidate_sha, "candidate-task-g2-on-mapped");
     }
+
+    #[tokio::test]
+    async fn reconciliation_collaborator_records_the_real_direct_engine_effect() {
+        use crate::dispatch::wave_dispatch::run_direct_completion;
+
+        clear_boundary_operations();
+        let outcome = run_direct_completion(|| async { "reconciled" }).await;
+
+        assert_eq!(outcome, "reconciled");
+        assert_eq!(
+            take_boundary_operations(),
+            [BoundaryOperation::DirectAppend]
+        );
+    }
+
     #[tokio::test]
     async fn explicit_legacy_completion_preserves_existing_persisted_pr_identity() {
         use crate::dispatch::wave_dispatch::{
