@@ -1457,10 +1457,7 @@ mod tests {
             .unwrap();
         let existing_pr = "https://github.example/owner/repo/pull/42";
         repo.set_pr_url(&task.id, existing_pr).await.unwrap();
-        sqlx::query("UPDATE tasks SET labels = $1::jsonb WHERE id = $2")
-            .bind(format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#))
-            .bind(&task.id)
-            .execute(db.pool())
+        repo.update_labels(&task.id, &format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#))
             .await
             .unwrap();
         // Completion receives the same persisted/reloaded shape as production.
@@ -2668,10 +2665,8 @@ mod tests {
                         .set_pr_url(&task.id, "https://example.test/pr/unchanged")
                         .await
                         .unwrap();
-                    sqlx::query("UPDATE tasks SET labels = $1::jsonb WHERE id = $2")
-                        .bind(format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#))
-                        .bind(&task.id)
-                        .execute(db.pool())
+                    tasks
+                        .update_labels(&task.id, &format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#))
                         .await
                         .unwrap();
                 }

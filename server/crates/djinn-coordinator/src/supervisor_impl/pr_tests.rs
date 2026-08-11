@@ -657,10 +657,8 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
                 .set_pr_url(&task.id, "https://example.test/pr/42")
                 .await
                 .unwrap();
-            sqlx::query("UPDATE tasks SET labels = $1::jsonb WHERE id = $2")
-                .bind(format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#))
-                .bind(&task.id)
-                .execute(db.pool())
+            tasks
+                .update_labels(&task.id, &format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#))
                 .await
                 .unwrap();
         }
