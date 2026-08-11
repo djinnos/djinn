@@ -210,6 +210,60 @@ use pr_review_handlers::{
     delegated_review_verdict, effective_review_decision, merged_review_outcome,
 };
 use pr_undraft::{should_undraft_before_merge, warn_pr_merge_failed};
+
+impl CoordinatorActor {
+    /// Admit legacy task-PR handling before a poller or cleanup path reads a
+    /// persisted PR identity or reaches a provider effect. The typed boundary
+    /// owns epoch and active-attempt resolution; callers must not derive mode
+    /// from `pr_url`.
+    async fn task_pr_handling_is_eligible(&self, task: &Task) -> bool {
+        let eligibility = match crate::direct_delivery::task_pr_eligibility(
+            self.db.clone(),
+            &task.id,
+        )
+        .await
+        {
+            Ok(eligibility) => eligibility,
+            Err(error) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %error,
+                    "task-PR handling denied because direct-delivery eligibility could not be resolved"
+                );
+                return false;
+            }
+        };
+
+        match eligibility {
+            crate::direct_delivery::TaskPrEligibility::LegacyAllowed => true,
+            crate::direct_delivery::TaskPrEligibility::DirectDeliveryIneligible { .. } => {
+                tracing::debug!(
+                    task_id = %task.short_id,
+                    "task-PR handling skipped for active direct-delivery task"
+                );
+                false
+            }
+            eligibility @ (crate::direct_delivery::TaskPrEligibility::NoProposalOwner
+            | crate::direct_delivery::TaskPrEligibility::ContractUnavailable(_)) => {
+                let task_repo = self.task_repo();
+                if let Err(error) = crate::direct_delivery::park_task_pr_ineligibility(
+                    &task_repo,
+                    &task.id,
+                    &eligibility,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %error,
+                        "task-PR handling denied because fail-closed parking failed"
+                    );
+                }
+                false
+            }
+        }
+    }
+}
 #[cfg(test)]
 pub(crate) use pr_watcher::{
     PrDraftCiAction, decide_pr_draft_ci_action, rollout_policy_publication_marker,

@@ -18,22 +18,20 @@ impl CoordinatorActor {
             }
         };
 
-        let tasks_with_pr: Vec<_> = pr_review_tasks
-            .into_iter()
-            .filter(|t| t.pr_url.is_some())
-            .collect();
-
-        if tasks_with_pr.is_empty() {
+        if pr_review_tasks.is_empty() {
             return;
         }
 
         tracing::debug!(
-            count = tasks_with_pr.len(),
+            count = pr_review_tasks.len(),
             "PR poller: checking {} pr_review task(s)",
-            tasks_with_pr.len()
+            pr_review_tasks.len()
         );
 
-        for task in tasks_with_pr {
+        for task in pr_review_tasks {
+            if !self.task_pr_handling_is_eligible(&task).await {
+                continue;
+            }
             let Some(pr_url) = task.pr_url.as_deref() else {
                 tracing::warn!(
                     task_id = %task.short_id,
