@@ -804,3 +804,516 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
         }
     }
 }
+
+/// This harness deliberately owns the persisted installation, provider, and
+/// local-git prerequisites. It invokes production supervisor and poller entry
+/// points; the test seams only redirect their real transport endpoints.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
+    use crate::{
+        direct_delivery::{BoundaryOperation, clear_boundary_operations, take_boundary_operations},
+        pr_poller::installation::set_installation_client_base_url_for_test,
+        supervisor_impl::{SupervisorCallbackContext, supervisor_pr_open},
+    };
+    use djinn_core::{
+        events::EventBus,
+        models::{KnowledgeInjectionConfig, TaskRunTrigger, TransitionAction},
+    };
+    use djinn_db::{Database, EpicRepository, TaskRepository};
+    use djinn_provider::github_app::installations::prime_cache_for_tests;
+    use djinn_runtime::{SupervisorFlow, TaskRunOutcome, TaskRunSpec};
+    use djinn_workspace::MirrorManager;
+    use std::{collections::HashMap, sync::Arc};
+    use tokio_util::sync::CancellationToken;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    const INSTALLATION: u64 = 42_424;
+    const URL: &str = "https://github.com/acme/widget/pull/73";
+    const HEAD: &str = "1111111111111111111111111111111111111111";
+    async fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = djinn_git::git_command()
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    let server = MockServer::start().await;
+    let pr = serde_json::json!({"number":73,"title":"retained","state":"open","merged":false,"html_url":URL,"head":{"ref":"task/retained","sha":HEAD},"base":{"ref":"main","sha":"base"},"node_id":"PR_retained"});
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widget/pulls"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([pr.clone()])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widget/pulls/73"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(pr))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/repos/acme/widget/commits/{HEAD}/check-runs"
+        )))
+        .respond_with(
+            // Keep the real status poller in `pr_draft` after it crosses its
+            // production minimum-age guard; the explicit undraft below then
+            // makes the review phase unambiguous.
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"total_count":1,"check_runs":[{"id":1,"name":"ci","status":"in_progress","conclusion":null,"html_url":"https://example.test/check/1"}]})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widget/pulls/73/reviews"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+
+    let db = Database::open_in_memory().unwrap();
+    let events = EventBus::noop();
+    let epic = EpicRepository::new(db.clone(), events.clone())
+        .create("legacy", "", "", "", "", None)
+        .await
+        .unwrap();
+    let tasks = TaskRepository::new(db.clone(), events);
+    let task = tasks
+        .create(
+            &epic.id,
+            "retained",
+            "",
+            "",
+            "task",
+            0,
+            "worker",
+            Some("approved"),
+        )
+        .await
+        .unwrap();
+    assert!(task.pr_url.is_none());
+    djinn_db::test_support::persist_project_github_installation_for_test(
+        &db,
+        &task.project_id,
+        "acme",
+        "widget",
+        INSTALLATION,
+    )
+    .await;
+    prime_cache_for_tests(INSTALLATION, "ghs_installation_fixture");
+
+    let root = crate::test_helpers::test_tempdir("retained-legacy-git-");
+    let mirror_root = root.path().join("mirrors");
+    std::fs::create_dir_all(&mirror_root).unwrap();
+    let bare = mirror_root.join(format!("{}.git", task.project_id));
+    git(root.path(), &["init", "--bare", bare.to_str().unwrap()]).await;
+    let work = root.path().join("work");
+    git(
+        root.path(),
+        &["clone", bare.to_str().unwrap(), work.to_str().unwrap()],
+    )
+    .await;
+    git(&work, &["config", "user.email", "fixture@test"]).await;
+    git(&work, &["config", "user.name", "fixture"]).await;
+    git(&work, &["checkout", "-b", "main"]).await;
+    git(&work, &["commit", "--allow-empty", "-m", "base"]).await;
+    git(&work, &["push", "origin", "main"]).await;
+    git(&work, &["checkout", "-b", "task/retained"]).await;
+    git(&work, &["commit", "--allow-empty", "-m", "work"]).await;
+    git(&work, &["push", "origin", "task/retained"]).await;
+
+    unsafe { std::env::set_var("GITHUB_APP_ID", "1") };
+    set_installation_client_base_url_for_test(Some(server.uri()));
+    super::set_push_url_override_for_test(Some(format!("file://{}", bare.display())));
+    let mut context =
+        crate::test_helpers::coordinator_context_from_db(db.clone(), CancellationToken::new());
+    context.mirror = Some(Arc::new(MirrorManager::new(mirror_root)));
+    let spec = TaskRunSpec {
+        task_run_id: "run".into(),
+        task_attempt_id: None,
+        task_id: task.id.clone(),
+        execution_generation: 0,
+        project_id: task.project_id.clone(),
+        trigger: TaskRunTrigger::NewTask,
+        base_branch: "main".into(),
+        task_branch: "task/retained".into(),
+        flow: SupervisorFlow::NewTask,
+        model_id_per_role: HashMap::new(),
+        read_source_project_ids: vec![],
+        knowledge_injection: KnowledgeInjectionConfig::default(),
+        github_owner: None,
+        github_install_token: None,
+        commit_author_name: None,
+        commit_author_email: None,
+        resume_lifecycle_metadata: None,
+        is_evidence_spike: false,
+    };
+    let callbacks = SupervisorCallbackContext {
+        agent_context: context,
+        cancel: CancellationToken::new(),
+        provider_override: None,
+    };
+    clear_boundary_operations();
+    assert!(
+        matches!(supervisor_pr_open(&spec, &tasks.get(&task.id).await.unwrap().unwrap(), &callbacks).await, TaskRunOutcome::PrOpened { ref url, .. } if url == URL)
+    );
+    assert_eq!(
+        tasks
+            .get(&task.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .pr_url
+            .as_deref(),
+        Some(URL)
+    );
+
+    let (tx, _) = tokio::sync::broadcast::channel(8);
+    let (mut actor, cancel) = crate::test_helpers::make_coordinator_actor_cancellable(&db, &tx);
+    // The first pass records the draft's first-seen instant. The second real
+    // status-poller pass crosses its production age guard and reaches GitHub.
+    actor.poll_pr_statuses().await;
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    actor.poll_pr_statuses().await;
+    assert_eq!(
+        tasks
+            .get(&task.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .pr_url
+            .as_deref(),
+        Some(URL)
+    );
+    tasks
+        .transition(
+            &task.id,
+            TransitionAction::PrUndraft,
+            "fixture",
+            "system",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    actor.poll_pr_review_tasks().await;
+    assert_eq!(
+        tasks
+            .get(&task.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .pr_url
+            .as_deref(),
+        Some(URL)
+    );
+    tasks
+        .transition(
+            &task.id,
+            TransitionAction::PrCiFailed,
+            "fixture",
+            "system",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    actor.reconcile_blindspot_merged_prs().await;
+    assert_eq!(
+        tasks
+            .get(&task.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .pr_url
+            .as_deref(),
+        Some(URL)
+    );
+    let operations = take_boundary_operations();
+    for expected in [
+        BoundaryOperation::SupervisorPrOpen,
+        BoundaryOperation::TaskPrLookup,
+        BoundaryOperation::TaskPrAdopt,
+        BoundaryOperation::TaskPrStatusPoll,
+        BoundaryOperation::TaskPrReviewPoll,
+        BoundaryOperation::TaskPrMergedPoll,
+    ] {
+        assert!(
+            operations.contains(&expected),
+            "missing {expected:?}: {operations:?}"
+        );
+    }
+    assert!(!operations.contains(&BoundaryOperation::DirectAppend));
+    super::set_push_url_override_for_test(None);
+    set_installation_client_base_url_for_test(None);
+    cancel.cancel();
+}
+
+/// SupportedActive retains this one task on the legacy task-PR route only because
+/// its explicit legacy marker was durably written before its repository epoch was
+/// activated. The lifecycle remains the real supervisor and production pollers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn supported_active_explicit_legacy_adopts_through_every_poller() {
+    use crate::{
+        direct_delivery::{
+            BoundaryOperation, LEGACY_DELIVERY_LABEL, clear_boundary_operations,
+            take_boundary_operations,
+        },
+        pr_poller::installation::set_installation_client_base_url_for_test,
+        supervisor_impl::{SupervisorCallbackContext, supervisor_pr_open},
+    };
+    use djinn_core::{
+        events::EventBus,
+        models::{KnowledgeInjectionConfig, TaskRunTrigger, TransitionAction},
+    };
+    use djinn_db::{Database, EpicRepository, TaskRepository};
+    use djinn_provider::github_app::installations::prime_cache_for_tests;
+    use djinn_runtime::{SupervisorFlow, TaskRunOutcome, TaskRunSpec};
+    use djinn_workspace::MirrorManager;
+    use std::{collections::HashMap, sync::Arc};
+    use tokio_util::sync::CancellationToken;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    const INSTALLATION: u64 = 42_424;
+    const URL: &str = "https://github.com/acme/widget/pull/73";
+    const HEAD: &str = "1111111111111111111111111111111111111111";
+    async fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = djinn_git::git_command()
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    let server = MockServer::start().await;
+    let pr = serde_json::json!({"number":73,"title":"retained","state":"open","merged":false,"html_url":URL,"head":{"ref":"task/retained","sha":HEAD},"base":{"ref":"main","sha":"base"},"node_id":"PR_retained"});
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widget/pulls"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([pr.clone()])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widget/pulls/73"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(pr))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/repos/acme/widget/commits/{HEAD}/check-runs"
+        )))
+        .respond_with(
+            // Keep the real status poller in `pr_draft` after it crosses its
+            // production minimum-age guard; the explicit undraft below then
+            // makes the review phase unambiguous.
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"total_count":1,"check_runs":[{"id":1,"name":"ci","status":"in_progress","conclusion":null,"html_url":"https://example.test/check/1"}]})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widget/pulls/73/reviews"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+
+    let db = Database::open_in_memory().unwrap();
+    let events = EventBus::noop();
+    let epic = EpicRepository::new(db.clone(), events.clone())
+        .create("legacy", "", "", "", "", None)
+        .await
+        .unwrap();
+    let tasks = TaskRepository::new(db.clone(), events);
+    let task = tasks
+        .create(
+            &epic.id,
+            "retained",
+            "",
+            "",
+            "task",
+            0,
+            "worker",
+            Some("approved"),
+        )
+        .await
+        .unwrap();
+    assert!(task.pr_url.is_none());
+    let explicit_legacy_labels = format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#);
+    tasks
+        .update_labels(&task.id, &explicit_legacy_labels)
+        .await
+        .unwrap();
+    assert_eq!(
+        tasks.get(&task.id).await.unwrap().unwrap().labels,
+        explicit_legacy_labels,
+        "the explicit-legacy marker must be persisted through TaskRepository"
+    );
+    // Activate only this in-memory fixture's persisted epoch after the task has
+    // its explicit legacy identity; no proposal ownership is seeded or resolved.
+    djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
+    djinn_db::test_support::persist_project_github_installation_for_test(
+        &db,
+        &task.project_id,
+        "acme",
+        "widget",
+        INSTALLATION,
+    )
+    .await;
+    prime_cache_for_tests(INSTALLATION, "ghs_installation_fixture");
+
+    let root = crate::test_helpers::test_tempdir("retained-legacy-git-");
+    let mirror_root = root.path().join("mirrors");
+    std::fs::create_dir_all(&mirror_root).unwrap();
+    let bare = mirror_root.join(format!("{}.git", task.project_id));
+    git(root.path(), &["init", "--bare", bare.to_str().unwrap()]).await;
+    let work = root.path().join("work");
+    git(
+        root.path(),
+        &["clone", bare.to_str().unwrap(), work.to_str().unwrap()],
+    )
+    .await;
+    git(&work, &["config", "user.email", "fixture@test"]).await;
+    git(&work, &["config", "user.name", "fixture"]).await;
+    git(&work, &["checkout", "-b", "main"]).await;
+    git(&work, &["commit", "--allow-empty", "-m", "base"]).await;
+    git(&work, &["push", "origin", "main"]).await;
+    git(&work, &["checkout", "-b", "task/retained"]).await;
+    git(&work, &["commit", "--allow-empty", "-m", "work"]).await;
+    git(&work, &["push", "origin", "task/retained"]).await;
+
+    unsafe { std::env::set_var("GITHUB_APP_ID", "1") };
+    set_installation_client_base_url_for_test(Some(server.uri()));
+    super::set_push_url_override_for_test(Some(format!("file://{}", bare.display())));
+    let mut context =
+        crate::test_helpers::coordinator_context_from_db(db.clone(), CancellationToken::new());
+    context.mirror = Some(Arc::new(MirrorManager::new(mirror_root)));
+    let spec = TaskRunSpec {
+        task_run_id: "run".into(),
+        task_attempt_id: None,
+        task_id: task.id.clone(),
+        execution_generation: 0,
+        project_id: task.project_id.clone(),
+        trigger: TaskRunTrigger::NewTask,
+        base_branch: "main".into(),
+        task_branch: "task/retained".into(),
+        flow: SupervisorFlow::NewTask,
+        model_id_per_role: HashMap::new(),
+        read_source_project_ids: vec![],
+        knowledge_injection: KnowledgeInjectionConfig::default(),
+        github_owner: None,
+        github_install_token: None,
+        commit_author_name: None,
+        commit_author_email: None,
+        resume_lifecycle_metadata: None,
+        is_evidence_spike: false,
+    };
+    let callbacks = SupervisorCallbackContext {
+        agent_context: context,
+        cancel: CancellationToken::new(),
+        provider_override: None,
+    };
+    clear_boundary_operations();
+    assert!(
+        matches!(supervisor_pr_open(&spec, &tasks.get(&task.id).await.unwrap().unwrap(), &callbacks).await, TaskRunOutcome::PrOpened { ref url, .. } if url == URL)
+    );
+    assert_eq!(
+        tasks
+            .get(&task.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .pr_url
+            .as_deref(),
+        Some(URL)
+    );
+
+    let (tx, _) = tokio::sync::broadcast::channel(8);
+    let (mut actor, cancel) = crate::test_helpers::make_coordinator_actor_cancellable(&db, &tx);
+    // The first pass records the draft's first-seen instant. The second real
+    // status-poller pass crosses its production age guard and reaches GitHub.
+    actor.poll_pr_statuses().await;
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    actor.poll_pr_statuses().await;
+    assert_eq!(
+        tasks
+            .get(&task.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .pr_url
+            .as_deref(),
+        Some(URL)
+    );
+    tasks
+        .transition(
+            &task.id,
+            TransitionAction::PrUndraft,
+            "fixture",
+            "system",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    actor.poll_pr_review_tasks().await;
+    assert_eq!(
+        tasks
+            .get(&task.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .pr_url
+            .as_deref(),
+        Some(URL)
+    );
+    tasks
+        .transition(
+            &task.id,
+            TransitionAction::PrCiFailed,
+            "fixture",
+            "system",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    actor.reconcile_blindspot_merged_prs().await;
+    assert_eq!(
+        tasks
+            .get(&task.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .pr_url
+            .as_deref(),
+        Some(URL)
+    );
+    let operations = take_boundary_operations();
+    for expected in [
+        BoundaryOperation::SupervisorPrOpen,
+        BoundaryOperation::TaskPrLookup,
+        BoundaryOperation::TaskPrAdopt,
+        BoundaryOperation::TaskPrStatusPoll,
+        BoundaryOperation::TaskPrReviewPoll,
+        BoundaryOperation::TaskPrMergedPoll,
+    ] {
+        assert!(
+            operations.contains(&expected),
+            "missing {expected:?}: {operations:?}"
+        );
+    }
+    for forbidden in [BoundaryOperation::DirectAppend, BoundaryOperation::TaskPrCreate] {
+        assert!(
+            !operations.contains(&forbidden),
+            "explicit legacy must not reach forbidden operation {forbidden:?}: {operations:?}"
+        );
+    }
+    super::set_push_url_override_for_test(None);
+    set_installation_client_base_url_for_test(None);
+    cancel.cancel();
+}
