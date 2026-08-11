@@ -330,40 +330,40 @@ async fn active_direct_merged_and_board_health_require_exact_applied_evidence() 
             &ids[0],
             "applied",
             "applied-sha",
-            ", applied_at) VALUES ('direct-attempt', $1, 1, $2, $3, 'base', now())",
+            ", applied_at) VALUES ('direct-attempt', $1, 1, $2, $3, 'base', 'source', 'patch', 'parent', 'prepare-1', now())",
         ),
         (
             &ids[1],
             "applying",
             "applying-sha",
-            ") VALUES ('direct-attempt', $1, 1, $2, $3, 'base')",
+            ") VALUES ('direct-attempt', $1, 1, $2, $3, 'base', 'source', 'patch', 'parent', 'prepare-1')",
         ),
         (
             &ids[2],
             "conflict",
             "conflict-sha",
-            ", conflict_reason) VALUES ('direct-attempt', $1, 1, $2, $3, 'base', 'conflict')",
+            ", conflict_reason) VALUES ('direct-attempt', $1, 1, $2, $3, 'base', 'source', 'patch', 'parent', 'prepare-1', 'conflict')",
         ),
         (
             &ids[3],
             "mystery",
             "unknown-sha",
-            ") VALUES ('direct-attempt', $1, 1, $2, $3, 'base')",
+            ") VALUES ('direct-attempt', $1, 1, $2, $3, 'base', 'source', 'patch', 'parent', 'prepare-1')",
         ),
         (
             &ids[4],
             "applying",
             "legacy-sha",
-            ") VALUES ('direct-attempt', $1, 1, $2, $3, 'base')",
+            ") VALUES ('direct-attempt', $1, 1, $2, $3, 'base', 'source', 'patch', 'parent', 'prepare-1')",
         ),
         (
             &ids[5],
             "applied",
             "stale-applied-sha",
-            ", applied_at) VALUES ('direct-attempt', $1, 1, $2, $3, 'base', now())",
+            ", applied_at) VALUES ('direct-attempt', $1, 1, $2, $3, 'base', 'source', 'patch', 'parent', 'prepare-1', now())",
         ),
     ] {
-        let head = "INSERT INTO task_deliveries (build_attempt_id, task_id, delivery_generation, state, candidate_sha, base_sha";
+        let head = "INSERT INTO task_deliveries (build_attempt_id, task_id, delivery_generation, state, candidate_sha, base_sha, source_sha, patch_digest, selected_parent_sha, prepare_transition_id";
         sqlx::query(&format!("{head}{tail}"))
             .bind(id)
             .bind(state)
@@ -373,7 +373,7 @@ async fn active_direct_merged_and_board_health_require_exact_applied_evidence() 
             .unwrap();
     }
     // A later unknown generation makes the old applied evidence nonterminal.
-    sqlx::query("INSERT INTO task_deliveries (build_attempt_id, task_id, delivery_generation, state, candidate_sha, base_sha) VALUES ('direct-attempt', $1, 2, 'mystery', 'later-unknown-sha', 'base')")
+    sqlx::query("INSERT INTO task_deliveries (build_attempt_id, task_id, delivery_generation, state, candidate_sha, base_sha, source_sha, patch_digest, selected_parent_sha, prepare_transition_id) VALUES ('direct-attempt', $1, 2, 'mystery', 'later-unknown-sha', 'base', 'source', 'patch', 'parent', 'prepare-2')")
         .bind(&ids[5])
         .execute(db.pool())
         .await
