@@ -89,6 +89,7 @@ impl CoordinatorActor {
             let gh_client = &gh_client;
 
             // Fetch current PR state + CI check runs.
+            crate::direct_delivery::observe_boundary_operation("task_pr_status_poll");
             let (pr, checks) = match gh_client.get_pull_request(&owner, &repo, pull_number).await {
                 Ok(result) => result,
                 Err(e) => {
@@ -824,6 +825,7 @@ impl CoordinatorActor {
                 }
             };
             let gh_client = &gh_client;
+            crate::direct_delivery::observe_boundary_operation("task_pr_status_poll");
 
             let (pr, checks) = match gh_client.get_pull_request(&owner, &repo, pull_number).await {
                 Ok(result) => result,

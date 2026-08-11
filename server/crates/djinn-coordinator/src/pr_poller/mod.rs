@@ -158,7 +158,7 @@ pub(crate) mod ci_routing;
 mod ci_snapshot;
 mod ci_triage;
 mod conversation_resolution;
-mod installation;
+pub(crate) mod installation;
 mod merged_change_projection;
 mod merged_reconcile;
 pub(crate) mod pr_cleanup;

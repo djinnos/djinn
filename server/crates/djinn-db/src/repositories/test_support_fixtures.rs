@@ -15,6 +15,49 @@ use crate::repositories::note::NoteRepository;
 use crate::repositories::test_support::{event_bus_for, make_project, seed_test_user};
 use djinn_memory::Note;
 
+/// Persisted GitHub coordinates and installation identity for coordinator
+/// provider fixtures. **Not for production use.**
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectGithubInstallationForTest {
+    pub owner: String,
+    pub repo: String,
+    pub installation_id: u64,
+}
+
+/// Give an existing fixture project a real GitHub installation identity.
+///
+/// This keeps coordinator tests out of raw SQL while exercising the production
+/// project-repository installation lookup. Panics on fixture SQL errors.
+pub async fn persist_project_github_installation_for_test(
+    db: &Database,
+    project_id: &str,
+    owner: &str,
+    repo: &str,
+    installation_id: u64,
+) -> ProjectGithubInstallationForTest {
+    db.ensure_initialized().await.unwrap();
+    assert!(
+        installation_id <= i64::MAX as u64,
+        "installation id must fit SQL i64"
+    );
+    let updated = sqlx::query(
+        "UPDATE projects SET github_owner = $2, github_repo = $3, installation_id = $4 WHERE id = $1",
+    )
+    .bind(project_id)
+    .bind(owner)
+    .bind(repo)
+    .bind(installation_id as i64)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(updated.rows_affected(), 1, "fixture project must exist");
+    ProjectGithubInstallationForTest {
+        owner: owner.to_owned(),
+        repo: repo.to_owned(),
+        installation_id,
+    }
+}
+
 /// Seed the canonical model-turn admission rows used by slot-boundary tests.
 pub async fn seed_model_turn_admission_fixture(
     db: &Database,

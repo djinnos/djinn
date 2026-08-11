@@ -22,9 +22,7 @@ use djinn_core::models::TransitionAction;
 use djinn_core::tool_error::ErrorClass;
 use djinn_db::{ActivityQuery, ProjectRepository, TaskRepository};
 use djinn_git::GitError;
-use djinn_provider::github_api::{
-    CreatePrParams, GitHubApiClient, GitHubApiError, GitHubErrorSource, PrState,
-};
+use djinn_provider::github_api::{CreatePrParams, GitHubApiError, GitHubErrorSource, PrState};
 use djinn_provider::github_app::{app_id as github_app_id, installations::get_installation_token};
 use djinn_runtime::spec::{TaskRunOutcome, TaskRunSpec};
 use djinn_workspace::MirrorManager;
@@ -301,7 +299,7 @@ pub async fn supervisor_pr_open(
         return outcome;
     }
 
-    let github_client = GitHubApiClient::for_installation(installation_id);
+    let github_client = crate::pr_poller::installation::installation_client(installation_id);
 
     // ── Repo-derived required-CI reproduction preflight ─────────────────────
     // Before letting a worker submit/open (or update) a PR for a task that is
