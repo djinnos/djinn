@@ -804,3 +804,19 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
         }
     }
 }
+
+/// The retained-legacy lifecycle harness swaps only the supervisor's git
+/// transport endpoint; the production push path still owns the operation.
+#[test]
+fn retained_legacy_supervisor_transport_override_is_consumed() {
+    super::set_push_url_override_for_test(Some("file:///fixture/widget.git".into()));
+    assert_eq!(
+        super::push_url_for_supervisor_pr_open("acme", "widget", "token"),
+        "file:///fixture/widget.git"
+    );
+    super::set_push_url_override_for_test(None);
+    assert_eq!(
+        super::push_url_for_supervisor_pr_open("acme", "widget", "token"),
+        crate::task_merge::build_app_push_url("acme", "widget", "token")
+    );
+}

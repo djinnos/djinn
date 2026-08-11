@@ -198,7 +198,7 @@ pub async fn supervisor_pr_open(
             };
         }
     };
-    let push_url = build_app_push_url(&owner, &repo_name, &install_token.token);
+    let push_url = push_url_for_supervisor_pr_open(&owner, &repo_name, &install_token.token);
 
     let merge_target = {
         let repo =
@@ -505,6 +505,25 @@ pub async fn supervisor_pr_open(
         url: pr.html_url,
         sha: merge_result_commit_sha,
     }
+}
+
+/// Production uses the installation-authenticated GitHub URL. The retained
+/// legacy lifecycle fixture swaps only its transport endpoint for a local bare
+/// repository, while exercising the real supervisor push operation.
+fn push_url_for_supervisor_pr_open(owner: &str, repo: &str, token: &str) -> String {
+    #[cfg(test)]
+    if let Some(url) = TEST_PUSH_URL_OVERRIDE.lock().unwrap().clone() {
+        return url;
+    }
+    build_app_push_url(owner, repo, token)
+}
+
+#[cfg(test)]
+static TEST_PUSH_URL_OVERRIDE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_push_url_override_for_test(url: Option<String>) {
+    *TEST_PUSH_URL_OVERRIDE.lock().unwrap() = url;
 }
 
 const PR_ALREADY_EXISTS_HINT: &str =
