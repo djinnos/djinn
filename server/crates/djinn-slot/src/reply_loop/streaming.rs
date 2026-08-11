@@ -259,6 +259,7 @@ impl CoveredAttemptTerminalGuard {
             let Some(identity) = identity else {
                 return;
             };
+            coordinator.watchdog_start_gate().await;
             let mut ticks = tokio::time::interval(Duration::from_secs(20));
             ticks.tick().await;
             let mut last_success = tokio::time::Instant::now();

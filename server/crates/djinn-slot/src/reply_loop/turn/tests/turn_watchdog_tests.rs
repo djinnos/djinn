@@ -482,6 +482,7 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
     let db = Database::ephemeral().await.expect("db");
     let pool = seed_model_turn_admission_fixture(&db, "enforce", "supported", 1).await;
     let hooks = Arc::new(ModelTurnAdmissionTestHooks::default());
+    hooks.block_watchdog_start.store(true, Ordering::Release);
     let slot_a = ModelTurnAdmissionCoordinator::with_test_hooks(
         djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
         Arc::clone(&hooks),
@@ -583,6 +584,9 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
     );
     let started = hooks.watchdog_started.notified();
     tokio::pin!(started);
+    // This hook uses `notify_waiters`, so register before the active handoff
+    // can publish the acknowledgement.
+    started.as_mut().enable();
     let mut guard = launch_prepared_covered_attempt_with_lease(
         ModelTurnPreparation::Permit(winner),
         move || {
@@ -606,7 +610,6 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
     )
     .await
     .expect("one B1 launch");
-    started.await;
     assert_eq!(launches.load(Ordering::Acquire), 1);
     assert_eq!(
         model_turn_lease_lifecycle_fixture(&db, &lease.lease_id).await,
@@ -675,22 +678,43 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
         polls_before_abort >= 1,
         "consume_provider_stream must acknowledge pending B1 provider I/O"
     );
+    // Warm this coordinator's repository pool while time is live. The same
+    // production boundary returns a typed target-one wait without changing the
+    // winner's lease, so the paused heartbeat commit cannot block on pool
+    // connection backoff timers.
+    let warmed_wait = coordinator
+        .prepare(
+            &covered_admission_plan(),
+            admission_request(replacement_request),
+        )
+        .await
+        .expect("warm competing preparation");
+    assert!(matches!(warmed_wait, ModelTurnPreparation::Wait(_)));
 
+    // Setup has completed on live time. Start the production watchdog only
+    // after pausing, so its baseline and all heartbeat persistence remain on
+    // the modeled clock.
     tokio::time::pause();
+    hooks.watchdog_start_release.notify_one();
+    started.await;
     hooks.block_heartbeat.store(true, Ordering::Release);
     let reached = hooks.heartbeat_reached.notified();
     tokio::pin!(reached);
+    reached.as_mut().enable();
     tokio::time::advance(Duration::from_secs(20)).await;
     reached.await;
     let committed = hooks.heartbeat_committed.notified();
     tokio::pin!(committed);
-    hooks.heartbeat_release.notify_waiters();
+    committed.as_mut().enable();
+    // Preserve the release if the watchdog has not registered its waiter yet.
+    hooks.heartbeat_release.notify_one();
     committed.await;
     let last_committed_heartbeat = tokio::time::Instant::now();
     hooks.block_heartbeat.store(false, Ordering::Release);
     hooks.fail_heartbeat.store(true, Ordering::Release);
     let failed = hooks.heartbeat_finished.notified();
     tokio::pin!(failed);
+    failed.as_mut().enable();
     tokio::time::advance(Duration::from_secs(20)).await;
     failed.await;
     tokio::time::advance(Duration::from_secs(19)).await;
@@ -750,6 +774,7 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
     hooks.block_reconcile.store(true, Ordering::Release);
     let reconciliation_reached = hooks.reconcile_reached.notified();
     tokio::pin!(reconciliation_reached);
+    reconciliation_reached.as_mut().enable();
     outcome_tx
         .send(ProviderOutcomeV1 {
             terminal: ProviderAttemptTerminalV1::Aborted,
@@ -772,7 +797,8 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
         "active"
     );
     hooks.block_reconcile.store(false, Ordering::Release);
-    hooks.reconcile_release.notify_waiters();
+    // Retain this release across the test/task scheduling boundary as well.
+    hooks.reconcile_release.notify_one();
     settlement.await;
     assert_eq!(
         model_turn_terminal_fixture(&db, &lease.lease_id, lease.generation, &lease.request_id)
