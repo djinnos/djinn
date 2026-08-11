@@ -346,6 +346,9 @@ pub async fn supervisor_pr_open(
 
     let head_ref = format!("{owner}:{}", spec.task_branch);
 
+    // Record only once every prerequisite has succeeded and immediately before
+    // the real provider lookup that opens or adopts the task PR.
+    crate::direct_delivery::observe_boundary_operation("supervisor_pr_open");
     crate::direct_delivery::observe_boundary_operation("task_pr_lookup");
     let existing_pr = match github_client
         .list_pulls_by_head_with_state(&owner, &repo_name, &head_ref, "all")

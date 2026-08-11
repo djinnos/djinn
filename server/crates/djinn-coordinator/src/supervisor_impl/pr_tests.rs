@@ -859,8 +859,10 @@ async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
             "/repos/acme/widget/commits/{HEAD}/check-runs"
         )))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({"total_count":0,"check_runs":[]})),
+            // Keep the real status poller in `pr_draft` after it crosses its
+            // production minimum-age guard; the explicit undraft below then
+            // makes the review phase unambiguous.
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"total_count":1,"check_runs":[{"id":1,"name":"ci","status":"in_progress","conclusion":null,"html_url":"https://example.test/check/1"}]})),
         )
         .mount(&server)
         .await;
@@ -968,7 +970,11 @@ async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
 
     let (tx, _) = tokio::sync::broadcast::channel(8);
     let (mut actor, cancel) = crate::test_helpers::make_coordinator_actor_cancellable(&db, &tx);
-    actor.poll_pr_review_stuck_tasks().await;
+    // The first pass records the draft's first-seen instant. The second real
+    // status-poller pass crosses its production age guard and reaches GitHub.
+    actor.poll_pr_statuses().await;
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    actor.poll_pr_statuses().await;
     assert_eq!(
         tasks
             .get(&task.id)
