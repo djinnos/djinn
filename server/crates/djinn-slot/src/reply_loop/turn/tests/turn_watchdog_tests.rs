@@ -469,7 +469,7 @@ async fn stale_watchdog_heartbeat_leaves_replacement_generation_unchanged() {
     guard.finish(false).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_abort() {
     use crate::model_turn_capability::{
         ModelTurnCapabilityCoverageV2, SlotLiveIdentity, report_for_route,
@@ -784,9 +784,9 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
             token_emission: Default::default(),
         })
         .expect("B1 outcome");
-    // The paused 20/40/90 chronology has completed. Let the partitioned
-    // settlement's repository work drain without changing that baseline.
-    tokio::time::resume();
+    // Keep Tokio time paused while the partitioned settlement reaches its
+    // repository seam so no wall-clock scheduling can alter the modeled
+    // heartbeat chronology.
     let mut settlement = Box::pin(guard.finish(false));
     tokio::select! {
         _ = &mut settlement => panic!("partitioned reconciliation unexpectedly completed"),
