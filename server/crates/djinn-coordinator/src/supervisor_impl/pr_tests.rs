@@ -823,7 +823,7 @@ async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
     use djinn_provider::github_app::installations::prime_cache_for_tests;
     use djinn_runtime::{SupervisorFlow, TaskRunOutcome, TaskRunSpec};
     use djinn_workspace::MirrorManager;
-    use std::{collections::HashMap, process::Command, sync::Arc};
+    use std::{collections::HashMap, sync::Arc};
     use tokio_util::sync::CancellationToken;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -833,11 +833,12 @@ async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
     const INSTALLATION: u64 = 42_424;
     const URL: &str = "https://github.com/acme/widget/pull/73";
     const HEAD: &str = "1111111111111111111111111111111111111111";
-    fn git(dir: &std::path::Path, args: &[&str]) {
-        let status = Command::new("git")
+    async fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = djinn_git::git_command()
             .args(args)
             .current_dir(dir)
             .status()
+            .await
             .unwrap();
         assert!(status.success(), "git {args:?}");
     }
@@ -907,20 +908,21 @@ async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
     let mirror_root = root.path().join("mirrors");
     std::fs::create_dir_all(&mirror_root).unwrap();
     let bare = mirror_root.join(format!("{}.git", task.project_id));
-    git(root.path(), &["init", "--bare", bare.to_str().unwrap()]);
+    git(root.path(), &["init", "--bare", bare.to_str().unwrap()]).await;
     let work = root.path().join("work");
     git(
         root.path(),
         &["clone", bare.to_str().unwrap(), work.to_str().unwrap()],
-    );
-    git(&work, &["config", "user.email", "fixture@test"]);
-    git(&work, &["config", "user.name", "fixture"]);
-    git(&work, &["checkout", "-b", "main"]);
-    git(&work, &["commit", "--allow-empty", "-m", "base"]);
-    git(&work, &["push", "origin", "main"]);
-    git(&work, &["checkout", "-b", "task/retained"]);
-    git(&work, &["commit", "--allow-empty", "-m", "work"]);
-    git(&work, &["push", "origin", "task/retained"]);
+    )
+    .await;
+    git(&work, &["config", "user.email", "fixture@test"]).await;
+    git(&work, &["config", "user.name", "fixture"]).await;
+    git(&work, &["checkout", "-b", "main"]).await;
+    git(&work, &["commit", "--allow-empty", "-m", "base"]).await;
+    git(&work, &["push", "origin", "main"]).await;
+    git(&work, &["checkout", "-b", "task/retained"]).await;
+    git(&work, &["commit", "--allow-empty", "-m", "work"]).await;
+    git(&work, &["push", "origin", "task/retained"]).await;
 
     unsafe { std::env::set_var("GITHUB_APP_ID", "1") };
     set_installation_client_base_url_for_test(Some(server.uri()));
