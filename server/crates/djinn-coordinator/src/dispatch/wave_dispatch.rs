@@ -127,8 +127,9 @@ where
     match admission {
         crate::direct_delivery::DirectDeliveryAdmission::Direct { .. } => direct_delivery().await,
         crate::direct_delivery::DirectDeliveryAdmission::Legacy => legacy_completion().await,
-        crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner => {
-            unreachable!("no-proposal-owner tasks are parked before completion routing")
+        crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner
+        | crate::direct_delivery::DirectDeliveryAdmission::ContractUnavailable(_) => {
+            unreachable!("fail-closed tasks are parked before completion routing")
         }
     }
 }
@@ -241,9 +242,14 @@ impl CoordinatorActor {
                     continue;
                 }
             };
-            if admission == crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner {
+            if matches!(
+                &admission,
+                crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner
+                    | crate::direct_delivery::DirectDeliveryAdmission::ContractUnavailable(_)
+            ) {
                 // The admission wrapper owns this durable park. Completion must
-                // not issue a duplicate Escalate transition.
+                // not issue a duplicate Escalate transition or reach any
+                // simple-lifecycle, rebase, direct-append, or task-PR effect.
                 continue;
             }
             // Simple-lifecycle tasks normally close directly, but sessions that

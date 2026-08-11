@@ -2035,7 +2035,7 @@ impl CoordinatorActor {
                 | Ok(crate::direct_delivery::DirectDeliveryLiveness::Dispatch) => {}
                 Ok(crate::direct_delivery::DirectDeliveryLiveness::Parked) => {
                     // The production admission wrapper already persisted the
-                    // no_proposal_owner park. Do not issue a second Escalate.
+                    // fail-closed park. Do not issue a second Escalate.
                     continue;
                 }
                 Ok(crate::direct_delivery::DirectDeliveryLiveness::Reconcile) => {

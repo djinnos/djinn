@@ -50,6 +50,52 @@ pub async fn supervisor_pr_open(
     task: &djinn_core::models::Task,
     callbacks: &SupervisorCallbackContext,
 ) -> TaskRunOutcome {
+    // Gate before every mirror or forge effect.
+    let app_state = &callbacks.agent_context;
+    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    match crate::direct_delivery::task_pr_eligibility(app_state.db.clone(), &task.id).await {
+        Ok(crate::direct_delivery::TaskPrEligibility::LegacyAllowed) => {}
+        Ok(crate::direct_delivery::TaskPrEligibility::DirectDeliveryIneligible { .. }) => {
+            return TaskRunOutcome::Escalated {
+                reason:
+                    "task has an active direct-delivery attempt; task-PR adoption is ineligible"
+                        .into(),
+            };
+        }
+        Ok(
+            eligibility @ (crate::direct_delivery::TaskPrEligibility::NoProposalOwner
+            | crate::direct_delivery::TaskPrEligibility::ContractUnavailable(_)),
+        ) => {
+            if let Err(error) = crate::direct_delivery::park_task_pr_ineligibility(
+                &task_repo,
+                &task.id,
+                &eligibility,
+            )
+            .await
+            {
+                return TaskRunOutcome::Failed {
+                    stage: "pr_open".into(),
+                    provider_failure: None,
+                    reason: format!("failed to durably park task-PR-ineligible task: {error}"),
+                    error_class: None,
+                    hint: None,
+                    body_excerpt: None,
+                };
+            }
+            return TaskRunOutcome::Escalated {
+                reason: "task-PR adoption denied by direct-delivery ownership or contract boundary"
+                    .into(),
+            };
+        }
+        Err(error) => {
+            return TaskRunOutcome::Escalated {
+                reason: format!(
+                    "task-PR adoption denied because direct-delivery admission failed: {error}"
+                ),
+            };
+        }
+    }
+
     if github_app_id().is_err() {
         return TaskRunOutcome::Failed {
             stage: "pr_open".into(),
@@ -302,6 +348,7 @@ pub async fn supervisor_pr_open(
 
     let head_ref = format!("{owner}:{}", spec.task_branch);
 
+    crate::direct_delivery::observe_boundary_operation("task_pr_lookup");
     let existing_pr = match github_client
         .list_pulls_by_head_with_state(&owner, &repo_name, &head_ref, "all")
         .await
@@ -318,6 +365,7 @@ pub async fn supervisor_pr_open(
     };
 
     let pr = if let Some(existing) = existing_pr {
+        crate::direct_delivery::observe_boundary_operation("task_pr_adopt");
         if existing.state == PrState::Open {
             existing
         } else {
