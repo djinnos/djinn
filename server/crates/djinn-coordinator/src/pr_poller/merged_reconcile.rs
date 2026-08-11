@@ -94,6 +94,9 @@ impl CoordinatorActor {
         );
 
         for task in tasks {
+            if !self.task_pr_handling_is_eligible(&task).await {
+                continue;
+            }
             let Some(pr_url) = task.pr_url.as_deref() else {
                 continue;
             };

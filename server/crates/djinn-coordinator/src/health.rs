@@ -134,6 +134,56 @@ const OUTPUT_STASH_GC_RETENTION_ENV: &str = "DJINN_OUTPUT_STASH_GC_RETENTION_DAY
 /// round-trip.
 const ORPHAN_SESSION_GRACE_SECS: i64 = 5 * 60;
 
+/// Admit a persisted task to stale-resource task-PR cleanup before inspecting
+/// its PR identity or reaching mirror/forge cleanup effects. Missing backing
+/// tasks deliberately retain the separate guarded orphan-cleanup route.
+async fn task_pr_cleanup_is_eligible(
+    db: &djinn_db::Database,
+    task_repo: &TaskRepository,
+    task: &djinn_core::models::Task,
+) -> bool {
+    let eligibility = match crate::direct_delivery::task_pr_eligibility(db.clone(), &task.id).await
+    {
+        Ok(eligibility) => eligibility,
+        Err(error) => {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %error,
+                "stale task-PR cleanup denied because direct-delivery eligibility could not be resolved"
+            );
+            return false;
+        }
+    };
+
+    match eligibility {
+        crate::direct_delivery::TaskPrEligibility::LegacyAllowed => true,
+        crate::direct_delivery::TaskPrEligibility::DirectDeliveryIneligible { .. } => {
+            tracing::debug!(
+                task_id = %task.short_id,
+                "stale task-PR cleanup skipped for active direct-delivery task"
+            );
+            false
+        }
+        eligibility @ (crate::direct_delivery::TaskPrEligibility::NoProposalOwner
+        | crate::direct_delivery::TaskPrEligibility::ContractUnavailable(_)) => {
+            if let Err(error) = crate::direct_delivery::park_task_pr_ineligibility(
+                task_repo,
+                &task.id,
+                &eligibility,
+            )
+            .await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %error,
+                    "stale task-PR cleanup denied because fail-closed parking failed"
+                );
+            }
+            false
+        }
+    }
+}
+
 // ─── Stale-resource sweep ────────────────────────────────────────────────────
 
 pub(super) async fn sweep_stale_resources(
@@ -212,7 +262,11 @@ pub(super) async fn sweep_stale_resources(
                     // Only delete branches for closed tasks that Djinn created a PR for.
                     // Branches for tasks without a pr_url were not managed by Djinn
                     // and must not be touched.
-                    Ok(Some(task)) => task.status == "closed" && task.pr_url.is_some(),
+                    Ok(Some(task)) => {
+                        task_pr_cleanup_is_eligible(db, &task_repo, &task).await
+                            && task.status == "closed"
+                            && task.pr_url.is_some()
+                    }
                     // Unknown task — do NOT delete; the branch may belong to
                     // another project or have been created outside Djinn.
                     Ok(None) => false,
@@ -242,10 +296,14 @@ pub(super) async fn sweep_stale_resources(
                     let Some(short_id) = line.strip_prefix("task/") else {
                         continue;
                     };
-                    let should_delete = matches!(
-                        task_repo.get_by_short_id(short_id).await,
-                        Ok(Some(task)) if task.status == "closed" && task.pr_url.is_some()
-                    );
+                    let should_delete = match task_repo.get_by_short_id(short_id).await {
+                        Ok(Some(task)) => {
+                            task_pr_cleanup_is_eligible(db, &task_repo, &task).await
+                                && task.status == "closed"
+                                && task.pr_url.is_some()
+                        }
+                        Ok(None) | Err(_) => false,
+                    };
                     if should_delete {
                         tracing::info!(
                             project_id=%project.id,
@@ -421,6 +479,10 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
             // Look up the backing task.
             let (task, cleanup_target) = match task_repo.get_by_short_id(short_id).await {
                 Ok(Some(task)) => {
+                    if !task_pr_cleanup_is_eligible(db, &task_repo, &task).await {
+                        stats.prs_skipped += 1;
+                        continue;
+                    }
                     let cleanup_target = super::pr_poller::pr_cleanup::PrCleanupTarget::from(&task);
                     (Some(task), cleanup_target)
                 }
