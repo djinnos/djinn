@@ -174,7 +174,7 @@ fn workload_inventory_from_warmer(
 /// n6xw, proposal 8ipw). The other caches below are deliberately
 /// restart-safe-to-lose — they only feed poller/metrics decisions and are cheap
 /// to rebuild on the next sweep.
-pub(super) struct CoordinatorActor {
+pub struct CoordinatorActor {
     // Ryhl core
     pub(super) receiver: mpsc::Receiver<CoordinatorMessage>,
     pub(super) events: broadcast::Receiver<DjinnEventEnvelope>,

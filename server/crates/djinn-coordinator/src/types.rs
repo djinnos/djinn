@@ -769,7 +769,7 @@ pub(super) fn classify_reappearing_dispatch(
     Some(ReappearingDispatch::SameRoleFailure { next_streak })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) const DEFAULT_MODEL_ID: &str = "test/mock";
 
 #[cfg(test)]

@@ -38,7 +38,7 @@ struct DeclaredEntryPoint {
 // The declarations are intentionally one-to-one with the current inventory
 // rows. Adding a production entry point requires adding its stable sampler ID
 // and source/symbol anchor here rather than silently widening the audit.
-const DECLARED_ENTRY_POINTS: [DeclaredEntryPoint; 12] = [
+const DECLARED_ENTRY_POINTS: [DeclaredEntryPoint; 13] = [
     DeclaredEntryPoint {
         sampler_id: "liveness-exit-classification",
         source_anchor: "dispatch/liveness.rs",
@@ -56,7 +56,11 @@ const DECLARED_ENTRY_POINTS: [DeclaredEntryPoint; 12] = [
         source_anchor: "health.rs",
     },
     DeclaredEntryPoint {
-        sampler_id: "startup-stale-task-run-reap",
+        sampler_id: "startup-stage-a-session-interrupt",
+        source_anchor: "server/src/server/state/mod.rs",
+    },
+    DeclaredEntryPoint {
+        sampler_id: "startup-stage-b-task-run-reap",
         source_anchor: "health.rs",
     },
     DeclaredEntryPoint {
@@ -64,7 +68,7 @@ const DECLARED_ENTRY_POINTS: [DeclaredEntryPoint; 12] = [
         source_anchor: "health.rs",
     },
     DeclaredEntryPoint {
-        sampler_id: "startup-orphaned-pending-attempt-reap",
+        sampler_id: "startup-stage-c-pending-attempt-reap",
         source_anchor: "health.rs",
     },
     DeclaredEntryPoint {
@@ -342,6 +346,43 @@ fn state_sampler_audit_inventory_is_complete() {
         .unwrap_or_else(|error| panic!("state sampler audit contract failed: {error}"));
     validate_proposal_changed_guard_allowlist(AUDIT)
         .unwrap_or_else(|error| panic!("changed state-sampler guard contract failed: {error}"));
+}
+
+#[test]
+fn startup_sampler_audit_rows_are_present() {
+    let rows = audit_rows(AUDIT).expect("startup rows retain the nine-column audit shape");
+    let startup_ids = rows
+        .iter()
+        .filter_map(|row| row[0].strip_prefix('`'))
+        .filter_map(|cell| cell.split_once('`').map(|(id, _)| id))
+        .filter(|id| id.starts_with("startup-stage-"))
+        .collect::<Vec<_>>();
+    let expected = [
+        "startup-stage-a-session-interrupt",
+        "startup-stage-b-task-run-reap",
+        "startup-stage-c-pending-attempt-reap",
+    ];
+
+    assert_eq!(
+        startup_ids.len(),
+        expected.len(),
+        "exactly A/B/C startup rows"
+    );
+    assert_eq!(
+        startup_ids.iter().collect::<HashSet<_>>().len(),
+        expected.len()
+    );
+    for id in expected {
+        assert!(
+            startup_ids.contains(&id),
+            "missing stable startup sampler `{id}`"
+        );
+    }
+    assert!(
+        rows.iter()
+            .filter(|row| row[0].contains("startup-stage-"))
+            .all(|row| row.len() == HEADERS.len() && row.iter().all(|cell| !cell.is_empty()))
+    );
 }
 
 #[test]

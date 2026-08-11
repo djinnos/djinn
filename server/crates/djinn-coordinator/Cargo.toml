@@ -9,6 +9,7 @@ doctest = false
 
 [features]
 default = []
+test-support = ["dep:tempfile"]
 
 [dependencies]
 djinn-core = { path = "../djinn-core" }
@@ -55,6 +56,7 @@ hmac = "0.12"
 hex = "0.4"
 globset = { workspace = true }
 libc = "0.2"
+tempfile = { version = "3", optional = true }
 workspace-hack.workspace = true
 
 [dev-dependencies]
@@ -67,7 +69,6 @@ djinn-db = { path = "../djinn-db", features = ["test-support"] }
 djinn-k8s = { path = "../djinn-k8s", features = ["test-support"] }
 djinn-agent-worker = { path = "../djinn-agent-worker" }
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
-tempfile = "3"
 filetime = "0.2"
 insta = { version = "1", features = ["json"] }
 tracing-test = "0.2"
