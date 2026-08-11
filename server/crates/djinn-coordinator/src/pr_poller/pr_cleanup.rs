@@ -502,6 +502,7 @@ impl CoordinatorActor {
         let task_branch = format!("task/{}", task.short_id);
 
         if close_kind == CloseKind::NonMerge {
+            crate::direct_delivery::observe_boundary_operation("task_pr_inline_cleanup");
             match policy
                 .github
                 .get_pull_request(&owner, &repo, pull_number)
