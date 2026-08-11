@@ -511,7 +511,7 @@ pub async fn supervisor_pr_open(
 }
 
 /// Production uses the installation-authenticated GitHub URL. The retained
-/// legacy lifecycle fixtures swap only their transport endpoint for a local bare
+/// legacy lifecycle fixture swaps only its transport endpoint for a local bare
 /// repository, while exercising the real supervisor push operation.
 fn push_url_for_supervisor_pr_open(owner: &str, repo: &str, token: &str) -> String {
     #[cfg(test)]

@@ -13,6 +13,13 @@ use super::{
     UnchangedHeadContext, unchanged_head_rejection_reason, unpublished_mirror_publication_reason,
 };
 
+/// The retained-legacy lifecycle fixtures deliberately exercise test-only
+/// process-global transport overrides and the shared boundary recorder. Hold
+/// this guard for each full lifecycle so their real supervisor/poller effects
+/// cannot clear or redirect one another when the test runtime runs in parallel.
+static RETAINED_LEGACY_LIFECYCLE_GUARD: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 // ── Unchanged-head remediation rejection predicate ──────────────────────────
 
 /// When `ci_last_remediation_base_sha` matches the post-session head SHA, the
@@ -810,6 +817,7 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
 /// points; the test seams only redirect their real transport endpoints.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
+    let _lifecycle_guard = RETAINED_LEGACY_LIFECYCLE_GUARD.lock().await;
     use crate::{
         direct_delivery::{BoundaryOperation, clear_boundary_operations, take_boundary_operations},
         pr_poller::installation::set_installation_client_base_url_for_test,
@@ -1050,12 +1058,12 @@ async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
     set_installation_client_base_url_for_test(None);
     cancel.cancel();
 }
-
 /// SupportedActive retains this one task on the legacy task-PR route only because
 /// its explicit legacy marker was durably written before its repository epoch was
 /// activated. The lifecycle remains the real supervisor and production pollers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn supported_active_explicit_legacy_adopts_through_every_poller() {
+    let _lifecycle_guard = RETAINED_LEGACY_LIFECYCLE_GUARD.lock().await;
     use crate::{
         direct_delivery::{
             BoundaryOperation, LEGACY_DELIVERY_LABEL, clear_boundary_operations,
@@ -1307,7 +1315,10 @@ async fn supported_active_explicit_legacy_adopts_through_every_poller() {
             "missing {expected:?}: {operations:?}"
         );
     }
-    for forbidden in [BoundaryOperation::DirectAppend, BoundaryOperation::TaskPrCreate] {
+    for forbidden in [
+        BoundaryOperation::DirectAppend,
+        BoundaryOperation::TaskPrCreate,
+    ] {
         assert!(
             !operations.contains(&forbidden),
             "explicit legacy must not reach forbidden operation {forbidden:?}: {operations:?}"
