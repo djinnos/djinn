@@ -4,6 +4,16 @@
 //! `djinn_agent::test_helpers` that coordinator tests need.
 //! Returns [`SlotContext`] (from djinn-slot) rather than `AgentContext`.
 
+// This module is also exported under `test-support` for cross-crate integration
+// fixtures. Keep test-only assertion ergonomics scoped here so enabling that
+// feature does not weaken the reliability lints on production modules.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::disallowed_methods
+)]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
