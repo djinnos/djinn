@@ -2536,7 +2536,8 @@ mod tests {
     mod watchdog_tests;
     use djinn_db::test_support::{
         model_turn_accounting_fixture, model_turn_decision_count_fixture,
-        model_turn_lease_lifecycle_fixture, model_turn_terminal_fixture,
+        model_turn_launch_identities_fixture, model_turn_lease_lifecycle_fixture,
+        model_turn_lease_owner_pod_uid_fixture, model_turn_terminal_fixture,
         seed_model_turn_admission_fixture,
     };
     use djinn_db::{
