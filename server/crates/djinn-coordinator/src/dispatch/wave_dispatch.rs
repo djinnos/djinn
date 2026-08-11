@@ -194,9 +194,14 @@ impl CoordinatorActor {
                     continue;
                 }
             };
-            if admission == crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner {
+            if matches!(
+                &admission,
+                crate::direct_delivery::DirectDeliveryAdmission::NoProposalOwner
+                    | crate::direct_delivery::DirectDeliveryAdmission::ContractUnavailable(_)
+            ) {
                 // The admission wrapper owns this durable park. Completion must
-                // not issue a duplicate Escalate transition.
+                // not issue a duplicate Escalate transition or reach any
+                // simple-lifecycle, rebase, direct-append, or task-PR effect.
                 continue;
             }
             // Simple-lifecycle tasks normally close directly, but sessions that
