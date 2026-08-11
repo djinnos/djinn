@@ -657,6 +657,7 @@ impl TaskRepository {
             super::board_health::closed_parent_open_children_section(self.db.pool()).await;
         let stalled_epics =
             super::board_health_stalled_epics::stalled_epics_section(self.db.pool()).await;
+        let direct_delivery = super::board_health::direct_delivery_section(self.db.pool()).await;
 
         Ok(serde_json::json!({
             "epic_stats":            epic_stats,
@@ -670,6 +671,7 @@ impl TaskRepository {
             "stranded_ready":        stranded_ready,
             "closed_parent_open_children": closed_parent_open_children,
             "stalled_epics": stalled_epics,
+            "direct_delivery": direct_delivery,
         }))
     }
 
@@ -784,19 +786,50 @@ pub(super) fn build_where(
 
     if let Some(s) = status {
         if s == "merged" {
-            // Pseudo-status backing the Kanban "Merged" column: closed AND
-            // actually merged. This MUST stay in sync with the UI's
-            // `taskToColumnKey` (ui/src/components/KanbanBoard.tsx), which does:
-            //
-            //     const merged =
-            //       task.merge_commit_sha != null ||
-            //       (task.pr_url != null && task.close_reason === "completed");
-            //     return merged ? "done" : null;   // (only when status closed)
-            //
-            // All literals are fixed constants (not user input), so no binds.
+            // Pseudo-status backing the Kanban "Merged" column. An active
+            // canonical direct owner without a task-PR identity must have exact
+            // applied-ledger evidence for its persisted merge SHA. This fails
+            // closed for prepared, applying, conflict, and unknown states.
+            // Disabled epochs and explicit task-PR identities retain legacy
+            // classification; accidental nullable ledger fields cannot opt in.
             clauses.push(
-                "status = 'closed' AND (merge_commit_sha IS NOT NULL \
-                 OR (pr_url IS NOT NULL AND close_reason = 'completed'))"
+                r#"status = 'closed' AND (
+                   (pr_url IS NOT NULL AND (merge_commit_sha IS NOT NULL OR close_reason = 'completed'))
+                   OR (pr_url IS NULL AND (
+                     (EXISTS (
+                       SELECT 1 FROM direct_delivery_epochs dde
+                       JOIN epics e ON e.id = tasks.epic_id
+                       JOIN proposal_build_attempts pba
+                         ON pba.proposal_id = e.proposal_id AND pba.lifecycle = 'active'
+                       WHERE dde.name = 'direct_delivery_v1' AND dde.state = 'active'
+                     ) AND EXISTS (
+                       SELECT 1 FROM task_deliveries td
+                       JOIN epics e ON e.id = tasks.epic_id
+                       JOIN proposal_build_attempts pba
+                         ON pba.id = td.build_attempt_id
+                        AND pba.proposal_id = e.proposal_id
+                        AND pba.lifecycle = 'active'
+                       WHERE td.task_id = tasks.id
+                         /* The newest immutable generation is authoritative.
+                            A prior applied row cannot prove integration after a
+                            later prepared, applying, conflict, or unknown row. */
+                         AND td.delivery_generation = (
+                           SELECT MAX(latest.delivery_generation) FROM task_deliveries latest
+                            WHERE latest.build_attempt_id = td.build_attempt_id
+                              AND latest.task_id = td.task_id
+                         )
+                         AND td.state = 'applied'
+                         AND td.candidate_sha = tasks.merge_commit_sha
+                     ))
+                     OR (NOT EXISTS (
+                       SELECT 1 FROM direct_delivery_epochs dde
+                       JOIN epics e ON e.id = tasks.epic_id
+                       JOIN proposal_build_attempts pba
+                         ON pba.proposal_id = e.proposal_id AND pba.lifecycle = 'active'
+                       WHERE dde.name = 'direct_delivery_v1' AND dde.state = 'active'
+                     ) AND merge_commit_sha IS NOT NULL)
+                   ))
+                 )"#
                     .to_owned(),
             );
         } else if let Some(neg) = s.strip_prefix('!') {

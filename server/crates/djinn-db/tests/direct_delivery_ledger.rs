@@ -6,11 +6,17 @@ use djinn_core::models::{
     TaskIntegrated, TransitionAction,
 };
 use djinn_db::{
-    Database, DeliveryFinalizeInput, DeliveryMappedHeadRetryInput, DeliveryPrepareInput,
-    DeliveryReworkInput, DeliveryTransitionResult, TaskIntegrationResult, TaskRepository,
+    ChildDisposition, Database, DeliveryFinalizeInput, DeliveryMappedHeadRetryInput,
+    DeliveryPrepareInput, DeliveryReworkInput, DeliveryTransitionResult, DispositionScope,
+    TaskIntegrationResult, TaskRepository,
 };
+use std::sync::{Arc, Mutex};
 
 async fn fixture() -> (Database, TaskRepository) {
+    fixture_with_bus(EventBus::noop()).await
+}
+
+async fn fixture_with_bus(events: EventBus) -> (Database, TaskRepository) {
     let db = Database::ephemeral().await.unwrap();
     db.ensure_initialized().await.unwrap();
     for sql in [
@@ -18,12 +24,60 @@ async fn fixture() -> (Database, TaskRepository) {
         "INSERT INTO users (id, github_id, github_login) VALUES ('u', 9000002101, 'u')",
         "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ('p', 'p', 'owner', 'repo')",
         "INSERT INTO proposals (id, short_id, title) VALUES ('proposal', 'proposal', 'proposal')",
+        "INSERT INTO epics (id, project_id, short_id, title, description, memory_refs, created_by_user_id, proposal_id) VALUES ('epic', 'p', 'epic', 'epic', '', '[]', 'u', 'proposal')",
         "INSERT INTO proposal_build_attempts (id, proposal_id, short_id, lifecycle, base_sha, branch_name, branch_head_sha) VALUES ('attempt', 'proposal', 'attempt', 'active', 'parent', 'proposal/p/a', 'parent')",
-        "INSERT INTO tasks (id, project_id, short_id, title, description, design, labels, acceptance_criteria, memory_refs, created_by_user_id) VALUES ('task', 'p', 'task', 'task', '', '', '[]', '[]', '[]', 'u')",
+        "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design, labels, acceptance_criteria, memory_refs, created_by_user_id) VALUES ('task', 'p', 'task', 'epic', 'task', '', '', '[]', '[]', '[]', 'u')",
     ] {
         sqlx::query(sql).execute(db.pool()).await.unwrap();
     }
-    (db.clone(), TaskRepository::new(db, EventBus::noop()))
+    (db.clone(), TaskRepository::new(db, events))
+}
+
+async fn assert_parent_and_blocker_wait(
+    db: &Database,
+    repo: &TaskRepository,
+    expected_delivery_state: TaskDeliveryState,
+    generation: i64,
+) {
+    assert_eq!(
+        repo.get_delivery(&id(generation))
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        expected_delivery_state
+    );
+    assert!(
+        repo.transition(
+            "dependent",
+            TransitionAction::Start,
+            "",
+            "system",
+            None,
+            None,
+        )
+        .await
+        .is_err(),
+        "a non-applied direct generation must not release its dependent"
+    );
+    let plan = repo
+        .classify_parent_disposition(&DispositionScope::for_proposal_abort(
+            "proposal",
+            vec!["epic".into()],
+        ))
+        .await
+        .unwrap();
+    let task = plan.findings.iter().find(|f| f.task_id == "task").unwrap();
+    assert_eq!(task.disposition, ChildDisposition::Park);
+    assert_eq!(task.status, "approved");
+    assert_ne!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM epics WHERE id = 'epic'")
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+        "closed",
+        "delivery evidence alone must not complete the epic"
+    );
 }
 
 fn prepare_for(
@@ -406,28 +460,40 @@ async fn conflict_generation_is_not_integrable_and_remains_immutable() {
 
 #[tokio::test]
 async fn dependent_releases_only_after_corrected_generation_integrates() {
-    let (db, repo) = fixture().await;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let sink = captured.clone();
+    let (db, repo) = fixture_with_bus(EventBus::new(move |event| {
+        sink.lock().unwrap().push(event);
+    }))
+    .await;
     seed_task(&db, "dependent").await;
+    sqlx::query("UPDATE tasks SET epic_id = 'epic' WHERE id = 'dependent'")
+        .execute(db.pool())
+        .await
+        .unwrap();
     repo.add_blocker("dependent", "task").await.unwrap();
-    make_conflict(&repo).await;
     approve(&db, "task").await;
+
+    repo.prepare_delivery(&prepare(1, "source-1", "candidate-1"))
+        .await
+        .unwrap();
+    assert_parent_and_blocker_wait(&db, &repo, TaskDeliveryState::Prepared, 1).await;
+    begin_applying(&repo, id(1)).await;
+    assert_parent_and_blocker_wait(&db, &repo, TaskDeliveryState::Applying, 1).await;
+    repo.finalize_delivery_conflict(&DeliveryFinalizeInput {
+        identity: id(1),
+        transition_id: "conflict-1".into(),
+        conflict_reason: Some("conflict".into()),
+    })
+    .await
+    .unwrap();
+    assert_parent_and_blocker_wait(&db, &repo, TaskDeliveryState::Conflict, 1).await;
+
     let conflict = TaskIntegrated::new(id(1), "candidate-1", "candidate-1", "candidate-1").unwrap();
     assert!(matches!(
         repo.task_integrated(&conflict).await.unwrap(),
         TaskIntegrationResult::Stale { .. }
     ));
-    assert!(
-        repo.transition(
-            "dependent",
-            TransitionAction::Start,
-            "",
-            "system",
-            None,
-            None
-        )
-        .await
-        .is_err()
-    );
     let corrected = DeliveryReworkInput {
         rework: ReworkDelivery::new("corrected", "attempt", "task", 1, 2).unwrap(),
         source_sha: "source-2".into(),
@@ -439,23 +505,11 @@ async fn dependent_releases_only_after_corrected_generation_integrates() {
         repo.rework_delivery(&corrected).await.unwrap(),
         DeliveryTransitionResult::Applied(_)
     ));
-    assert_eq!(
-        repo.get_delivery(&id(2)).await.unwrap().unwrap().state,
-        TaskDeliveryState::Prepared
-    );
-    assert!(
-        repo.transition(
-            "dependent",
-            TransitionAction::Start,
-            "",
-            "system",
-            None,
-            None
-        )
-        .await
-        .is_err()
-    );
+    assert_parent_and_blocker_wait(&db, &repo, TaskDeliveryState::Prepared, 2).await;
     begin_applying(&repo, id(2)).await;
+    assert_parent_and_blocker_wait(&db, &repo, TaskDeliveryState::Applying, 2).await;
+
+    captured.lock().unwrap().clear();
     let integrated =
         TaskIntegrated::new(id(2), "candidate-2", "candidate-2", "candidate-2").unwrap();
     assert!(matches!(
@@ -475,6 +529,40 @@ async fn dependent_releases_only_after_corrected_generation_integrates() {
         repo.get_delivery(&id(2)).await.unwrap().unwrap().state,
         TaskDeliveryState::Applied
     );
+    let parent_plan = repo
+        .classify_parent_disposition(&DispositionScope::for_proposal_abort(
+            "proposal",
+            vec!["epic".into()],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        parent_plan
+            .findings
+            .iter()
+            .find(|finding| finding.task_id == "task")
+            .unwrap()
+            .disposition,
+        ChildDisposition::RetainedAlreadyTerminal
+    );
+    let dependent_updates = || {
+        captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                event.entity_type == "task"
+                    && event.action == "updated"
+                    && event.payload["task"]["id"] == "dependent"
+            })
+            .count()
+    };
+    assert_eq!(dependent_updates(), 1, "dependent releases exactly once");
+    assert!(matches!(
+        repo.task_integrated(&integrated).await.unwrap(),
+        TaskIntegrationResult::Replayed(_)
+    ));
+    assert_eq!(dependent_updates(), 1, "replay must not release twice");
     assert_eq!(
         repo.transition(
             "dependent",
@@ -489,6 +577,67 @@ async fn dependent_releases_only_after_corrected_generation_integrates() {
         .status,
         "in_progress"
     );
+}
+
+#[tokio::test]
+async fn disabled_and_explicit_legacy_keep_parent_and_blocker_semantics() {
+    for (case, disable_epoch, explicit_pr) in [
+        ("supported-disabled", true, false),
+        ("explicit-legacy", false, true),
+    ] {
+        let (db, repo) = fixture().await;
+        seed_task(&db, "dependent").await;
+        sqlx::query("UPDATE tasks SET epic_id = 'epic' WHERE id = 'dependent'")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        repo.add_blocker("dependent", "task").await.unwrap();
+        repo.prepare_delivery(&prepare(1, "source-1", "candidate-1"))
+            .await
+            .unwrap();
+        if disable_epoch {
+            sqlx::query("UPDATE direct_delivery_epochs SET state = 'disabled'")
+                .execute(db.pool())
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE tasks SET status = 'closed', close_reason = 'completed', merge_commit_sha = 'legacy-sha', pr_url = $1 WHERE id = 'task'")
+            .bind(explicit_pr.then_some("https://github.com/owner/repo/pull/1"))
+            .execute(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.transition(
+                "dependent",
+                TransitionAction::Start,
+                "",
+                "system",
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .status,
+            "in_progress",
+            "{case} must retain the legacy closed-blocker predicate"
+        );
+        let plan = repo
+            .classify_parent_disposition(&DispositionScope::for_proposal_abort(
+                "proposal",
+                vec!["epic".into()],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            plan.findings
+                .iter()
+                .find(|finding| finding.task_id == "task")
+                .unwrap()
+                .disposition,
+            ChildDisposition::RetainedAlreadyTerminal,
+            "{case} must retain legacy parent disposition"
+        );
+    }
 }
 
 /// A mapped head is a candidate already represented in the attempt ledger.
