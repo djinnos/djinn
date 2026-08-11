@@ -1329,22 +1329,29 @@ async fn supported_active_explicit_legacy_adopts_through_every_poller() {
     cancel.cancel();
 }
 
-
 /// Run both production cleanup routes for disabled and active explicit-legacy
 /// tasks. Counted provider requests rule out all relevant early returns.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retained_legacy_cleanup_reaches_inline_and_stale_provider_boundaries() {
     let _lifecycle_guard = RETAINED_LEGACY_LIFECYCLE_GUARD.lock().await;
     use crate::{
-        direct_delivery::{BoundaryOperation, LEGACY_DELIVERY_LABEL, clear_boundary_operations, take_boundary_operations},
+        direct_delivery::{
+            BoundaryOperation, LEGACY_DELIVERY_LABEL, clear_boundary_operations,
+            take_boundary_operations,
+        },
         health,
-        pr_poller::{installation::set_installation_client_base_url_for_test, pr_cleanup::CloseKind},
+        pr_poller::{
+            installation::set_installation_client_base_url_for_test, pr_cleanup::CloseKind,
+        },
     };
     use djinn_core::events::EventBus;
     use djinn_db::{Database, EpicRepository, TaskRepository};
     use djinn_provider::github_app::installations::prime_cache_for_tests;
     use tokio_util::sync::CancellationToken;
-    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path, query_param}};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path, query_param},
+    };
 
     const INSTALLATION: u64 = 42_425;
     const URL: &str = "https://github.com/acme/widget/pull/74";
@@ -1356,52 +1363,134 @@ async fn retained_legacy_cleanup_reaches_inline_and_stale_provider_boundaries() 
         let pr = serde_json::json!({"number":74,"title":"retained cleanup","state":"open","merged":false,"html_url":URL,"user":{"login":"djinn-bot[bot]","id":1},"head":{"ref":format!("task/{SHORT_ID}"),"sha":HEAD},"base":{"ref":"main","sha":"base"},"node_id":"PR_retained_cleanup"});
         let graphql = serde_json::json!({"data":{"repository":{"pullRequest":{"mergeStateStatus":null,"autoMergeRequest":null,"mergeQueueEntry":null,"timelineItems":{"nodes":[]},"commits":{"nodes":[]}}}}});
         if stale {
-            Mock::given(method("GET")).and(path("/repos/acme/widget/pulls")).and(query_param("state", "open"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([pr.clone()]))).expect(1).mount(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/repos/acme/widget/pulls"))
+                .and(query_param("state", "open"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!([pr.clone()])),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
         } else {
-            Mock::given(method("GET")).and(path("/repos/acme/widget/pulls/74"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(pr.clone())).expect(1).mount(&server).await;
-            Mock::given(method("GET")).and(path(format!("/repos/acme/widget/commits/{HEAD}/check-runs")))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"total_count":0,"check_runs":[]}))).expect(1).mount(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/repos/acme/widget/pulls/74"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(pr.clone()))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/repos/acme/widget/commits/{HEAD}/check-runs"
+                )))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"total_count":0,"check_runs":[]})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
         }
-        Mock::given(method("POST")).and(path("/graphql")).respond_with(ResponseTemplate::new(200).set_body_json(graphql)).expect(1).mount(&server).await;
-        Mock::given(method("GET")).and(path("/repos/acme/widget/pulls")).and(query_param("base", format!("task/{SHORT_ID}")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([]))).expect(1).mount(&server).await;
-        Mock::given(method("POST")).and(path("/repos/acme/widget/issues/74/comments"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({}))).expect(1).mount(&server).await;
-        Mock::given(method("PATCH")).and(path("/repos/acme/widget/pulls/74"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(pr.clone())).expect(1).mount(&server).await;
-        Mock::given(method("DELETE")).and(path(format!("/repos/acme/widget/git/refs/heads/task/{SHORT_ID}")))
-            .respond_with(ResponseTemplate::new(204)).expect(1).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(graphql))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widget/pulls"))
+            .and(query_param("base", format!("task/{SHORT_ID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/acme/widget/issues/74/comments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/repos/acme/widget/pulls/74"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(pr.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(format!(
+                "/repos/acme/widget/git/refs/heads/task/{SHORT_ID}"
+            )))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
 
         let db = Database::open_in_memory().unwrap();
         let events = EventBus::noop();
-        let epic = EpicRepository::new(db.clone(), events.clone()).create("legacy cleanup", "", "", "", "", None).await.unwrap();
+        let epic = EpicRepository::new(db.clone(), events.clone())
+            .create("legacy cleanup", "", "", "", "", None)
+            .await
+            .unwrap();
         let tasks = TaskRepository::new(db.clone(), events);
-        let task = tasks.create(&epic.id, SHORT_ID, "", "", "task", 0, "worker", Some("approved")).await.unwrap();
+        let task = tasks
+            .create(
+                &epic.id,
+                SHORT_ID,
+                "",
+                "",
+                "task",
+                0,
+                "worker",
+                Some("approved"),
+            )
+            .await
+            .unwrap();
         if active {
-            tasks.update_labels(&task.id, &format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#)).await.unwrap();
+            tasks
+                .update_labels(&task.id, &format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#))
+                .await
+                .unwrap();
             djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
         }
         let adopted = tasks.set_pr_url(&task.id, URL).await.unwrap();
-        assert_eq!(adopted.pr_url.as_deref(), Some(URL), "fixture must begin with adopted legacy URL");
+        assert_eq!(
+            adopted.pr_url.as_deref(),
+            Some(URL),
+            "fixture must begin with adopted legacy URL"
+        );
         // Both routes use the persisted close timestamp for their guardrails.
         // Backdate it through the shared repository fixture seam so the inline
         // policy's fixed grace period and the stale sweep are positively eligible.
         djinn_db::test_support::close_task_at(&db, &task.id, "2020-01-01T00:00:00Z").await;
         assert_eq!(
-            tasks.get(&task.id).await.unwrap().unwrap().pr_url.as_deref(),
+            tasks
+                .get(&task.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .pr_url
+                .as_deref(),
             Some(URL),
             "backdating cleanup eligibility must not alter the adopted URL"
         );
-        djinn_db::test_support::persist_project_github_installation_for_test(&db, &task.project_id, "acme", "widget", INSTALLATION).await;
+        djinn_db::test_support::persist_project_github_installation_for_test(
+            &db,
+            &task.project_id,
+            "acme",
+            "widget",
+            INSTALLATION,
+        )
+        .await;
         prime_cache_for_tests(INSTALLATION, "ghs_installation_fixture");
         unsafe { std::env::set_var("GITHUB_APP_ID", "1") };
         set_installation_client_base_url_for_test(Some(server.uri()));
         clear_boundary_operations();
 
         if stale {
-            let mut context = crate::test_helpers::coordinator_context_from_db(db.clone(), CancellationToken::new());
+            let mut context = crate::test_helpers::coordinator_context_from_db(
+                db.clone(),
+                CancellationToken::new(),
+            );
             context.reconciliation_sweep.enabled = true;
             context.reconciliation_sweep.dry_run = false;
             context.reconciliation_sweep.grace_period = std::time::Duration::ZERO;
@@ -1411,16 +1500,35 @@ async fn retained_legacy_cleanup_reaches_inline_and_stale_provider_boundaries() 
                 let (tx, _) = tokio::sync::broadcast::channel(8);
                 crate::test_helpers::make_coordinator_actor_cancellable(&db, &tx)
             };
-            actor.cleanup_pr_and_branch_on_close(&tasks.get(&task.id).await.unwrap().unwrap(), CloseKind::NonMerge).await;
+            actor
+                .cleanup_pr_and_branch_on_close(
+                    &tasks.get(&task.id).await.unwrap().unwrap(),
+                    CloseKind::NonMerge,
+                )
+                .await;
             cancel.cancel();
         }
 
         let reloaded = tasks.get(&task.id).await.unwrap().unwrap();
-        assert_eq!(reloaded.pr_url.as_deref(), Some(URL), "cleanup must retain the exact adopted URL");
+        assert_eq!(
+            reloaded.pr_url.as_deref(),
+            Some(URL),
+            "cleanup must retain the exact adopted URL"
+        );
         let operations = take_boundary_operations();
-        let expected = if stale { BoundaryOperation::TaskPrStaleCleanup } else { BoundaryOperation::TaskPrInlineCleanup };
-        assert!(operations.contains(&expected), "missing {expected:?}: {operations:?}");
-        assert!(!operations.contains(&BoundaryOperation::DirectAppend), "legacy cleanup must not append directly: {operations:?}");
+        let expected = if stale {
+            BoundaryOperation::TaskPrStaleCleanup
+        } else {
+            BoundaryOperation::TaskPrInlineCleanup
+        };
+        assert!(
+            operations.contains(&expected),
+            "missing {expected:?}: {operations:?}"
+        );
+        assert!(
+            !operations.contains(&BoundaryOperation::DirectAppend),
+            "legacy cleanup must not append directly: {operations:?}"
+        );
         set_installation_client_base_url_for_test(None);
     }
 }
