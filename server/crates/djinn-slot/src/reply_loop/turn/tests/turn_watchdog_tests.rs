@@ -469,7 +469,7 @@ async fn stale_watchdog_heartbeat_leaves_replacement_generation_unchanged() {
     guard.finish(false).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_abort() {
     use crate::model_turn_capability::{
         ModelTurnCapabilityCoverageV2, SlotLiveIdentity, report_for_route,
@@ -479,10 +479,19 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
         ProviderAttemptAbortResultV1, ProviderAttemptTerminalV1, ProviderOutcomeV1,
     };
 
+    async fn await_with_paused_io<F: std::future::Future>(future: F) -> F::Output {
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                () = tokio::task::yield_now() => {}
+                output = &mut future => break output,
+            }
+        }
+    }
+
     let db = Database::ephemeral().await.expect("db");
     let pool = seed_model_turn_admission_fixture(&db, "enforce", "supported", 1).await;
     let hooks = Arc::new(ModelTurnAdmissionTestHooks::default());
-    hooks.block_watchdog_start.store(true, Ordering::Release);
     let slot_a = ModelTurnAdmissionCoordinator::with_test_hooks(
         djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
         Arc::clone(&hooks),
@@ -582,6 +591,17 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
         djinn_db::ModelTurnAdmissionRepository::new(db.clone()),
         Arc::clone(&hooks),
     );
+    // Warm this coordinator's repository pool before the watchdog exists. The
+    // production boundary returns a typed target-one wait without changing the
+    // winner's lease, and no live-time setup can consume the heartbeat period.
+    let warmed_wait = coordinator
+        .prepare(
+            &covered_admission_plan(),
+            admission_request(replacement_request),
+        )
+        .await
+        .expect("warm competing preparation");
+    assert!(matches!(warmed_wait, ModelTurnPreparation::Wait(_)));
     let started = hooks.watchdog_started.notified();
     tokio::pin!(started);
     // This hook uses `notify_waiters`, so register before the active handoff
@@ -611,11 +631,6 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
     .await
     .expect("one B1 launch");
     assert_eq!(launches.load(Ordering::Acquire), 1);
-    assert_eq!(
-        model_turn_lease_lifecycle_fixture(&db, &lease.lease_id).await,
-        "active",
-        "the sole B1 launch follows one committed dispatch fence and active hand-off"
-    );
     let watchdog_signal = guard.watchdog_abort_signal();
 
     let cancel = tokio_util::sync::CancellationToken::new();
@@ -672,32 +687,20 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
     }));
     let provider_poll = provider_polled.notified();
     tokio::pin!(provider_poll);
+    provider_poll.as_mut().enable();
     tokio::select! { _ = &mut consumer => panic!("pending provider returned"), _ = &mut provider_poll => {} }
     let polls_before_abort = polls.load(Ordering::Acquire);
     assert!(
         polls_before_abort >= 1,
         "consume_provider_stream must acknowledge pending B1 provider I/O"
     );
-    // Warm this coordinator's repository pool while time is live. The same
-    // production boundary returns a typed target-one wait without changing the
-    // winner's lease, so the paused heartbeat commit cannot block on pool
-    // connection backoff timers.
-    let warmed_wait = coordinator
-        .prepare(
-            &covered_admission_plan(),
-            admission_request(replacement_request),
-        )
-        .await
-        .expect("warm competing preparation");
-    assert!(matches!(warmed_wait, ModelTurnPreparation::Wait(_)));
-
-    // Setup has completed on live time. Start the production watchdog only
-    // after pausing, so its baseline and all heartbeat persistence remain on
-    // the modeled clock.
-    tokio::time::pause();
-    hooks.watchdog_start_release.notify_one();
-    started.await;
+    // Database setup and the first real pending provider poll are acknowledged
+    // on live time. On the current-thread runtime the spawned watchdog has not
+    // run yet, so pause before yielding to it and keep time paused through
+    // heartbeat persistence, watchdog abort, and reconciliation.
     hooks.block_heartbeat.store(true, Ordering::Release);
+    tokio::time::pause();
+    started.await;
     let reached = hooks.heartbeat_reached.notified();
     tokio::pin!(reached);
     reached.as_mut().enable();
@@ -708,28 +711,61 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
     committed.as_mut().enable();
     // Preserve the release if the watchdog has not registered its waiter yet.
     hooks.heartbeat_release.notify_one();
-    committed.await;
+    // Keep this task runnable while the paused-time heartbeat performs real
+    // database I/O. Otherwise Tokio can auto-advance to the watchdog deadline
+    // while the socket is pending and select the abort branch before the
+    // successful commit is acknowledged.
+    loop {
+        tokio::select! {
+            () = tokio::task::yield_now() => {}
+            _ = &mut committed => break,
+        }
+    }
     let last_committed_heartbeat = tokio::time::Instant::now();
     hooks.block_heartbeat.store(false, Ordering::Release);
     hooks.fail_heartbeat.store(true, Ordering::Release);
-    let failed = hooks.heartbeat_finished.notified();
-    tokio::pin!(failed);
-    failed.as_mut().enable();
+    let committed_heartbeats = hooks.heartbeats.load(Ordering::Acquire);
     tokio::time::advance(Duration::from_secs(20)).await;
-    failed.await;
+    for _ in 0..100 {
+        if hooks.heartbeats.load(Ordering::Acquire) > committed_heartbeats {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        hooks.heartbeats.load(Ordering::Acquire) > committed_heartbeats,
+        "a later partitioned heartbeat must be attempted without committing"
+    );
     tokio::time::advance(Duration::from_secs(19)).await;
     assert!(
         !observed_abort.is_aborted(),
         "watchdog must retain the full forty-second interval after the committed heartbeat"
     );
-    let watchdog_abort = watchdog_signal.cancelled();
-    tokio::pin!(watchdog_abort);
+    // Keep the equal-time heartbeat branch pending at the deadline so the
+    // watchdog's biased deadline branch observes the exact +40 instant.
+    hooks.block_heartbeat.store(true, Ordering::Release);
     tokio::time::advance(Duration::from_secs(1)).await;
-    watchdog_abort.await;
+    // The deadline sleep is created by the tick that becomes ready at +40.
+    // Drive newly registered timers at the same paused instant without adding
+    // any modeled time.
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::ZERO).await;
+    tokio::time::advance(Duration::from_millis(1)).await;
+    for _ in 0..10_000 {
+        if watchdog_signal.is_cancelled() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        watchdog_signal.is_cancelled(),
+        "deadline task was not scheduled at the exact +40 instant; heartbeats={}",
+        hooks.heartbeats.load(Ordering::Acquire)
+    );
     assert_eq!(
-        tokio::time::Instant::now() - last_committed_heartbeat,
+        tokio::time::Instant::now() - Duration::from_millis(1) - last_committed_heartbeat,
         Duration::from_secs(40),
-        "watchdog abort is measured from the last committed heartbeat"
+        "the timer-wheel dispatch tick preserves the exact +40 watchdog deadline"
     );
     assert!(observed_abort.is_aborted());
     let state = consumer
@@ -747,23 +783,26 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
         1,
         "watchdog cannot launch replacement"
     );
+    assert_eq!(
+        await_with_paused_io(model_turn_lease_lifecycle_fixture(&db, &lease.lease_id)).await,
+        "active",
+        "the sole B1 launch follows one committed dispatch fence and active hand-off"
+    );
 
-    let denied = coordinator
-        .prepare(
-            &covered_admission_plan(),
-            admission_request(replacement_request),
-        )
-        .await
-        .expect("rival preparation");
+    let denied = await_with_paused_io(coordinator.prepare(
+        &covered_admission_plan(),
+        admission_request(replacement_request),
+    ))
+    .await
+    .expect("rival preparation");
     assert!(matches!(denied, ModelTurnPreparation::Wait(_)));
     tokio::time::advance(Duration::from_secs(30)).await;
-    let denied_at_boundary = coordinator
-        .prepare(
-            &covered_admission_plan(),
-            admission_request(replacement_request),
-        )
-        .await
-        .expect("rival preparation at lease boundary");
+    let denied_at_boundary = await_with_paused_io(coordinator.prepare(
+        &covered_admission_plan(),
+        admission_request(replacement_request),
+    ))
+    .await
+    .expect("rival preparation at lease boundary");
     assert!(matches!(denied_at_boundary, ModelTurnPreparation::Wait(_)));
     assert_eq!(
         launches.load(Ordering::Acquire),
@@ -793,51 +832,57 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
         _ = &mut reconciliation_reached => {}
     }
     assert_eq!(
-        model_turn_lease_lifecycle_fixture(&db, &lease.lease_id).await,
+        await_with_paused_io(model_turn_lease_lifecycle_fixture(&db, &lease.lease_id)).await,
         "active"
     );
     hooks.block_reconcile.store(false, Ordering::Release);
     // Retain this release across the test/task scheduling boundary as well.
     hooks.reconcile_release.notify_one();
-    settlement.await;
+    await_with_paused_io(&mut settlement).await;
     assert_eq!(
-        model_turn_terminal_fixture(&db, &lease.lease_id, lease.generation, &lease.request_id)
-            .await
-            .1,
+        await_with_paused_io(model_turn_terminal_fixture(
+            &db,
+            &lease.lease_id,
+            lease.generation,
+            &lease.request_id,
+        ))
+        .await
+        .1,
         "quarantined"
     );
-    assert_eq!(model_turn_accounting_fixture(&db, pool).await, (0, 0, 1));
+    assert_eq!(
+        await_with_paused_io(model_turn_accounting_fixture(&db, pool)).await,
+        (0, 0, 1)
+    );
 
-    coordinator
-        .reconcile(
-            lease.clone(),
-            &ProviderOutcomeV1 {
-                terminal: ProviderAttemptTerminalV1::Aborted,
-                authoritative_usage: Some(ModelTurnAuthoritativeUsage {
-                    request_units: 0,
-                    input_units: 0,
-                    output_units: 0,
-                    combined_units: 0,
-                }),
-                observation: None,
-                abort: ProviderAttemptAbortResultV1::Confirmed,
-                token_emission: Default::default(),
-            },
-        )
-        .await
-        .expect("authoritative eligibility restoration");
-    let fresh = coordinator
-        .prepare(
-            &covered_admission_plan(),
-            ModelTurnAdmissionRequest {
-                credential_id: "credential-slot".into(),
-                request_id: replacement_request.into(),
-                owner_pod_uid: Some(replacement_identity.pod_uid.clone()),
-                generation: 2,
-            },
-        )
-        .await
-        .expect("fresh preparation");
+    await_with_paused_io(coordinator.reconcile(
+        lease.clone(),
+        &ProviderOutcomeV1 {
+            terminal: ProviderAttemptTerminalV1::Aborted,
+            authoritative_usage: Some(ModelTurnAuthoritativeUsage {
+                request_units: 0,
+                input_units: 0,
+                output_units: 0,
+                combined_units: 0,
+            }),
+            observation: None,
+            abort: ProviderAttemptAbortResultV1::Confirmed,
+            token_emission: Default::default(),
+        },
+    ))
+    .await
+    .expect("authoritative eligibility restoration");
+    let fresh = await_with_paused_io(coordinator.prepare(
+        &covered_admission_plan(),
+        ModelTurnAdmissionRequest {
+            credential_id: "credential-slot".into(),
+            request_id: replacement_request.into(),
+            owner_pod_uid: Some(replacement_identity.pod_uid.clone()),
+            generation: 2,
+        },
+    ))
+    .await
+    .expect("fresh preparation");
     let fresh_lease = match &fresh {
         ModelTurnPreparation::Permit(permit) => permit.lease.clone().expect("fresh lease"),
         other => panic!("eligibility restoration must permit fresh lease: {other:?}"),
@@ -847,7 +892,7 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
     assert!(fresh_lease.generation > lease.generation);
     let replacement_launches = Arc::clone(&launches);
     let (fresh_outcome_tx, fresh_outcome_rx) = tokio::sync::oneshot::channel();
-    let fresh_guard = launch_prepared_covered_attempt_with_lease(
+    let fresh_guard = await_with_paused_io(launch_prepared_covered_attempt_with_lease(
         fresh,
         move || {
             replacement_launches.fetch_add(1, Ordering::AcqRel);
@@ -863,12 +908,16 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
         coordinator.clone(),
         tokio_util::sync::CancellationToken::new(),
         tokio_util::sync::CancellationToken::new(),
-    )
+    ))
     .await
     .expect("fresh B1 launch");
     assert_eq!(launches.load(Ordering::Acquire), 2);
     assert_eq!(
-        model_turn_lease_lifecycle_fixture(&db, &fresh_lease.lease_id).await,
+        await_with_paused_io(model_turn_lease_lifecycle_fixture(
+            &db,
+            &fresh_lease.lease_id,
+        ))
+        .await,
         "active"
     );
     fresh_outcome_tx
@@ -885,17 +934,21 @@ async fn two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_ab
             token_emission: Default::default(),
         })
         .expect("fresh outcome");
-    fresh_guard.finish(true).await;
+    await_with_paused_io(fresh_guard.finish(true)).await;
 
     let plan = covered_admission_plan();
     let slot_a_report = report_for_route(&winner_identity, "provider", "model", Some(&plan));
     let slot_b_report = report_for_route(&replacement_identity, "provider", "model", Some(&plan));
-    let winner_owner = model_turn_lease_owner_pod_uid_fixture(&db, &lease.lease_id)
-        .await
-        .expect("winner lease must persist a pod owner");
-    let replacement_owner = model_turn_lease_owner_pod_uid_fixture(&db, &fresh_lease.lease_id)
-        .await
-        .expect("replacement lease must persist a pod owner");
+    let winner_owner =
+        await_with_paused_io(model_turn_lease_owner_pod_uid_fixture(&db, &lease.lease_id))
+            .await
+            .expect("winner lease must persist a pod owner");
+    let replacement_owner = await_with_paused_io(model_turn_lease_owner_pod_uid_fixture(
+        &db,
+        &fresh_lease.lease_id,
+    ))
+    .await
+    .expect("replacement lease must persist a pod owner");
     assert_ne!(slot_a_report.slot_pod_uid, slot_b_report.slot_pod_uid);
     for (report, identity, persisted_owner) in [
         (&slot_a_report, &winner_identity, winner_owner),

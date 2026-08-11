@@ -197,9 +197,6 @@ pub(crate) struct ModelTurnAdmissionTestHooks {
     pub heartbeat_identities: std::sync::Mutex<Vec<ModelTurnLeaseIdentity>>,
     pub fail_heartbeat: std::sync::atomic::AtomicBool,
     pub block_heartbeat: std::sync::atomic::AtomicBool,
-    pub block_watchdog_start: std::sync::atomic::AtomicBool,
-    pub watchdog_start_reached: TestNotify,
-    pub watchdog_start_release: TestNotify,
     pub watchdog_started: TestNotify,
     pub heartbeat_finished: TestNotify,
     pub heartbeat_reached: TestNotify,
@@ -237,9 +234,6 @@ impl Default for ModelTurnAdmissionTestHooks {
             heartbeat_identities: std::sync::Mutex::new(Vec::new()),
             fail_heartbeat: std::sync::atomic::AtomicBool::new(false),
             block_heartbeat: std::sync::atomic::AtomicBool::new(false),
-            block_watchdog_start: std::sync::atomic::AtomicBool::new(false),
-            watchdog_start_reached: TestNotify::new(),
-            watchdog_start_release: TestNotify::new(),
             watchdog_started: TestNotify::new(),
             heartbeat_finished: TestNotify::new(),
             heartbeat_reached: TestNotify::new(),
@@ -513,15 +507,6 @@ impl ModelTurnAdmissionCoordinator {
             hooks.heartbeat_finished.notify_waiters();
         }
         result
-    }
-    pub(crate) async fn watchdog_start_gate(&self) {
-        #[cfg(test)]
-        if let Some(hooks) = &self.test_hooks
-            && hooks.block_watchdog_start.load(Ordering::Acquire)
-        {
-            hooks.watchdog_start_reached.notify_waiters();
-            hooks.watchdog_start_release.notified().await;
-        }
     }
     pub(crate) fn watchdog_started(&self) {
         #[cfg(test)]
