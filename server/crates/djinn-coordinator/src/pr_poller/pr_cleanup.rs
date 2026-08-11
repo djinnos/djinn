@@ -465,6 +465,9 @@ fn normalize_branch_name(branch: &str) -> &str {
 
 impl CoordinatorActor {
     pub(crate) async fn cleanup_pr_and_branch_on_close(&self, task: &Task, close_kind: CloseKind) {
+        if !self.task_pr_handling_is_eligible(task).await {
+            return;
+        }
         let Some(pr_url) = task
             .pr_url
             .as_deref()

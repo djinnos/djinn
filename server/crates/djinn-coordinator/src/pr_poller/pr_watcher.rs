@@ -27,22 +27,20 @@ impl CoordinatorActor {
             }
         };
 
-        let tasks_with_pr: Vec<_> = pr_draft_tasks
-            .into_iter()
-            .filter(|t| t.pr_url.is_some())
-            .collect();
-
-        if tasks_with_pr.is_empty() {
+        if pr_draft_tasks.is_empty() {
             return;
         }
 
         tracing::debug!(
-            count = tasks_with_pr.len(),
+            count = pr_draft_tasks.len(),
             "PR poller: checking {} pr_draft task(s)",
-            tasks_with_pr.len()
+            pr_draft_tasks.len()
         );
 
-        for task in tasks_with_pr {
+        for task in pr_draft_tasks {
+            if !self.task_pr_handling_is_eligible(&task).await {
+                continue;
+            }
             // ── Minimum-age guard ───────────────────────────────────────────
             // Skip tasks that just entered pr_draft — GitHub needs a few
             // seconds to register workflow check-runs for the new commit.
@@ -781,22 +779,20 @@ impl CoordinatorActor {
             }
         };
 
-        let tasks_with_pr: Vec<_> = review_tasks
-            .into_iter()
-            .filter(|t| t.pr_url.is_some())
-            .collect();
-
-        if tasks_with_pr.is_empty() {
+        if review_tasks.is_empty() {
             return;
         }
 
         tracing::debug!(
-            count = tasks_with_pr.len(),
+            count = review_tasks.len(),
             "PR poller: checking {} needs_task_review task(s) for review-stuck CI",
-            tasks_with_pr.len()
+            review_tasks.len()
         );
 
-        for task in tasks_with_pr {
+        for task in review_tasks {
+            if !self.task_pr_handling_is_eligible(&task).await {
+                continue;
+            }
             let Some(pr_url) = task.pr_url.as_deref() else {
                 tracing::warn!(
                     task_id = %task.short_id,
