@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::SessionFailureCause;
-use djinn_provider::github_api::GitHubApiClient;
 use regex::Regex;
 
 /// How long a `task_run` may stay in `running` without an `ended_at` before
@@ -415,9 +414,10 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
             }
         };
 
-        let github = GitHubApiClient::for_installation(installation_id);
+        let github = crate::pr_poller::installation::installation_client(installation_id);
 
         // Fetch all open PRs for this repository.
+        crate::direct_delivery::observe_boundary_operation("task_pr_stale_cleanup");
         let open_prs = match github
             .list_open_pulls(&project.github_owner, &project.github_repo)
             .await
