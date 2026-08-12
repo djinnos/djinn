@@ -263,7 +263,10 @@ async fn resolve_planned_routes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use djinn_db::{Database, ModelTurnBucketDebit, ModelTurnBucketKind};
+    use djinn_db::{
+        Database, ModelTurnBucketDebit, ModelTurnBucketKind,
+        repositories::test_support::seed_scoped_model_turn_admission_fixture,
+    };
     use djinn_provider::{
         ProviderAttemptAbortHandleV1, ProviderAttemptAbortResultV1, ProviderAttemptLossV1,
         ProviderAttemptRouteCoverageV1, ProviderAttemptScopeV1, ProviderAttemptTerminalV1,
@@ -308,14 +311,16 @@ mod tests {
         }
     }
     async fn seed(db: &Database, credential: &str, provider: &str, model: &str) -> i64 {
-        db.ensure_initialized().await.expect("initialize");
-        sqlx::query_scalar::<_, i64>("INSERT INTO model_turn_pools (credential_id, provider_id, model_id, phase, identity_state, capability_state, learned_concurrency, in_flight) VALUES ($1, $2, $3, 'shadow', 'eligible', 'supported', 1, 0) RETURNING id")
-            .bind(credential)
-            .bind(provider)
-            .bind(model)
-            .fetch_one(db.pool())
-            .await
-            .expect("seed")
+        seed_scoped_model_turn_admission_fixture(
+            db,
+            credential,
+            provider,
+            model,
+            "shadow",
+            "supported",
+            1,
+        )
+        .await
     }
     #[tokio::test]
     async fn denominator_comes_only_from_live_slots_and_resolved_routes() {

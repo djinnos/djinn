@@ -95,10 +95,11 @@ pub async fn seed_scoped_model_turn_admission_fixture(
     db.ensure_initialized().await.unwrap();
     sqlx::query(
         "INSERT INTO credentials (id, provider_id, key_name, encrypted_value) \
-         VALUES ($1, $2, 'model-turn-admission-fixture', decode('00', 'hex'))",
+         VALUES ($1, $2, $3, decode('00', 'hex'))",
     )
     .bind(credential_id)
     .bind(provider_id)
+    .bind(format!("model-turn-admission-fixture-{credential_id}"))
     .execute(db.pool())
     .await
     .unwrap();
