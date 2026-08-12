@@ -15,6 +15,7 @@ use djinn_provider::{ProviderAttemptPlanV1, ProviderOutcomeV1};
 use djinn_slot::model_turn_capability::{
     ModelTurnCapabilityCoverageV2, ModelTurnCapabilityReportV2,
 };
+use sha2::{Digest, Sha256};
 
 use crate::CoordinatorActor;
 
@@ -65,23 +66,57 @@ impl CoordinatorActor {
 }
 
 /// Persist B2 evidence only if it exact-joined the coordinator-owned expected
-/// denominator. The repository verifies pool identity and route labels again.
+/// denominator. Covered reports become positive capability heartbeats; every
+/// joined report is retained as bounded heartbeat-stage evidence, with
+/// `Missing` representing an explicitly uncovered route.
+///
+/// This retains negative capability evidence without treating an uncovered
+/// report as an indistinguishable positive heartbeat. The repository verifies
+/// pool identity and route labels again.
 pub async fn persist_joined_capability_reports_v1(
     repository: &ModelTurnAdmissionRepository,
     projection: &ExpectedAttemptPathProjectionV1,
 ) -> djinn_db::Result<()> {
     for joined in &projection.joined_reports {
-        repository
-            .record_capability_heartbeat(ModelTurnCapabilityHeartbeatInput {
-                pool_id: joined.expected_path.pool_id,
-                slot_pod_uid: joined.expected_path.slot_pod_uid.clone(),
-                deployment_revision: joined.expected_path.deployment_revision.clone(),
-                provider_id: joined.expected_path.provider.clone(),
-                model_id: joined.expected_path.model_scope.clone(),
-            })
-            .await?;
+        let outcome = match joined.coverage {
+            ModelTurnCapabilityCoverageV2::Covered => {
+                repository
+                    .record_capability_heartbeat(ModelTurnCapabilityHeartbeatInput {
+                        pool_id: joined.expected_path.pool_id,
+                        slot_pod_uid: joined.expected_path.slot_pod_uid.clone(),
+                        deployment_revision: joined.expected_path.deployment_revision.clone(),
+                        provider_id: joined.expected_path.provider.clone(),
+                        model_id: joined.expected_path.model_scope.clone(),
+                    })
+                    .await?;
+                ModelTurnPhaseCEvidenceOutcome::Recorded
+            }
+            ModelTurnCapabilityCoverageV2::Uncovered => ModelTurnPhaseCEvidenceOutcome::Missing,
+        };
+        persist_expected_path_evidence_v1(
+            repository,
+            &joined.expected_path,
+            capability_report_fingerprint(&joined.expected_path),
+            ModelTurnPhaseCEvidenceStage::Heartbeat,
+            outcome,
+        )
+        .await?;
     }
     Ok(())
+}
+
+fn capability_report_fingerprint(expected_path: &ExpectedAttemptPathV1) -> String {
+    let mut digest = Sha256::new();
+    for value in [
+        &expected_path.slot_pod_uid,
+        &expected_path.deployment_revision,
+        &expected_path.provider,
+        &expected_path.model_scope,
+    ] {
+        digest.update(value.as_bytes());
+        digest.update([0]);
+    }
+    format!("sha256:{:x}", digest.finalize())
 }
 
 /// Persist any bounded Phase-C decision, dispatch, heartbeat, provider-outcome,
@@ -228,7 +263,8 @@ mod tests {
     use async_trait::async_trait;
     use djinn_db::{Database, ModelTurnBucketDebit, ModelTurnBucketKind};
     use djinn_provider::{
-        ProviderAttemptAbortHandleV1, ProviderAttemptRouteCoverageV1, ProviderAttemptScopeV1,
+        ProviderAttemptAbortHandleV1, ProviderAttemptAbortResultV1, ProviderAttemptLossV1,
+        ProviderAttemptRouteCoverageV1, ProviderAttemptScopeV1, ProviderAttemptTerminalV1,
         ProviderCredentialRecordScopeV1, ProviderOutputReservationSourceV1,
     };
     use std::collections::BTreeMap;
@@ -327,7 +363,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn reports_are_exact_evidence_only_and_persist_resolved_pool() {
+    async fn reports_preserve_coverage_and_persist_complete_evidence_surface() {
         let db = Database::ephemeral().await.expect("db");
         let pool_id = seed(&db, "credential-a", "provider", "model").await;
         let repository = ModelTurnAdmissionRepository::new(db);
@@ -338,7 +374,13 @@ mod tests {
             model_scope: "model".into(),
             coverage: ModelTurnCapabilityCoverageV2::Covered,
         };
-        let mut reports = vec![report.clone()];
+        let mut reports = vec![
+            report.clone(),
+            ModelTurnCapabilityReportV2 {
+                coverage: ModelTurnCapabilityCoverageV2::Uncovered,
+                ..report.clone()
+            },
+        ];
         for mismatch in [
             ModelTurnCapabilityReportV2 {
                 slot_pod_uid: "other-slot".into(),
@@ -368,7 +410,7 @@ mod tests {
         .await
         .expect("projection");
         assert_eq!(projection.expected_paths.len(), 1);
-        assert_eq!(projection.joined_reports.len(), 1);
+        assert_eq!(projection.joined_reports.len(), 2);
         assert_eq!(projection.joined_reports[0].expected_path.pool_id, pool_id);
         persist_joined_capability_reports_v1(&repository, &projection)
             .await
@@ -379,7 +421,67 @@ mod tests {
                 .await
                 .expect("read")
                 .len(),
-            1
+            1,
+            "only covered reports are positive capability heartbeats"
         );
+        let path = &projection.expected_paths[0];
+        let fingerprint = format!("sha256:{}", "a".repeat(64));
+        for stage in [
+            ModelTurnPhaseCEvidenceStage::Decision,
+            ModelTurnPhaseCEvidenceStage::Dispatch,
+            ModelTurnPhaseCEvidenceStage::Reconcile,
+        ] {
+            persist_expected_path_evidence_v1(
+                &repository,
+                path,
+                fingerprint.clone(),
+                stage,
+                ModelTurnPhaseCEvidenceOutcome::Recorded,
+            )
+            .await
+            .expect("stage persists");
+        }
+        persist_provider_outcome_v1(
+            &repository,
+            path,
+            fingerprint,
+            &ProviderOutcomeV1 {
+                terminal: ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Transport),
+                authoritative_usage: None,
+                observation: None,
+                abort: ProviderAttemptAbortResultV1::NotRequested,
+                token_emission: Default::default(),
+            },
+        )
+        .await
+        .expect("provider outcome persists");
+        let evidence = repository
+            .recent_phase_c_evidence(pool_id, 8)
+            .await
+            .expect("read evidence");
+        assert_eq!(evidence.len(), 6);
+        assert!(evidence.iter().any(|row| {
+            row.stage == "heartbeat" && row.outcome == "recorded" && row.provider_id == "provider"
+        }));
+        assert!(evidence.iter().any(|row| {
+            row.stage == "heartbeat" && row.outcome == "missing" && row.model_id == "model"
+        }));
+        assert!(
+            evidence
+                .iter()
+                .any(|row| { row.stage == "provider_outcome" && row.outcome == "failed" })
+        );
+        for stage in [
+            "decision",
+            "dispatch",
+            "heartbeat",
+            "provider_outcome",
+            "reconcile",
+        ] {
+            assert!(
+                evidence.iter().any(|row| row.stage == stage),
+                "{stage} is consumable by the next Phase-C window"
+            );
+        }
     }
 }
