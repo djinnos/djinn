@@ -185,7 +185,7 @@ async fn task_pr_cleanup_is_eligible(
 
 // ─── Stale-resource sweep ────────────────────────────────────────────────────
 
-pub(super) async fn sweep_stale_resources(
+pub(crate) async fn sweep_stale_resources(
     db: &djinn_db::Database,
     app_state: &crate::context::CoordinatorContext,
 ) {
