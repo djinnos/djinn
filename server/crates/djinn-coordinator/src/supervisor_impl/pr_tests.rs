@@ -745,6 +745,18 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
             })
             .await
             .unwrap();
+        // Snapshot exact ownership while the epoch contract is readable. The
+        // missing/unknown fixtures intentionally make epoch-gated repositories
+        // unavailable after their mutation below.
+        let task = tasks.get(&task.id).await.unwrap().unwrap();
+        let before_task = task.clone();
+        let before_attempt = attempts.get("a").await.unwrap().unwrap();
+        let before_ledger = tasks
+            .latest_delivery_for_attempt("a", &task.id)
+            .await
+            .unwrap();
+        let before_counts =
+            djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await;
         match fixture {
             Fixture::Disabled => {
                 djinn_db::test_support::disable_direct_delivery_epoch_for_test(&db).await
@@ -785,19 +797,9 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
             cancel: CancellationToken::new(),
             provider_override: None,
         };
-        let task = tasks.get(&task.id).await.unwrap().unwrap();
-        let before_task = task.clone();
-        let before_attempt = attempts.get("a").await.unwrap().unwrap();
-        let before_ledger = tasks
-            .latest_delivery_for_attempt("a", &task.id)
-            .await
-            .unwrap();
-        let before_counts =
-            djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await;
         let before_epoch = DirectDeliveryCapabilityRepository::new(db.clone())
             .probe()
-            .await
-            .unwrap();
+            .await;
         clear_boundary_operations();
         let outcome = supervisor_pr_open(&spec, &task, &callbacks).await;
         let operations = take_boundary_operations();
@@ -820,6 +822,18 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
             );
         }
         let after_task = tasks.get(&task.id).await.unwrap().unwrap();
+        let after_epoch = DirectDeliveryCapabilityRepository::new(db.clone())
+            .probe()
+            .await;
+        assert_eq!(
+            after_epoch, before_epoch,
+            "supervisor must preserve the exact readable or fail-closed epoch probe"
+        );
+        if matches!(fixture, Fixture::MissingContract | Fixture::UnknownContract) {
+            // Restore only the test epoch state so the gated repositories can
+            // reload and compare the pre-existing ownership rows exactly.
+            djinn_db::test_support::restore_active_direct_delivery_epoch_for_test(&db).await;
+        }
         let after_attempt = attempts.get("a").await.unwrap().unwrap();
         let after_ledger = tasks
             .latest_delivery_for_attempt("a", &task.id)
@@ -827,10 +841,6 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
             .unwrap();
         let after_counts =
             djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await;
-        let after_epoch = DirectDeliveryCapabilityRepository::new(db.clone())
-            .probe()
-            .await
-            .unwrap();
         assert_eq!(
             after_attempt, before_attempt,
             "attempt row and exact PR identity must remain unchanged"
@@ -842,10 +852,6 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
         assert_eq!(
             after_counts, before_counts,
             "supervisor must not create attempts or ledger rows"
-        );
-        assert_eq!(
-            after_epoch, before_epoch,
-            "supervisor must not mutate epoch activation"
         );
         assert_eq!(after_attempt.proposal_pr_number, Some(314));
         assert_eq!(

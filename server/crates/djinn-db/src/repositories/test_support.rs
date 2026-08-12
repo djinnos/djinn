@@ -111,6 +111,20 @@ pub async fn remove_direct_delivery_epoch_for_test(db: &Database) {
         .expect("failed to remove direct-delivery test epoch");
 }
 
+/// Restore the readable active epoch after a focused fail-closed fixture.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn restore_active_direct_delivery_epoch_for_test(db: &Database) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "INSERT INTO direct_delivery_epochs (name, state, generation) \
+         VALUES ('direct_delivery_v1', 'active', 1) \
+         ON CONFLICT (name) DO UPDATE SET state = 'active', generation = 1",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to restore active direct-delivery test epoch");
+}
+
 /// Persist an unknown epoch state after dropping the shipped check constraint.
 /// **Not for production use.** Panics on SQL errors.
 pub async fn seed_unknown_direct_delivery_epoch_for_test(db: &Database) {
