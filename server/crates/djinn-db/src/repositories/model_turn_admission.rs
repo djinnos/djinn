@@ -329,6 +329,28 @@ impl ModelTurnDecisionDiagnostic {
     }
 }
 
+/// Slot-bound, route-qualified report. It contains no request, lease, credential, or account identifier.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelTurnCapabilityHeartbeatInput {
+    pub pool_id: i64,
+    pub slot_pod_uid: String,
+    pub deployment_revision: String,
+    pub provider_id: String,
+    pub model_id: String,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelTurnPhaseCEvidenceStage { Decision, Dispatch, Heartbeat, ProviderOutcome, Reconcile }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelTurnPhaseCEvidenceOutcome { Recorded, Succeeded, Failed, Missing }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelTurnPhaseCEvidenceInput {
+    pub pool_id: i64, pub slot_pod_uid: String, pub deployment_revision: String,
+    pub provider_id: String, pub model_id: String, pub attempt_fingerprint: String,
+    pub stage: ModelTurnPhaseCEvidenceStage, pub outcome: ModelTurnPhaseCEvidenceOutcome,
+}
+
 /// Durable repository surface for the additive v1 schema.
 #[derive(Clone)]
 pub struct ModelTurnAdmissionRepository {
@@ -415,6 +437,42 @@ impl ModelTurnAdmissionRepository {
             .bind(input.diagnostic.map(ModelTurnDecisionDiagnostic::code))
             .execute(self.db.pool()).await?;
         Ok(())
+    }
+
+    /// Persist only a live slot identity after deriving route labels from its admitted pool.
+    pub async fn record_capability_heartbeat(&self, input: ModelTurnCapabilityHeartbeatInput) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        if !valid_phase_c_identity(input.pool_id, &input.slot_pod_uid, &input.deployment_revision, &input.provider_id, &input.model_id) { return invalid_phase_c(); }
+        let mut tx = self.db.pool().begin().await?;
+        let result = sqlx::query("INSERT INTO model_turn_capability_heartbeats (pool_id, slot_pod_uid, deployment_revision, provider_id, model_id) SELECT id, $2, $3, provider_id, model_id FROM model_turn_pools WHERE id = $1 AND provider_id = $4 AND model_id = $5 ON CONFLICT (pool_id, slot_pod_uid, deployment_revision) DO UPDATE SET heartbeat_at = now(), provider_id = EXCLUDED.provider_id, model_id = EXCLUDED.model_id")
+            .bind(input.pool_id).bind(&input.slot_pod_uid).bind(&input.deployment_revision).bind(&input.provider_id).bind(&input.model_id).execute(&mut *tx).await?;
+        if result.rows_affected() != 1 { return invalid_phase_c(); }
+        tx.commit().await?; Ok(())
+    }
+
+    /// Read the bounded, route-qualified heartbeat projection for coverage windows.
+    pub async fn recent_capability_heartbeats(&self, pool_id: i64, limit: i64) -> Result<Vec<(String, String, String, String, String)>> {
+        self.db.ensure_initialized().await?;
+        sqlx::query_as("SELECT slot_pod_uid, deployment_revision, provider_id, model_id, heartbeat_at::text FROM model_turn_capability_heartbeats WHERE pool_id = $1 ORDER BY heartbeat_at DESC LIMIT $2")
+            .bind(pool_id).bind(limit.clamp(1, 256)).fetch_all(self.db.pool()).await.map_err(Into::into)
+    }
+
+    /// Persist a closed-vocabulary attempt-chain edge only for the exact admitted route.
+    pub async fn record_phase_c_evidence(&self, input: ModelTurnPhaseCEvidenceInput) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        if !valid_phase_c_identity(input.pool_id, &input.slot_pod_uid, &input.deployment_revision, &input.provider_id, &input.model_id) || !is_sha256_fingerprint(&input.attempt_fingerprint) { return invalid_phase_c(); }
+        let mut tx = self.db.pool().begin().await?;
+        let result = sqlx::query("INSERT INTO model_turn_phase_c_evidence (pool_id, slot_pod_uid, deployment_revision, provider_id, model_id, attempt_fingerprint, stage, outcome) SELECT id, $2, $3, provider_id, model_id, $6, $7, $8 FROM model_turn_pools WHERE id = $1 AND provider_id = $4 AND model_id = $5")
+            .bind(input.pool_id).bind(&input.slot_pod_uid).bind(&input.deployment_revision).bind(&input.provider_id).bind(&input.model_id).bind(&input.attempt_fingerprint).bind(phase_c_stage_name(input.stage)).bind(phase_c_outcome_name(input.outcome)).execute(&mut *tx).await?;
+        if result.rows_affected() != 1 { return invalid_phase_c(); }
+        tx.commit().await?; Ok(())
+    }
+
+    /// Read recent bounded attempt evidence for a later aligned controller window.
+    pub async fn recent_phase_c_evidence(&self, pool_id: i64, limit: i64) -> Result<Vec<(String, String, String, String, String, String, String)>> {
+        self.db.ensure_initialized().await?;
+        sqlx::query_as("SELECT slot_pod_uid, deployment_revision, provider_id, model_id, attempt_fingerprint, stage, outcome FROM model_turn_phase_c_evidence WHERE pool_id = $1 ORDER BY recorded_at DESC, id DESC LIMIT $2")
+            .bind(pool_id).bind(limit.clamp(1, 256)).fetch_all(self.db.pool()).await.map_err(Into::into)
     }
 
     /// Commit the pre-send fence before a caller sends provider network bytes.
@@ -921,8 +979,14 @@ fn decision_kind_name(kind: ModelTurnDecisionKind) -> &'static str {
 fn is_sha256_fingerprint(value: &str) -> bool {
     value.len() == 71
         && value.starts_with("sha256:")
-        && value.as_bytes()[7..].iter().all(u8::is_ascii_hexdigit)
+        && value.as_bytes()[7..].iter().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
 }
+fn valid_phase_c_identity(pool_id: i64, slot: &str, revision: &str, provider: &str, model: &str) -> bool {
+    pool_id > 0 && !slot.trim().is_empty() && slot.len() <= 255 && !revision.trim().is_empty() && revision.len() <= 255 && !provider.trim().is_empty() && provider.len() <= 191 && !model.trim().is_empty() && model.len() <= 191
+}
+fn invalid_phase_c<T>() -> Result<T> { Err(crate::Error::InvalidData("invalid Phase-C evidence".to_owned())) }
+fn phase_c_stage_name(stage: ModelTurnPhaseCEvidenceStage) -> &'static str { match stage { ModelTurnPhaseCEvidenceStage::Decision => "decision", ModelTurnPhaseCEvidenceStage::Dispatch => "dispatch", ModelTurnPhaseCEvidenceStage::Heartbeat => "heartbeat", ModelTurnPhaseCEvidenceStage::ProviderOutcome => "provider_outcome", ModelTurnPhaseCEvidenceStage::Reconcile => "reconcile" } }
+fn phase_c_outcome_name(outcome: ModelTurnPhaseCEvidenceOutcome) -> &'static str { match outcome { ModelTurnPhaseCEvidenceOutcome::Recorded => "recorded", ModelTurnPhaseCEvidenceOutcome::Succeeded => "succeeded", ModelTurnPhaseCEvidenceOutcome::Failed => "failed", ModelTurnPhaseCEvidenceOutcome::Missing => "missing" } }
 fn canonical_debits(debits: &[ModelTurnBucketDebit]) -> Result<BTreeMap<ModelTurnBucketKind, i64>> {
     let mut result = BTreeMap::new();
     for debit in debits {
@@ -1067,6 +1131,14 @@ mod tests {
     #[test]
     fn schema_version_is_v1() {
         assert_eq!(MODEL_TURN_ADMISSION_SCHEMA_VERSION, 1);
+    }
+
+    #[test]
+    fn fingerprints_match_the_lowercase_sql_check() {
+        let valid = format!("sha256:{}", "a".repeat(64));
+        assert!(is_sha256_fingerprint(&valid));
+        assert!(!is_sha256_fingerprint(&valid.to_uppercase()));
+        assert!(!is_sha256_fingerprint("sha256:abc"));
     }
 
     #[test]

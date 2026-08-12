@@ -66,6 +66,8 @@ impl NamespaceInventory {
                         uid: Some(format!("uid-{name}")),
                         labels: Default::default(),
                         terminal: false,
+                        ready: false,
+                        deployment_revision: None,
                         images: Vec::new(),
                         commands: Vec::new(),
                     })

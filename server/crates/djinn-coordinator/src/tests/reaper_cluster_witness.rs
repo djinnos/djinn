@@ -66,6 +66,8 @@ impl NamespaceInventory {
                 uid: Some(format!("uid-{task_run_id}")),
                 labels: Default::default(),
                 terminal,
+                ready: false,
+                deployment_revision: None,
                 images: Vec::new(),
                 commands: Vec::new(),
             }],
