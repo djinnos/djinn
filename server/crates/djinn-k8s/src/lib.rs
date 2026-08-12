@@ -97,8 +97,9 @@ pub use scip_schedule::{
 pub use token_review::TokenReviewer;
 pub use warm_job::{build_leased_warm_job, build_warm_job, stamp_warm_attempt, warm_job_name};
 pub use workload_inventory::{
-    JOB_CONDITION_COMPLETE, JOB_CONDITION_FAILED, KubeWorkloadInventory, LABEL_ADMISSION_DOMAIN,
-    LABEL_ADMISSION_GENERATION, LABEL_ADMISSION_WORK_ID, ObjectPresence, UidGetResult,
+    ANNOTATION_DEPLOYMENT_REVISION, JOB_CONDITION_COMPLETE, JOB_CONDITION_FAILED,
+    KubeWorkloadInventory, LABEL_ADMISSION_DOMAIN, LABEL_ADMISSION_GENERATION,
+    LABEL_ADMISSION_WORK_ID, LABEL_POD_TEMPLATE_HASH, ObjectPresence, UidGetResult,
     WorkloadInventory, WorkloadObjectKind, WorkloadRecord, has_canonical_warm_signature,
     job_reached_terminal_condition, terminal_job_condition,
 };

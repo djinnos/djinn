@@ -10,9 +10,11 @@ use std::sync::Arc;
 use djinn_db::{
     Database, ModelTurnAcquireInput, ModelTurnAcquireOutcome, ModelTurnAdmissionRejection,
     ModelTurnAdmissionRepository, ModelTurnAdmissionWait, ModelTurnAuthoritativeUsage,
-    ModelTurnBucketDebit, ModelTurnBucketKind, ModelTurnIdentityState, ModelTurnLeaseExpiryInput,
-    ModelTurnLeaseLifecycle, ModelTurnLeaseMutationOutcome, ModelTurnLeaseReconciliationInput,
-    ModelTurnLeaseTerminalOutcome,
+    ModelTurnBucketDebit, ModelTurnBucketKind, ModelTurnCapabilityHeartbeatInput,
+    ModelTurnIdentityState, ModelTurnLeaseExpiryInput, ModelTurnLeaseLifecycle,
+    ModelTurnLeaseMutationOutcome, ModelTurnLeaseReconciliationInput,
+    ModelTurnLeaseTerminalOutcome, ModelTurnPhaseCEvidenceInput, ModelTurnPhaseCEvidenceOutcome,
+    ModelTurnPhaseCEvidenceStage,
 };
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Executor};
@@ -602,4 +604,108 @@ async fn readiness_is_inert_and_telemetry_is_bounded_and_opaque() {
     let oversized = "x".repeat(1025);
     assert!(sqlx::query("INSERT INTO model_turn_observations (pool_id, sequence, kind, detail) VALUES ($1, 1000, 'usage', $2)")
         .bind(pool_id).bind(oversized).execute(db.pool()).await.is_err(), "schema rejects unbounded diagnostics");
+}
+
+#[tokio::test]
+async fn phase_c_evidence_migration_enforces_route_fingerprint_vocabulary_and_retention() {
+    let db = Database::ephemeral()
+        .await
+        .expect("migration-backed fixture database");
+    let pool_id = seed_pool(&db, "phase-c", 1).await;
+    let repository = ModelTurnAdmissionRepository::new(db.clone());
+    let provider = "fixture-provider";
+    let model = "fixture-model-phase-c";
+    let fingerprint = format!("sha256:{}", "a".repeat(64));
+    let heartbeat = ModelTurnCapabilityHeartbeatInput {
+        pool_id,
+        slot_pod_uid: "slot-0".to_owned(),
+        deployment_revision: "rev-1".to_owned(),
+        provider_id: provider.to_owned(),
+        model_id: model.to_owned(),
+    };
+    repository
+        .record_capability_heartbeat(heartbeat.clone())
+        .await
+        .expect("valid heartbeat persists");
+    let heartbeats = repository
+        .recent_capability_heartbeats(pool_id, 8)
+        .await
+        .expect("heartbeat readback");
+    assert_eq!(heartbeats.len(), 1);
+    assert_eq!(heartbeats[0].2, provider);
+    assert_eq!(heartbeats[0].3, model);
+    let evidence = ModelTurnPhaseCEvidenceInput {
+        pool_id,
+        slot_pod_uid: "slot-0".to_owned(),
+        deployment_revision: "rev-1".to_owned(),
+        provider_id: provider.to_owned(),
+        model_id: model.to_owned(),
+        attempt_fingerprint: fingerprint.clone(),
+        stage: ModelTurnPhaseCEvidenceStage::Decision,
+        outcome: ModelTurnPhaseCEvidenceOutcome::Recorded,
+    };
+    repository
+        .record_phase_c_evidence(evidence.clone())
+        .await
+        .expect("canonical fingerprint persists");
+    let rows = repository
+        .recent_phase_c_evidence(pool_id, 8)
+        .await
+        .expect("evidence readback");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].attempt_fingerprint, fingerprint);
+    assert!(!rows[0].recorded_at.is_empty());
+    let start: String = sqlx::query_scalar("SELECT (now() - interval '1 minute')::text")
+        .fetch_one(db.pool())
+        .await
+        .expect("start");
+    let end: String = sqlx::query_scalar("SELECT (now() + interval '1 minute')::text")
+        .fetch_one(db.pool())
+        .await
+        .expect("end");
+    assert_eq!(
+        repository
+            .phase_c_evidence_in_window(pool_id, &start, &end, 8)
+            .await
+            .expect("window read")
+            .len(),
+        1
+    );
+    let mut mismatch = heartbeat.clone();
+    mismatch.provider_id = "attacker-provider".to_owned();
+    assert!(
+        repository
+            .record_capability_heartbeat(mismatch)
+            .await
+            .is_err()
+    );
+    let mut unknown = heartbeat.clone();
+    unknown.pool_id = pool_id + 99_999;
+    assert!(
+        repository
+            .record_capability_heartbeat(unknown)
+            .await
+            .is_err()
+    );
+    let mut malformed = evidence.clone();
+    malformed.attempt_fingerprint = "sha256:ABC".to_owned();
+    assert!(repository.record_phase_c_evidence(malformed).await.is_err());
+    assert!(sqlx::query("INSERT INTO model_turn_phase_c_evidence (pool_id, slot_pod_uid, deployment_revision, provider_id, model_id, attempt_fingerprint, stage, outcome) VALUES ($1, 'slot', 'rev', $2, $3, $4, 'unrestricted', 'attacker')").bind(pool_id).bind(provider).bind(model).bind(format!("sha256:{}", "b".repeat(64))).execute(db.pool()).await.is_err());
+    for index in 0..257 {
+        let mut item = evidence.clone();
+        item.slot_pod_uid = format!("evidence-slot-{index}");
+        item.attempt_fingerprint = format!("sha256:{index:064x}");
+        repository
+            .record_phase_c_evidence(item)
+            .await
+            .expect("bounded evidence write");
+        let mut item = heartbeat.clone();
+        item.slot_pod_uid = format!("heartbeat-slot-{index}");
+        repository
+            .record_capability_heartbeat(item)
+            .await
+            .expect("bounded heartbeat write");
+    }
+    let counts: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM model_turn_phase_c_evidence WHERE pool_id = $1), (SELECT count(*) FROM model_turn_capability_heartbeats WHERE pool_id = $1)").bind(pool_id).fetch_one(db.pool()).await.expect("retention count");
+    assert_eq!(counts, (256, 256));
 }

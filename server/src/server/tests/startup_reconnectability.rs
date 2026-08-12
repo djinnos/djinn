@@ -790,6 +790,8 @@ fn job(run_id: &str, terminal: bool) -> WorkloadRecord {
         uid: None,
         labels: BTreeMap::new(),
         terminal,
+        ready: false,
+        deployment_revision: None,
         images: Vec::new(),
         commands: Vec::new(),
     }

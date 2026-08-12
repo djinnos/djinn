@@ -26,6 +26,8 @@ use std::time::Duration;
 pub const LABEL_ADMISSION_DOMAIN: &str = "djinn.app/admission-domain";
 pub const LABEL_ADMISSION_WORK_ID: &str = "djinn.app/admission-work-id";
 pub const LABEL_ADMISSION_GENERATION: &str = "djinn.app/admission-generation";
+pub const ANNOTATION_DEPLOYMENT_REVISION: &str = "deployment.kubernetes.io/revision";
+pub const LABEL_POD_TEMPLATE_HASH: &str = "pod-template-hash";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkloadObjectKind {
@@ -47,6 +49,10 @@ pub struct WorkloadRecord {
     /// (3600s) after it completes, so a reader that treats mere presence as
     /// liveness sees a live owner for an hour after the owner died.
     pub terminal: bool,
+    /// Only concrete non-terminal Pods may be projected as Ready execution slots.
+    pub ready: bool,
+    /// Rollout identity used with the stable Pod UID for evidence joins.
+    pub deployment_revision: Option<String>,
     pub images: Vec<String>,
     pub commands: Vec<String>,
 }
@@ -231,17 +237,74 @@ fn job_record(j: Job) -> Option<WorkloadRecord> {
         uid: j.metadata.uid,
         labels: j.metadata.labels.unwrap_or_default(),
         terminal,
+        ready: false,
+        deployment_revision: None,
         images,
         commands,
     })
 }
+
+fn pod_is_terminal(pod: &Pod) -> bool {
+    matches!(
+        pod.status
+            .as_ref()
+            .and_then(|status| status.phase.as_deref()),
+        Some("Succeeded" | "Failed")
+    )
+}
+
+fn pod_is_ready(pod: &Pod) -> bool {
+    !pod_is_terminal(pod)
+        && pod
+            .status
+            .as_ref()
+            .and_then(|status| status.conditions.as_ref())
+            .is_some_and(|conditions| {
+                conditions.iter().any(|condition| {
+                    condition.type_ == "Ready" && condition.status.eq_ignore_ascii_case("True")
+                })
+            })
+}
+
+fn pod_deployment_revision(pod: &Pod) -> Option<String> {
+    pod.metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(ANNOTATION_DEPLOYMENT_REVISION))
+        .or_else(|| {
+            pod.metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(LABEL_POD_TEMPLATE_HASH))
+        })
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+}
+
+fn pod_record(pod: Pod) -> Option<WorkloadRecord> {
+    let (images, commands) = containers(pod.spec.as_ref());
+    // Evaluate every whole-Pod projection before consuming the optional name.
+    let terminal = pod_is_terminal(&pod);
+    let ready = pod_is_ready(&pod);
+    let deployment_revision = pod_deployment_revision(&pod);
+    Some(WorkloadRecord {
+        kind: WorkloadObjectKind::Pod,
+        name: pod.metadata.name?,
+        uid: pod.metadata.uid.clone(),
+        labels: pod.metadata.labels.clone().unwrap_or_default(),
+        terminal,
+        ready,
+        deployment_revision,
+        images,
+        commands,
+    })
+}
+
 #[async_trait]
 impl WorkloadInventory for KubeWorkloadInventory {
     async fn list(&self) -> Result<Vec<WorkloadRecord>, String> {
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.namespace);
-        // Child Pods inherit the Job's admission labels. Treating both as
-        // independent workloads duplicates task identities and double-counts
-        // warm jobs, while the Job is the UID-fenced lifecycle object.
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
         let jobs = with_call_timeout(call_timeout(), "workload_inventory.list", async {
             jobs.list(&ListParams::default()).await
         })
@@ -253,7 +316,23 @@ impl WorkloadInventory for KubeWorkloadInventory {
             )
         })?
         .map_err(|e| e.to_string())?;
-        Ok(jobs.items.into_iter().filter_map(job_record).collect())
+        let pods = with_call_timeout(call_timeout(), "workload_inventory.list_pods", async {
+            pods.list(&ListParams::default()).await
+        })
+        .await
+        .ok_or_else(|| {
+            format!(
+                "workload inventory Pod LIST exceeded its {}s client-side budget",
+                call_timeout().as_secs()
+            )
+        })?
+        .map_err(|e| e.to_string())?;
+        Ok(jobs
+            .items
+            .into_iter()
+            .filter_map(job_record)
+            .chain(pods.items.into_iter().filter_map(pod_record))
+            .collect())
     }
     async fn get_uid(&self, kind: WorkloadObjectKind, name: &str, uid: &str) -> UidGetResult {
         let probe = async {
@@ -786,6 +865,73 @@ mod job_terminal_condition_tests {
             "a Complete Job is still listed; the record is what carries the fact \
              that its holder is gone"
         );
+    }
+}
+
+#[cfg(test)]
+mod pod_inventory_projection_tests {
+    use super::*;
+    use k8s_openapi::api::core::v1::{PodCondition, PodStatus};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
+    fn pod(name: &str, uid: Option<&str>, phase: &str, ready: bool, revision: Option<&str>) -> Pod {
+        let annotations = revision.map(|value| {
+            BTreeMap::from([(ANNOTATION_DEPLOYMENT_REVISION.to_owned(), value.to_owned())])
+        });
+        Pod {
+            metadata: ObjectMeta {
+                name: Some(name.to_owned()),
+                uid: uid.map(ToOwned::to_owned),
+                annotations,
+                ..Default::default()
+            },
+            status: Some(PodStatus {
+                phase: Some(phase.to_owned()),
+                conditions: Some(vec![PodCondition {
+                    type_: "Ready".to_owned(),
+                    status: if ready { "True" } else { "False" }.to_owned(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pod_fixtures_project_ready_terminal_and_identity_facts() {
+        let ready = pod_record(pod("ready", Some("pod-uid"), "Running", true, Some("42")))
+            .expect("named Pod projects");
+        assert_eq!(ready.kind, WorkloadObjectKind::Pod);
+        assert!(ready.ready);
+        assert!(!ready.terminal);
+        assert_eq!(ready.uid.as_deref(), Some("pod-uid"));
+        assert_eq!(ready.deployment_revision.as_deref(), Some("42"));
+        let unready = pod_record(pod("unready", Some("pod-2"), "Running", false, Some("42")))
+            .expect("named Pod projects");
+        assert!(!unready.ready);
+        assert!(!unready.terminal);
+        let terminal = pod_record(pod(
+            "terminal",
+            Some("pod-3"),
+            "Succeeded",
+            true,
+            Some("42"),
+        ))
+        .expect("named Pod projects");
+        assert!(
+            !terminal.ready,
+            "terminal Pods never become slot identities"
+        );
+        assert!(terminal.terminal);
+        let missing_revision = pod_record(pod("no-revision", Some("pod-4"), "Running", true, None))
+            .expect("named Pod projects");
+        assert!(missing_revision.ready);
+        assert_eq!(missing_revision.deployment_revision, None);
+        let missing_uid = pod_record(pod("no-uid", None, "Running", true, Some("42")))
+            .expect("named Pod projects");
+        assert!(missing_uid.ready);
+        assert_eq!(missing_uid.uid, None);
     }
 }
 
