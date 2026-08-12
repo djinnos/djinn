@@ -1355,17 +1355,41 @@ async fn retained_legacy_cleanup_reaches_inline_and_stale_provider_boundaries() 
 
     const INSTALLATION: u64 = 42_425;
     const URL: &str = "https://github.com/acme/widget/pull/74";
-    const SHORT_ID: &str = "retainclean";
+    const TITLE: &str = "retainclean";
     const HEAD: &str = "2222222222222222222222222222222222222222";
 
     for (active, stale) in [(false, false), (false, true), (true, false), (true, true)] {
+        let db = Database::open_in_memory().unwrap();
+        let events = EventBus::noop();
+        let epic = EpicRepository::new(db.clone(), events.clone())
+            .create("legacy cleanup", "", "", "", "", None)
+            .await
+            .unwrap();
+        let tasks = TaskRepository::new(db.clone(), events);
+        let task = tasks
+            .create(
+                &epic.id,
+                TITLE,
+                "",
+                "",
+                "task",
+                0,
+                "worker",
+                Some("approved"),
+            )
+            .await
+            .unwrap();
+        let task_branch = format!("task/{}", task.short_id);
+
         let server = MockServer::start().await;
-        let pr = serde_json::json!({"number":74,"title":"retained cleanup","state":"open","merged":false,"html_url":URL,"user":{"login":"djinn-bot[bot]","id":1},"head":{"ref":format!("task/{SHORT_ID}"),"sha":HEAD},"base":{"ref":"main","sha":"base"},"node_id":"PR_retained_cleanup"});
+        let pr = serde_json::json!({"number":74,"title":"retained cleanup","state":"open","merged":false,"html_url":URL,"user":{"login":"djinn-bot[bot]","id":1},"head":{"ref":task_branch,"sha":HEAD},"base":{"ref":"main","sha":"base"},"node_id":"PR_retained_cleanup"});
         let graphql = serde_json::json!({"data":{"repository":{"pullRequest":{"mergeStateStatus":null,"autoMergeRequest":null,"mergeQueueEntry":null,"timelineItems":{"nodes":[]},"commits":{"nodes":[]}}}}});
         if stale {
             Mock::given(method("GET"))
                 .and(path("/repos/acme/widget/pulls"))
                 .and(query_param("state", "open"))
+                .and(query_param("per_page", "100"))
+                .and(query_param("page", "1"))
                 .respond_with(
                     ResponseTemplate::new(200).set_body_json(serde_json::json!([pr.clone()])),
                 )
@@ -1399,7 +1423,7 @@ async fn retained_legacy_cleanup_reaches_inline_and_stale_provider_boundaries() 
             .await;
         Mock::given(method("GET"))
             .and(path("/repos/acme/widget/pulls"))
-            .and(query_param("base", format!("task/{SHORT_ID}")))
+            .and(query_param("base", task_branch.clone()))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
             .expect(1)
             .mount(&server)
@@ -1418,33 +1442,12 @@ async fn retained_legacy_cleanup_reaches_inline_and_stale_provider_boundaries() 
             .await;
         Mock::given(method("DELETE"))
             .and(path(format!(
-                "/repos/acme/widget/git/refs/heads/task/{SHORT_ID}"
+                "/repos/acme/widget/git/refs/heads/{task_branch}"
             )))
             .respond_with(ResponseTemplate::new(204))
             .expect(1)
             .mount(&server)
             .await;
-
-        let db = Database::open_in_memory().unwrap();
-        let events = EventBus::noop();
-        let epic = EpicRepository::new(db.clone(), events.clone())
-            .create("legacy cleanup", "", "", "", "", None)
-            .await
-            .unwrap();
-        let tasks = TaskRepository::new(db.clone(), events);
-        let task = tasks
-            .create(
-                &epic.id,
-                SHORT_ID,
-                "",
-                "",
-                "task",
-                0,
-                "worker",
-                Some("approved"),
-            )
-            .await
-            .unwrap();
         if active {
             tasks
                 .update_labels(&task.id, &format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#))
