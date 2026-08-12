@@ -246,7 +246,9 @@ fn job_record(j: Job) -> Option<WorkloadRecord> {
 
 fn pod_is_terminal(pod: &Pod) -> bool {
     matches!(
-        pod.status.as_ref().and_then(|status| status.phase.as_deref()),
+        pod.status
+            .as_ref()
+            .and_then(|status| status.phase.as_deref()),
         Some("Succeeded" | "Failed")
     )
 }
@@ -860,6 +862,73 @@ mod job_terminal_condition_tests {
             "a Complete Job is still listed; the record is what carries the fact \
              that its holder is gone"
         );
+    }
+}
+
+#[cfg(test)]
+mod pod_inventory_projection_tests {
+    use super::*;
+    use k8s_openapi::api::core::v1::{PodCondition, PodStatus};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
+    fn pod(name: &str, uid: Option<&str>, phase: &str, ready: bool, revision: Option<&str>) -> Pod {
+        let annotations = revision.map(|value| {
+            BTreeMap::from([(ANNOTATION_DEPLOYMENT_REVISION.to_owned(), value.to_owned())])
+        });
+        Pod {
+            metadata: ObjectMeta {
+                name: Some(name.to_owned()),
+                uid: uid.map(ToOwned::to_owned),
+                annotations,
+                ..Default::default()
+            },
+            status: Some(PodStatus {
+                phase: Some(phase.to_owned()),
+                conditions: Some(vec![PodCondition {
+                    type_: "Ready".to_owned(),
+                    status: if ready { "True" } else { "False" }.to_owned(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pod_fixtures_project_ready_terminal_and_identity_facts() {
+        let ready = pod_record(pod("ready", Some("pod-uid"), "Running", true, Some("42")))
+            .expect("named Pod projects");
+        assert_eq!(ready.kind, WorkloadObjectKind::Pod);
+        assert!(ready.ready);
+        assert!(!ready.terminal);
+        assert_eq!(ready.uid.as_deref(), Some("pod-uid"));
+        assert_eq!(ready.deployment_revision.as_deref(), Some("42"));
+        let unready = pod_record(pod("unready", Some("pod-2"), "Running", false, Some("42")))
+            .expect("named Pod projects");
+        assert!(!unready.ready);
+        assert!(!unready.terminal);
+        let terminal = pod_record(pod(
+            "terminal",
+            Some("pod-3"),
+            "Succeeded",
+            true,
+            Some("42"),
+        ))
+        .expect("named Pod projects");
+        assert!(
+            !terminal.ready,
+            "terminal Pods never become slot identities"
+        );
+        assert!(terminal.terminal);
+        let missing_revision = pod_record(pod("no-revision", Some("pod-4"), "Running", true, None))
+            .expect("named Pod projects");
+        assert!(missing_revision.ready);
+        assert_eq!(missing_revision.deployment_revision, None);
+        let missing_uid = pod_record(pod("no-uid", None, "Running", true, Some("42")))
+            .expect("named Pod projects");
+        assert!(missing_uid.ready);
+        assert_eq!(missing_uid.uid, None);
     }
 }
 
