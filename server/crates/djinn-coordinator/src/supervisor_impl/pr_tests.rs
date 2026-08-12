@@ -29,6 +29,15 @@ fn assert_legacy_supervisor_task_snapshot(
     after: &djinn_core::models::Task,
     expected_pr_url: &str,
 ) {
+    assert_eq!(
+        before.pr_url, None,
+        "the supervisor snapshot must begin without a task-PR identity"
+    );
+    assert_eq!(
+        after.pr_url.as_deref(),
+        Some(expected_pr_url),
+        "the only newly-owned PR identity must be the adopted task PR"
+    );
     assert_eq!(after.status, "pr_draft");
     assert_eq!(after.escalation_evidence_at, before.escalation_evidence_at);
     let mut expected = serde_json::to_value(before).unwrap();
@@ -757,6 +766,16 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
             .unwrap();
         let before_counts =
             djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await;
+        assert_eq!(
+            before_counts.build_attempts,
+            Some(1),
+            "fixture must contain exactly the seeded attempt PR owner"
+        );
+        assert_eq!(
+            before_counts.deliveries,
+            Some(0),
+            "fixture must begin with an exact empty delivery ledger"
+        );
         match fixture {
             Fixture::Disabled => {
                 djinn_db::test_support::disable_direct_delivery_epoch_for_test(&db).await
@@ -1171,6 +1190,16 @@ async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
         .await
         .unwrap();
     let before_counts = djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await;
+    assert_eq!(
+        before_counts.build_attempts,
+        Some(1),
+        "SupportedDisabled fixture must contain exactly one attempt PR identity"
+    );
+    assert_eq!(
+        before_counts.deliveries,
+        Some(0),
+        "SupportedDisabled fixture must snapshot an exact empty ledger"
+    );
     let before_epoch = DirectDeliveryCapabilityRepository::new(db.clone())
         .probe()
         .await
@@ -1505,6 +1534,16 @@ async fn supported_active_explicit_legacy_adopts_through_every_poller() {
         .await
         .unwrap();
     let before_counts = djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await;
+    assert_eq!(
+        before_counts.build_attempts,
+        Some(1),
+        "explicit-legacy fixture must contain exactly one attempt PR identity"
+    );
+    assert_eq!(
+        before_counts.deliveries,
+        Some(0),
+        "explicit-legacy fixture must snapshot an exact empty ledger"
+    );
     let before_epoch = DirectDeliveryCapabilityRepository::new(db.clone())
         .probe()
         .await
