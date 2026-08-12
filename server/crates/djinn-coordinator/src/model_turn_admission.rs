@@ -10,7 +10,7 @@ use djinn_db::{
     ModelTurnAdmissionRepository, ModelTurnCapabilityHeartbeatInput, ModelTurnPhaseCEvidenceInput,
     ModelTurnPhaseCEvidenceOutcome, ModelTurnPhaseCEvidenceStage, ModelTurnPool,
 };
-use djinn_k8s::{WorkloadInventory, WorkloadObjectKind, WorkloadRecord};
+use djinn_k8s::{WorkloadObjectKind, WorkloadRecord};
 use djinn_provider::{ProviderAttemptPlanV1, ProviderOutcomeV1};
 use djinn_slot::model_turn_capability::{
     ModelTurnCapabilityCoverageV2, ModelTurnCapabilityReportV2,
@@ -263,7 +263,6 @@ async fn resolve_planned_routes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use djinn_db::{Database, ModelTurnBucketDebit, ModelTurnBucketKind};
     use djinn_provider::{
         ProviderAttemptAbortHandleV1, ProviderAttemptAbortResultV1, ProviderAttemptLossV1,
@@ -272,25 +271,6 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
-    #[derive(Clone)]
-    struct Inventory(Vec<WorkloadRecord>);
-    #[async_trait]
-    impl WorkloadInventory for Inventory {
-        async fn list(&self) -> Result<Vec<WorkloadRecord>, String> {
-            Ok(self.0.clone())
-        }
-        async fn get_uid(
-            &self,
-            _: WorkloadObjectKind,
-            _: &str,
-            _: &str,
-        ) -> djinn_k8s::UidGetResult {
-            djinn_k8s::UidGetResult::Present
-        }
-        async fn presence(&self, _: WorkloadObjectKind, _: &str) -> djinn_k8s::ObjectPresence {
-            djinn_k8s::ObjectPresence::Absent
-        }
-    }
     fn record(
         uid: Option<&str>,
         revision: Option<&str>,
@@ -329,7 +309,13 @@ mod tests {
     }
     async fn seed(db: &Database, credential: &str, provider: &str, model: &str) -> i64 {
         db.ensure_initialized().await.expect("initialize");
-        sqlx::query("INSERT INTO model_turn_pools (credential_id, provider_id, model_id, phase, identity_state, capability_state, learned_concurrency, in_flight) VALUES ($1, $2, $3, 'shadow', 'eligible', 'supported', 1, 0) RETURNING id").bind(credential).bind(provider).bind(model).fetch_one(db.pool()).await.expect("seed")
+        sqlx::query_scalar::<_, i64>("INSERT INTO model_turn_pools (credential_id, provider_id, model_id, phase, identity_state, capability_state, learned_concurrency, in_flight) VALUES ($1, $2, $3, 'shadow', 'eligible', 'supported', 1, 0) RETURNING id")
+            .bind(credential)
+            .bind(provider)
+            .bind(model)
+            .fetch_one(db.pool())
+            .await
+            .expect("seed")
     }
     #[tokio::test]
     async fn denominator_comes_only_from_live_slots_and_resolved_routes() {
