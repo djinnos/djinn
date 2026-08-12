@@ -661,9 +661,11 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
     /// JSON comparison as a full-task snapshot.
     fn task_snapshot_except_expected_park(task: &djinn_core::models::Task) -> serde_json::Value {
         let mut task = serde_json::to_value(task).unwrap();
-        let task = task.as_object_mut().unwrap();
-        for field in ["status", "updated_at", "escalation_evidence_at"] {
-            task.remove(field);
+        {
+            let task = task.as_object_mut().unwrap();
+            for field in ["status", "updated_at", "escalation_evidence_at"] {
+                task.remove(field);
+            }
         }
         task
     }
@@ -854,7 +856,8 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
             Fixture::Direct => {
                 assert!(matches!(outcome, TaskRunOutcome::Escalated { .. }));
                 assert_eq!(
-                    after_task, before_task,
+                    serde_json::to_value(&after_task).unwrap(),
+                    serde_json::to_value(&before_task).unwrap(),
                     "direct supervisor exclusion must preserve the full task row"
                 );
                 assert_eq!(
@@ -946,7 +949,8 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
                 );
                 assert_eq!(operations, vec![BoundaryOperation::CapabilityProbe]);
                 assert_eq!(
-                    after_task, before_task,
+                    serde_json::to_value(&after_task).unwrap(),
+                    serde_json::to_value(&before_task).unwrap(),
                     "legacy eligibility must preserve the full task row"
                 );
                 if matches!(fixture, Fixture::ExplicitLegacy) {
