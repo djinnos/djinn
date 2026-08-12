@@ -1283,7 +1283,15 @@ async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
             "missing {expected:?}: {operations:?}"
         );
     }
-    assert!(!operations.contains(&BoundaryOperation::DirectAppend));
+    for forbidden in [
+        BoundaryOperation::DirectAppend,
+        BoundaryOperation::AttemptPrCreateOrAdoptRequest,
+    ] {
+        assert!(
+            !operations.contains(&forbidden),
+            "disabled retained legacy must not reach attempt ownership operation {forbidden:?}: {operations:?}"
+        );
+    }
     super::set_push_url_override_for_test(None);
     set_installation_client_base_url_for_test(None);
     cancel.cancel();
@@ -1612,6 +1620,7 @@ async fn supported_active_explicit_legacy_adopts_through_every_poller() {
     for forbidden in [
         BoundaryOperation::DirectAppend,
         BoundaryOperation::TaskPrCreate,
+        BoundaryOperation::AttemptPrCreateOrAdoptRequest,
     ] {
         assert!(
             !operations.contains(&forbidden),
