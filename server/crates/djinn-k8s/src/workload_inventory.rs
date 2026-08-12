@@ -283,15 +283,18 @@ fn pod_deployment_revision(pod: &Pod) -> Option<String> {
 
 fn pod_record(pod: Pod) -> Option<WorkloadRecord> {
     let (images, commands) = containers(pod.spec.as_ref());
+    // Evaluate every whole-Pod projection before consuming the optional name.
     let terminal = pod_is_terminal(&pod);
+    let ready = pod_is_ready(&pod);
+    let deployment_revision = pod_deployment_revision(&pod);
     Some(WorkloadRecord {
         kind: WorkloadObjectKind::Pod,
         name: pod.metadata.name?,
         uid: pod.metadata.uid.clone(),
         labels: pod.metadata.labels.clone().unwrap_or_default(),
         terminal,
-        ready: pod_is_ready(&pod),
-        deployment_revision: pod_deployment_revision(&pod),
+        ready,
+        deployment_revision,
         images,
         commands,
     })
