@@ -74,6 +74,8 @@ pub mod graph_warm_lease;
 /// arming switch and reference cap for the per-invocation cgroup CPU lease, and
 /// the engine behind the `djinn-server epoch` CLI.
 pub mod invocation_lease_control;
+/// Coordinator-owned Phase-C expected-path denominator and bounded evidence projection.
+pub mod model_turn_admission;
 pub mod output_stash;
 /// Default-disabled branch and draft-PR lifecycle for direct build attempts.
 pub mod proposal_attempt_lifecycle;

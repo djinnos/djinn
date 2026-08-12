@@ -449,6 +449,51 @@ impl ModelTurnAdmissionRepository {
         .transpose()
     }
 
+    /// Resolve an existing pool through B1's opaque credential-record scope.
+    /// The match is exact and unique, so callers cannot pick another credential
+    /// merely because it shares the provider/model labels.
+    pub async fn resolve_pool_by_credential_fingerprint(
+        &self,
+        credential_fingerprint: &str,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Result<Option<ModelTurnPool>> {
+        self.db.ensure_initialized().await?;
+        let rows: Vec<ModelTurnPoolRow> = sqlx::query_as(
+            "SELECT id, credential_id, provider_id, model_id, phase, identity_state, capability_state, learned_concurrency, in_flight FROM model_turn_pools WHERE provider_id = $1 AND model_id = $2 ORDER BY id",
+        )
+        .bind(provider_id)
+        .bind(model_id)
+        .fetch_all(self.db.pool())
+        .await?;
+        let mut matches = rows.into_iter().filter(|row| {
+            use sha2::Digest;
+            format!(
+                "sha256:{:x}",
+                sha2::Sha256::digest(row.credential_id.as_bytes())
+            ) == credential_fingerprint
+        });
+        let Some(row) = matches.next() else {
+            return Ok(None);
+        };
+        if matches.next().is_some() {
+            return Err(crate::Error::InvalidData(
+                "ambiguous model-turn credential route".to_owned(),
+            ));
+        }
+        Ok(Some(ModelTurnPool {
+            id: row.id,
+            credential_id: row.credential_id,
+            provider_id: row.provider_id,
+            model_id: row.model_id,
+            phase: parse_phase(&row.phase)?,
+            identity_state: parse_identity(&row.identity_state)?,
+            capability_state: parse_capability(&row.capability_state)?,
+            learned_concurrency: row.learned_concurrency,
+            in_flight: row.in_flight,
+        }))
+    }
+
     /// Persist a decision before returning a shadow send permit. Inputs contain
     /// only a one-way request fingerprint and bounded diagnostic vocabulary.
     pub async fn record_decision(&self, input: ModelTurnDecisionRecordInput) -> Result<()> {
