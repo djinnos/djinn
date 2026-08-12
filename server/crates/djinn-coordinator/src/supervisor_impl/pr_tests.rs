@@ -615,8 +615,9 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
     use djinn_core::events::EventBus;
     use djinn_core::models::{KnowledgeInjectionConfig, TaskRunTrigger};
     use djinn_db::{
-        ActivateProposalBuildAttemptInput, Database, EpicRepository,
-        ProposalBuildAttemptRepository, ReserveProposalBuildAttemptInput, TaskRepository,
+        ActivateProposalBuildAttemptInput, Database, DirectDeliveryCapabilityRepository,
+        EpicRepository, PersistAttemptPrIdentityInput, ProposalBuildAttemptRepository,
+        ReserveProposalBuildAttemptInput, TaskRepository,
     };
     use djinn_runtime::{SupervisorFlow, TaskRunOutcome, TaskRunSpec};
     use tokio_util::sync::CancellationToken;
@@ -629,6 +630,15 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
         Unresolved,
         MissingContract,
         UnknownContract,
+    }
+
+    fn task_snapshot_ignoring_expected_park(task: &djinn_core::models::Task) -> serde_json::Value {
+        let mut task = serde_json::to_value(task).unwrap();
+        let task = task.as_object_mut().unwrap();
+        for field in ["status", "updated_at", "escalation_evidence_at"] {
+            task.remove(field);
+        }
+        task
     }
 
     for fixture in [
@@ -669,36 +679,21 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
                 .await
                 .unwrap();
         }
-        if !matches!(fixture, Fixture::Disabled) {
-            djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
-        }
+        djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
         if matches!(fixture, Fixture::Direct) {
             djinn_db::test_support::seed_direct_delivery_proposal_owner_for_test(
                 &db, &epic.id, "p", "p",
             )
             .await;
-            let attempts = ProposalBuildAttemptRepository::new(db.clone());
-            attempts
-                .reserve(&ReserveProposalBuildAttemptInput {
-                    proposal_id: "p".into(),
-                    proposal_short_id: "p".into(),
-                    build_attempt_id: "a".into(),
-                    build_attempt_short_id: "a".into(),
-                    observed_base_sha: "base".into(),
-                })
-                .await
-                .unwrap();
-            attempts
-                .activate(&ActivateProposalBuildAttemptInput {
-                    build_attempt_id: "a".into(),
-                    expected_lifecycle: djinn_core::models::ProposalBuildAttemptLifecycle::Reserved,
-                    expected_branch_head_sha: None,
-                    branch_head_sha: "base".into(),
-                })
-                .await
-                .unwrap();
+        } else {
+            djinn_db::test_support::seed_direct_delivery_proposal_for_test(&db, "p", "p").await;
         }
+        let attempts = ProposalBuildAttemptRepository::new(db.clone());
+        attempts.reserve(&ReserveProposalBuildAttemptInput { proposal_id: "p".into(), proposal_short_id: "p".into(), build_attempt_id: "a".into(), build_attempt_short_id: "a".into(), observed_base_sha: "base".into() }).await.unwrap();
+        attempts.activate(&ActivateProposalBuildAttemptInput { build_attempt_id: "a".into(), expected_lifecycle: djinn_core::models::ProposalBuildAttemptLifecycle::Reserved, expected_branch_head_sha: None, branch_head_sha: "base".into() }).await.unwrap();
+        attempts.persist_pr_identity(&PersistAttemptPrIdentityInput { build_attempt_id: "a".into(), proposal_pr_number: 314, proposal_pr_url: "https://example.test/attempt-pr/314".into() }).await.unwrap();
         match fixture {
+            Fixture::Disabled => djinn_db::test_support::disable_direct_delivery_epoch_for_test(&db).await,
             Fixture::MissingContract => {
                 djinn_db::test_support::remove_direct_delivery_epoch_for_test(&db).await
             }
@@ -736,6 +731,11 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
             provider_override: None,
         };
         let task = tasks.get(&task.id).await.unwrap().unwrap();
+        let before_task = task.clone();
+        let before_attempt = attempts.get("a").await.unwrap().unwrap();
+        let before_ledger = tasks.latest_delivery_for_attempt("a", &task.id).await.unwrap();
+        let before_counts = djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await;
+        let before_epoch = DirectDeliveryCapabilityRepository::new(db.clone()).probe().await.unwrap();
         clear_boundary_operations();
         let outcome = supervisor_pr_open(&spec, &task, &callbacks).await;
         let operations = take_boundary_operations();
@@ -743,15 +743,36 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
             BoundaryOperation::TaskPrLookup,
             BoundaryOperation::TaskPrAdopt,
             BoundaryOperation::TaskPrCreate,
+            BoundaryOperation::TaskPrInlineCleanup,
+            BoundaryOperation::TaskPrStaleCleanup,
+            BoundaryOperation::TaskPrMerge,
+            BoundaryOperation::TaskPrAutoMerge,
+            BoundaryOperation::TaskPrApproval,
+            BoundaryOperation::TaskPrSignoff,
+            BoundaryOperation::TaskPrCustomEnqueue,
+            BoundaryOperation::AttemptPrCreateOrAdoptRequest,
         ] {
             assert!(
                 !operations.contains(&forbidden),
                 "direct-delivery boundary reached forbidden task-PR effect {forbidden:?}"
             );
         }
+        let after_task = tasks.get(&task.id).await.unwrap().unwrap();
+        let after_attempt = attempts.get("a").await.unwrap().unwrap();
+        let after_ledger = tasks.latest_delivery_for_attempt("a", &task.id).await.unwrap();
+        let after_counts = djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await;
+        let after_epoch = DirectDeliveryCapabilityRepository::new(db.clone()).probe().await.unwrap();
+        assert_eq!(after_attempt, before_attempt, "attempt row and exact PR identity must remain unchanged");
+        assert_eq!(after_ledger, before_ledger, "exact ledger identities/cardinality must remain unchanged");
+        assert_eq!(after_counts, before_counts, "supervisor must not create attempts or ledger rows");
+        assert_eq!(after_epoch, before_epoch, "supervisor must not mutate epoch activation");
+        assert_eq!(after_attempt.proposal_pr_number, Some(314));
+        assert_eq!(after_attempt.proposal_pr_url.as_deref(), Some("https://example.test/attempt-pr/314"));
         match fixture {
             Fixture::Direct => {
                 assert!(matches!(outcome, TaskRunOutcome::Escalated { .. }));
+                assert_eq!(after_task.pr_url, before_task.pr_url);
+                assert_eq!(task_snapshot_ignoring_expected_park(&after_task), task_snapshot_ignoring_expected_park(&before_task));
                 assert_eq!(
                     operations,
                     vec![
@@ -762,10 +783,10 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
             }
             Fixture::Unresolved => {
                 assert!(matches!(outcome, TaskRunOutcome::Escalated { .. }));
-                assert_eq!(
-                    tasks.get(&task.id).await.unwrap().unwrap().status,
-                    "needs_lead_intervention"
-                );
+                assert_eq!(after_task.status, "needs_lead_intervention");
+                assert_eq!(after_task.pr_url, before_task.pr_url);
+                assert_eq!(task_snapshot_ignoring_expected_park(&after_task), task_snapshot_ignoring_expected_park(&before_task));
+                assert!(tasks.list_activity(&task.id).await.unwrap().last().unwrap().payload.contains("no_proposal_owner"));
                 assert_eq!(
                     operations,
                     vec![
@@ -777,10 +798,11 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
             }
             Fixture::MissingContract | Fixture::UnknownContract => {
                 assert!(matches!(outcome, TaskRunOutcome::Escalated { .. }));
-                assert_eq!(
-                    tasks.get(&task.id).await.unwrap().unwrap().status,
-                    "needs_lead_intervention"
-                );
+                assert_eq!(after_task.status, "needs_lead_intervention");
+                assert_eq!(after_task.pr_url, before_task.pr_url);
+                assert_eq!(task_snapshot_ignoring_expected_park(&after_task), task_snapshot_ignoring_expected_park(&before_task));
+                let reason = if matches!(fixture, Fixture::MissingContract) { "direct_delivery_contract_missing_epoch" } else { "direct_delivery_contract_unknown_epoch" };
+                assert!(tasks.list_activity(&task.id).await.unwrap().last().unwrap().payload.contains(reason));
                 assert_eq!(
                     operations,
                     vec![
@@ -795,6 +817,8 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
                     "legacy fixture must pass the eligibility gate"
                 );
                 assert_eq!(operations, vec![BoundaryOperation::CapabilityProbe]);
+                assert_eq!(after_task.pr_url, before_task.pr_url);
+                assert_eq!(task_snapshot_ignoring_expected_park(&after_task), task_snapshot_ignoring_expected_park(&before_task));
                 if matches!(fixture, Fixture::ExplicitLegacy) {
                     assert_eq!(
                         tasks

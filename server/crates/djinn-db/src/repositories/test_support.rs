@@ -20,6 +20,35 @@ pub async fn activate_direct_delivery_epoch_for_test(db: &Database) {
     .expect("failed to activate direct-delivery test epoch");
 }
 
+/// Seed an attempt-owning proposal without assigning it to an epic.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn seed_direct_delivery_proposal_for_test(
+    db: &Database,
+    proposal_id: &str,
+    proposal_short_id: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("INSERT INTO proposals (id, short_id, title) VALUES ($1, $2, $2)")
+        .bind(proposal_id)
+        .bind(proposal_short_id)
+        .execute(db.pool())
+        .await
+        .expect("failed to seed unowned direct-delivery proposal");
+}
+
+/// Return the persisted direct-delivery epoch to its shipped disabled state.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn disable_direct_delivery_epoch_for_test(db: &Database) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "UPDATE direct_delivery_epochs SET state = 'disabled', generation = 0 \
+         WHERE name = 'direct_delivery_v1'",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to disable direct-delivery test epoch");
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirectDeliveryMatrixCountsForTest {
     pub build_attempts: Option<i64>,
