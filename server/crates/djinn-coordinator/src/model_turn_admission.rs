@@ -203,19 +203,22 @@ async fn project_from_inventory(
         }
     }
     let expected_paths: Vec<_> = expected_paths.into_iter().collect();
+    // A B2 report has no credential identity, so a single exact four-field
+    // report corroborates every already-resolved credential-qualified route
+    // sharing that tuple. Never select an arbitrary first pool here.
     let joined_reports = reports
         .iter()
-        .filter_map(|report| {
+        .flat_map(|report| {
             expected_paths
                 .iter()
-                .find(|path| {
+                .filter(move |path| {
                     path.slot_pod_uid == report.slot_pod_uid
                         && path.deployment_revision == report.deployment_revision
                         && path.provider == report.provider
                         && path.model_scope == report.model_scope
                 })
                 .cloned()
-                .map(|expected_path| JoinedCapabilityReportV1 {
+                .map(move |expected_path| JoinedCapabilityReportV1 {
                     expected_path,
                     coverage: report.coverage,
                 })
@@ -482,6 +485,65 @@ mod tests {
                 evidence.iter().any(|row| row.stage == stage),
                 "{stage} is consumable by the next Phase-C window"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn one_exact_report_persists_evidence_for_every_resolved_credential_route() {
+        let db = Database::ephemeral().await.expect("db");
+        let first_pool_id = seed(&db, "credential-a", "provider", "model").await;
+        let second_pool_id = seed(&db, "credential-b", "provider", "model").await;
+        let repository = ModelTurnAdmissionRepository::new(db);
+        let projection = project_from_inventory(
+            &repository,
+            vec![record(Some("slot-a"), Some("rev-1"), true, false)],
+            &[
+                plan("credential-a", "provider", "model"),
+                plan("credential-b", "provider", "model"),
+            ],
+            &[ModelTurnCapabilityReportV2 {
+                slot_pod_uid: "slot-a".into(),
+                deployment_revision: "rev-1".into(),
+                provider: "provider".into(),
+                model_scope: "model".into(),
+                coverage: ModelTurnCapabilityCoverageV2::Covered,
+            }],
+        )
+        .await
+        .expect("projection");
+
+        assert_eq!(projection.expected_paths.len(), 2);
+        assert_eq!(projection.joined_reports.len(), 2);
+        assert_eq!(
+            projection
+                .joined_reports
+                .iter()
+                .map(|joined| joined.expected_path.pool_id)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([first_pool_id, second_pool_id]),
+            "the exact report joins every credential-qualified pool route"
+        );
+
+        persist_joined_capability_reports_v1(&repository, &projection)
+            .await
+            .expect("persist");
+        for pool_id in [first_pool_id, second_pool_id] {
+            assert_eq!(
+                repository
+                    .recent_capability_heartbeats(pool_id, 8)
+                    .await
+                    .expect("heartbeat read")
+                    .len(),
+                1,
+                "covered report is retained under its exact resolved pool"
+            );
+            let evidence = repository
+                .recent_phase_c_evidence(pool_id, 8)
+                .await
+                .expect("evidence read");
+            assert_eq!(evidence.len(), 1);
+            assert_eq!(evidence[0].stage, "heartbeat");
+            assert_eq!(evidence[0].outcome, "recorded");
         }
     }
 }
