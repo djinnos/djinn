@@ -656,14 +656,14 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
         UnknownContract,
     }
 
-    /// Parking may change only these three task fields. Every call site must
+    /// Parking may change only these two task fields. Every call site must
     /// account for each removed field explicitly rather than treating a partial
     /// JSON comparison as a full-task snapshot.
     fn task_snapshot_except_expected_park(task: &djinn_core::models::Task) -> serde_json::Value {
         let mut task = serde_json::to_value(task).unwrap();
         {
             let task = task.as_object_mut().unwrap();
-            for field in ["status", "updated_at", "escalation_evidence_at"] {
+            for field in ["status", "updated_at"] {
                 task.remove(field);
             }
         }
@@ -876,9 +876,9 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
                     after_task.updated_at, before_task.updated_at,
                     "parking must persist its timestamp"
                 );
-                assert!(
-                    after_task.escalation_evidence_at.is_some(),
-                    "parking must stamp escalation evidence"
+                assert_eq!(
+                    after_task.escalation_evidence_at, before_task.escalation_evidence_at,
+                    "parking must preserve escalation evidence"
                 );
                 assert_eq!(
                     task_snapshot_except_expected_park(&after_task),
@@ -911,9 +911,9 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
                     after_task.updated_at, before_task.updated_at,
                     "parking must persist its timestamp"
                 );
-                assert!(
-                    after_task.escalation_evidence_at.is_some(),
-                    "parking must stamp escalation evidence"
+                assert_eq!(
+                    after_task.escalation_evidence_at, before_task.escalation_evidence_at,
+                    "parking must preserve escalation evidence"
                 );
                 assert_eq!(
                     task_snapshot_except_expected_park(&after_task),
