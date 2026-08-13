@@ -161,25 +161,38 @@ pub fn build_warm_job(
     let project_root = format!("{WORKSPACE_MOUNT_DIR}/{sanitized_project}");
     let mirror_path = format!("{MIRROR_MOUNT_DIR}/{project_id}.git");
 
-    // Shell wrapper: the bare mirror on the PVC is `--filter=blob:none`,
-    // so cloning it with `--local --shared` gives a partial clone where
-    // `git checkout` fails on every missing blob (`unable to read sha1
-    // file of <path>`). We avoid the filter entirely by pulling the
-    // upstream URL (with fresh installation token, rotated every 60s by
-    // the mirror fetcher) out of the mirror config and doing a clone
-    // straight from GitHub. Same pattern the per-project build Job uses.
+    // Shell wrapper: clone the bare mirror straight off the PVC with
+    // `--local --shared`, so the workspace borrows the mirror's object db
+    // through `.git/objects/info/alternates` and nothing is fetched over the
+    // network. The same pattern `MirrorManager::clone_ephemeral` already uses
+    // for the task-run path.
     //
-    // `--depth 1000 --single-branch`: SCIP only needs HEAD source, but
-    // the coupling-index phase walks `cursor..HEAD` and needs the saved
-    // cursor's history to be reachable. `--depth 1000` gives ~1000
-    // commits of recent history for free (the typical warm cadence is
-    // <100 new commits, so the saved cursor almost always lands inside
-    // this window) and only adds a few MB over `--depth 1` for typical
-    // repos thanks to git's pack deduplication. Cursors older than 1000
-    // commits are handled by `coupling_index::try_fetch_cursor` falling
-    // back to `git fetch --unshallow`. See
+    // This used to read `remote.origin.url` out of the mirror config and clone
+    // from GitHub instead, because mirrors were created with
+    // `--filter=blob:none` and checking out a partial clone fails on every
+    // missing blob (`unable to read sha1 file of <path>`). That constraint is
+    // gone: `MirrorManager::create_mirror` no longer passes the filter, and
+    // `ensure_full_mirror` promotes pre-existing blobless mirrors on server
+    // boot. Cloning from GitHub on every warm run meant every warm Pod
+    // re-downloaded the whole repo — on a busy instance that dominated the
+    // cluster's egress bill, and it is pure waste when a full mirror is
+    // already mounted at `{MIRROR_MOUNT_DIR}`.
+    //
+    // Borrowing the object db also makes the shallow-history question moot.
+    // SCIP only needs HEAD source, but the coupling-index phase walks
+    // `cursor..HEAD` and needs the saved cursor reachable; the old
+    // `--depth 1000` was a heuristic for that (with
+    // `coupling_index::try_fetch_cursor` falling back to
+    // `git fetch --unshallow` for older cursors). An alternates clone has the
+    // mirror's *complete* history available, so no cursor falls outside the
+    // window and the unshallow fallback stops being reachable from here. See
     // `cases/plan-a-warm-cargo-base-reuse-validated-working-v0-6-11-0-6-12`
     // for the broader warm-cost discussion.
+    //
+    // The mirror stays mounted read-only: `--shared` only ever reads it. The
+    // workspace does depend on those borrowed objects surviving for the life of
+    // the Pod, which holds because the mirror fetcher only ever adds refs — and
+    // a warm Pod is short-lived relative to any mirror maintenance.
     let cmd = format!(
         r#"set -euo pipefail
 # Everything this Pod creates on the shared volumes must stay group-writable for
@@ -199,8 +212,7 @@ umask 0002
 export GIT_CONFIG_SYSTEM={WORKSPACE_MOUNT_DIR}/.djinn-gitconfig
 unset GIT_CONFIG_NOSYSTEM
 printf '[safe]\n\tdirectory = *\n' > "$GIT_CONFIG_SYSTEM"
-UPSTREAM_URL="$(git -C "{mirror_path}" config remote.origin.url)"
-git clone --depth 1000 --single-branch "$UPSTREAM_URL" "{project_root}"
+git clone --local --shared "{mirror_path}" "{project_root}"
 # Install JS deps before indexing so scip-typescript can resolve
 # tsconfig `extends` that point at workspace packages (e.g. a shared
 # `tsconfig` package in a pnpm/turbo monorepo) — those live under
