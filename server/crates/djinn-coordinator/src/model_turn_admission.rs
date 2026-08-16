@@ -4,7 +4,7 @@
 //! B1 routes which resolve to an existing durable pool. B2 reports are joined
 //! after that construction and therefore cannot create expected members.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use djinn_db::{
     ModelTurnAdmissionRepository, ModelTurnCapabilityHeartbeatInput, ModelTurnPhaseCEvidenceInput,
@@ -15,6 +15,7 @@ use djinn_provider::{ProviderAttemptPlanV1, ProviderOutcomeV1};
 use djinn_slot::model_turn_capability::{
     ModelTurnCapabilityCoverageV2, ModelTurnCapabilityReportV2,
 };
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::CoordinatorActor;
@@ -232,6 +233,269 @@ async fn project_from_inventory(
 
 fn eligible_live_slot(record: &&WorkloadRecord) -> bool {
     record.kind == WorkloadObjectKind::Pod && record.ready && !record.terminal
+}
+
+/// A controller window is always one aligned, half-open minute. Private bounds
+/// make malformed 61-second and unaligned windows unrepresentable to callers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AlignedPhaseCWindowV1 {
+    start_second: i64,
+    end_second: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlignedPhaseCWindowErrorV1 {
+    NegativeStart,
+    UnalignedStart,
+}
+
+impl AlignedPhaseCWindowV1 {
+    pub const SECONDS: i64 = 60;
+    pub fn new(start_second: i64) -> Result<Self, AlignedPhaseCWindowErrorV1> {
+        if start_second < 0 {
+            return Err(AlignedPhaseCWindowErrorV1::NegativeStart);
+        }
+        if start_second % Self::SECONDS != 0 {
+            return Err(AlignedPhaseCWindowErrorV1::UnalignedStart);
+        }
+        Ok(Self {
+            start_second,
+            end_second: start_second + Self::SECONDS,
+        })
+    }
+    #[must_use]
+    pub fn start_second(self) -> i64 {
+        self.start_second
+    }
+    #[must_use]
+    pub fn end_second(self) -> i64 {
+        self.end_second
+    }
+    fn contains(self, second: i64) -> bool {
+        self.start_second <= second && second < self.end_second
+    }
+    fn fully_covers(self, start_second: i64, end_second: i64) -> bool {
+        start_second <= self.start_second && self.end_second <= end_second
+    }
+}
+
+/// Observation time is separate from asserted coverage, allowing fresh
+/// evidence whose coverage interval crosses a window boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhaseCCapabilityEvidenceV1 {
+    pub path: ExpectedAttemptPathV1,
+    pub coverage_start_second: i64,
+    pub coverage_end_second: i64,
+    pub observed_at_second: i64,
+    pub covered: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PhaseCAttemptStageV1 {
+    Decision,
+    Dispatch,
+    Heartbeat,
+    ProviderOutcome,
+    Reconcile,
+}
+
+/// `Missing` is retained but never constitutes a complete stage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PhaseCAttemptEvidenceOutcomeV1 {
+    Recorded,
+    Provider(ProviderOutcomeV1),
+    Missing,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhaseCAttemptStageEvidenceV1 {
+    pub stage: PhaseCAttemptStageV1,
+    pub timestamp_second: i64,
+    pub outcome: PhaseCAttemptEvidenceOutcomeV1,
+}
+
+/// The fingerprint join key is deliberately absent from this in-memory input:
+/// stages are already grouped under exactly one admitted attempt by the caller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhaseCAdmittedAttemptV1 {
+    pub path: ExpectedAttemptPathV1,
+    pub admitted_at_second: i64,
+    pub has_authoritative_usage: bool,
+    pub lease_expired: bool,
+    pub breaker_open: bool,
+    pub stages: Vec<PhaseCAttemptStageEvidenceV1>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhaseCWindowDiagnosticCodeV1 {
+    EmptyExpectedDenominator,
+    MissingCapability,
+    UnexpectedCapability,
+    DuplicateCapability,
+    UncoveredCapability,
+    PartialCapabilityCoverage,
+    StaleHeartbeat,
+    UnknownAttemptPath,
+    MissingUsage,
+    ExpiredLease,
+    OpenBreaker,
+    MissingStage,
+    DuplicateStage,
+    MissingStageOutcome,
+    StageOutsideWindow,
+    ReversedStages,
+}
+
+/// Bounded redaction-safe diagnostic. Pool 0 is the fixed sentinel for evidence
+/// that cannot join an authoritative pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct PhaseCWindowDiagnosticV1 {
+    pub pool_id: i64,
+    pub code: PhaseCWindowDiagnosticCodeV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PhaseCWindowQualificationV1 {
+    pub admitted: bool,
+    pub diagnostics: Vec<PhaseCWindowDiagnosticV1>,
+}
+
+/// Pure fail-closed qualification over the coordinator-owned expected-path
+/// denominator. Observational evidence may corroborate it, never extend it.
+#[must_use]
+pub fn qualify_aligned_phase_c_window_v1(
+    window: AlignedPhaseCWindowV1,
+    expected_paths: &[ExpectedAttemptPathV1],
+    capability_evidence: &[PhaseCCapabilityEvidenceV1],
+    admitted_attempts: &[PhaseCAdmittedAttemptV1],
+) -> PhaseCWindowQualificationV1 {
+    let expected: BTreeSet<_> = expected_paths.iter().cloned().collect();
+    let mut diagnostics = BTreeSet::new();
+    if expected.is_empty() {
+        diagnostics.insert(PhaseCWindowDiagnosticV1 {
+            pool_id: 0,
+            code: PhaseCWindowDiagnosticCodeV1::EmptyExpectedDenominator,
+        });
+    }
+    let mut reports: BTreeMap<_, Vec<&PhaseCCapabilityEvidenceV1>> = BTreeMap::new();
+    for report in capability_evidence {
+        if expected.contains(&report.path) {
+            reports.entry(report.path.clone()).or_default().push(report);
+        } else {
+            diagnostics.insert(PhaseCWindowDiagnosticV1 {
+                pool_id: 0,
+                code: PhaseCWindowDiagnosticCodeV1::UnexpectedCapability,
+            });
+        }
+    }
+    for path in &expected {
+        let matched = reports.get(path).map(Vec::as_slice).unwrap_or_default();
+        let code = match matched {
+            [] => Some(PhaseCWindowDiagnosticCodeV1::MissingCapability),
+            [_first, _second, ..] => Some(PhaseCWindowDiagnosticCodeV1::DuplicateCapability),
+            [report] if !report.covered => Some(PhaseCWindowDiagnosticCodeV1::UncoveredCapability),
+            [report]
+                if !window
+                    .fully_covers(report.coverage_start_second, report.coverage_end_second) =>
+            {
+                Some(PhaseCWindowDiagnosticCodeV1::PartialCapabilityCoverage)
+            }
+            [report] if !window.contains(report.observed_at_second) => {
+                Some(PhaseCWindowDiagnosticCodeV1::StaleHeartbeat)
+            }
+            [_] => None,
+        };
+        if let Some(code) = code {
+            diagnostics.insert(PhaseCWindowDiagnosticV1 {
+                pool_id: path.pool_id,
+                code,
+            });
+        }
+    }
+    for attempt in admitted_attempts
+        .iter()
+        .filter(|attempt| window.contains(attempt.admitted_at_second))
+    {
+        if !expected.contains(&attempt.path) {
+            diagnostics.insert(PhaseCWindowDiagnosticV1 {
+                pool_id: 0,
+                code: PhaseCWindowDiagnosticCodeV1::UnknownAttemptPath,
+            });
+            continue;
+        }
+        let pool_id = attempt.path.pool_id;
+        for (invalid, code) in [
+            (
+                !attempt.has_authoritative_usage,
+                PhaseCWindowDiagnosticCodeV1::MissingUsage,
+            ),
+            (
+                attempt.lease_expired,
+                PhaseCWindowDiagnosticCodeV1::ExpiredLease,
+            ),
+            (
+                attempt.breaker_open,
+                PhaseCWindowDiagnosticCodeV1::OpenBreaker,
+            ),
+        ] {
+            if invalid {
+                diagnostics.insert(PhaseCWindowDiagnosticV1 { pool_id, code });
+            }
+        }
+        validate_attempt_chain(window, attempt, &mut diagnostics);
+    }
+    PhaseCWindowQualificationV1 {
+        admitted: diagnostics.is_empty(),
+        diagnostics: diagnostics.into_iter().collect(),
+    }
+}
+
+fn validate_attempt_chain(
+    window: AlignedPhaseCWindowV1,
+    attempt: &PhaseCAdmittedAttemptV1,
+    diagnostics: &mut BTreeSet<PhaseCWindowDiagnosticV1>,
+) {
+    let required = [
+        PhaseCAttemptStageV1::Decision,
+        PhaseCAttemptStageV1::Dispatch,
+        PhaseCAttemptStageV1::Heartbeat,
+        PhaseCAttemptStageV1::ProviderOutcome,
+        PhaseCAttemptStageV1::Reconcile,
+    ];
+    let mut timestamps = Vec::with_capacity(required.len());
+    for stage in required {
+        let stages: Vec<_> = attempt
+            .stages
+            .iter()
+            .filter(|item| item.stage == stage)
+            .collect();
+        let code = match stages.as_slice() {
+            [] => Some(PhaseCWindowDiagnosticCodeV1::MissingStage),
+            [item] if matches!(item.outcome, PhaseCAttemptEvidenceOutcomeV1::Missing) => {
+                Some(PhaseCWindowDiagnosticCodeV1::MissingStageOutcome)
+            }
+            [item] if !window.contains(item.timestamp_second) => {
+                Some(PhaseCWindowDiagnosticCodeV1::StageOutsideWindow)
+            }
+            [_] => None,
+            _ => Some(PhaseCWindowDiagnosticCodeV1::DuplicateStage),
+        };
+        if let Some(code) = code {
+            diagnostics.insert(PhaseCWindowDiagnosticV1 {
+                pool_id: attempt.path.pool_id,
+                code,
+            });
+        } else if let [item] = stages.as_slice() {
+            timestamps.push(item.timestamp_second);
+        }
+    }
+    if timestamps.len() == required.len() && timestamps.windows(2).any(|pair| pair[0] >= pair[1]) {
+        diagnostics.insert(PhaseCWindowDiagnosticV1 {
+            pool_id: attempt.path.pool_id,
+            code: PhaseCWindowDiagnosticCodeV1::ReversedStages,
+        });
+    }
 }
 
 async fn resolve_planned_routes(
