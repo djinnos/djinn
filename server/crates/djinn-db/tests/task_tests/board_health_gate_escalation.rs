@@ -74,22 +74,12 @@ async fn ready_task(db: &Database, repo: &TaskRepository, title: &str, age: &str
 /// a cooldown deadline `minutes_ahead` in the future, an inflight model, and —
 /// critically — `failure_streak = 0`, because "the breaker is open for EVERY
 /// candidate" is not the task's fault and does not advance the streak.
+///
+/// Shared with the coordinator's doctor e2e test and the control-plane MCP
+/// round-trip test, so all three assert against one definition of the shape.
 async fn arm_breaker_cooldown(db: &Database, task_id: &str, model_id: &str, minutes_ahead: i64) {
-    sqlx::query(
-        "INSERT INTO dispatch_state \
-             (task_id, failure_streak, cooldown_until, last_dispatched_role, inflight_model_id) \
-         VALUES ($1, 0, now() AT TIME ZONE 'utc' + make_interval(mins => $2::int), \
-                 'worker', $3) \
-         ON CONFLICT (task_id) DO UPDATE SET \
-             cooldown_until = EXCLUDED.cooldown_until, \
-             failure_streak = EXCLUDED.failure_streak",
-    )
-    .bind(task_id)
-    .bind(minutes_ahead)
-    .bind(model_id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    djinn_db::test_support::seed_breaker_open_dispatch_state(db, task_id, model_id, minutes_ahead)
+        .await;
 }
 
 /// The model-health rollup row the breaker writes when it hard-disables a model.
@@ -306,14 +296,9 @@ async fn a_sustained_rate_limit_backoff_is_reported_past_the_bound() {
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
 
     let task = ready_task(&db, &repo, "Ladder-pinned task", "600 minutes").await;
-    sqlx::query(
-        "INSERT INTO dispatch_state (task_id, failure_streak, last_dispatched_role) \
-         VALUES ($1, 7, 'worker')",
-    )
-    .bind(&task.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    // No cooldown deadline at all, so the rate-limit gate is the only one
+    // firing and `overridden_gates` can be asserted exactly.
+    djinn_db::test_support::seed_rate_limited_dispatch_state(&db, &task.id, 7).await;
 
     let section = stranded_section(&repo).await;
     let finding = finding_for(&section, &task.id)
@@ -360,11 +345,7 @@ async fn a_transient_rate_limit_backoff_is_still_excluded() {
     let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
 
     let task = ready_task(&db, &repo, "Briefly rate-limited", "40 minutes").await;
-    sqlx::query("INSERT INTO dispatch_state (task_id, failure_streak) VALUES ($1, 3)")
-        .bind(&task.id)
-        .execute(db.pool())
-        .await
-        .unwrap();
+    djinn_db::test_support::seed_rate_limited_dispatch_state(&db, &task.id, 3).await;
 
     let section = stranded_section(&repo).await;
     assert!(

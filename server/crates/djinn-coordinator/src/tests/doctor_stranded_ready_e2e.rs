@@ -8,7 +8,7 @@ use djinn_db::repositories::user::UserRepository;
 use djinn_provider::repos::CredentialRepository;
 use tokio::sync::broadcast;
 
-use super::{create_task_with_note, rfc3339};
+use super::create_task_with_note;
 use crate::doctor::leader_tick::run_cheap_doctor_checks;
 use crate::doctor::stranded_ready::{
     MemoryStrandedReadySource, STRANDED_READY_CHECK_NAME, StrandedReadyCheck,
@@ -272,20 +272,16 @@ async fn a_gate_escalated_task_survives_the_real_db_to_doctor_contract() {
     // Four days of strand behind a live, ladder-ceiling cooldown, with the
     // streak at 0 — the breaker-open path does not advance it.
     djinn_db::test_support::backdate_task_updated_at(&db, &task.id, "5760 minutes").await;
-    let cooldown_until = rfc3339(::time::OffsetDateTime::now_utc() + ::time::Duration::minutes(30));
-    djinn_db::DispatchStateRepository::new(db.clone())
-        .upsert(djinn_db::DispatchStateUpsert {
-            task_id: &task.id,
-            failure_streak: 0,
-            cooldown_until: Some(&cooldown_until),
-            escalation_count: 0,
-            last_dispatched_at: None,
-            last_dispatched_role: Some("worker"),
-            inflight_creator_user_id: None,
-            inflight_model_id: Some("openai/gpt-5.6-terra"),
-        })
-        .await
-        .expect("seed breaker cooldown dispatch_state");
+    // The deadline is computed on the DATABASE clock by the shared helper —
+    // `stranded_ready_section` compares it against `now()` read from Postgres,
+    // so a timestamp built here would race that read.
+    djinn_db::test_support::seed_breaker_open_dispatch_state(
+        &db,
+        &task.id,
+        "openai/gpt-5.6-terra",
+        30,
+    )
+    .await;
 
     // ── The REAL board_health section ──────────────────────────────────
     let task_repo = TaskRepository::new(db.clone(), event_bus_for(&tx));

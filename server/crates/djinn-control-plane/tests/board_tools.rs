@@ -857,17 +857,16 @@ async fn board_health_mcp_surface_preserves_gate_escalation_evidence() {
 
     // The exact `dispatch_state` shape the breaker-open path leaves behind: a
     // cooldown deadline at the ~30-minute ladder ceiling, an inflight model,
-    // and `failure_streak = 0` — that path does not advance the streak.
-    sqlx::query(
-        "INSERT INTO dispatch_state \
-             (task_id, failure_streak, cooldown_until, last_dispatched_role, inflight_model_id) \
-         VALUES ($1, 0, now() AT TIME ZONE 'utc' + interval '30 minutes', \
-                 'worker', 'openai/gpt-5.6-terra')",
+    // and `failure_streak = 0` — that path does not advance the streak. The
+    // fixture SQL lives behind the djinn-db boundary; see
+    // `scripts/check-raw-sql-boundary.sh`.
+    djinn_db::test_support::seed_breaker_open_dispatch_state(
+        harness.db(),
+        &task.id,
+        "openai/gpt-5.6-terra",
+        30,
     )
-    .bind(&task.id)
-    .execute(harness.db().pool())
-    .await
-    .expect("seed breaker cooldown dispatch_state");
+    .await;
 
     // Call the REAL MCP tool — this is the round trip under test.
     let response = harness
