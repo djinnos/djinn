@@ -7,6 +7,28 @@ use djinn_db::{
 };
 use sha2::{Digest, Sha256};
 
+fn canonical_json_bytes(value: &serde_json::Value) -> Vec<u8> {
+    fn normalize(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.iter().map(normalize).collect())
+            }
+            serde_json::Value::Object(map) => {
+                let mut keys: Vec<_> = map.keys().collect();
+                keys.sort_unstable();
+                let mut normalized = serde_json::Map::new();
+                for key in keys {
+                    normalized.insert(key.clone(), normalize(&map[key]));
+                }
+                serde_json::Value::Object(normalized)
+            }
+            _ => value.clone(),
+        }
+    }
+
+    serde_json::to_vec(&normalize(value)).unwrap()
+}
+
 async fn failed_attempt_snapshot(
     db: &Database,
     finding_id: &str,
@@ -96,11 +118,14 @@ async fn typed_evidence_retry_v1() {
         "failures":[{"check_id":"old-check","code":"repository_unavailable","detail":"repository unavailable"}]
     });
     let old_payload_bytes = serde_json::to_vec(&old_payload).unwrap();
-    let old_hash = format!("{:x}", Sha256::digest(&old_payload_bytes));
+    // Production hashes canonical JSON so a replay read back from jsonb has
+    // the same identity despite PostgreSQL object-key reordering. This fixture
+    // seeds a historical validation directly and must model that same fence.
+    let old_hash = format!("{:x}", Sha256::digest(canonical_json_bytes(&old_payload)));
     let validation = uuid::Uuid::now_v7().to_string();
     sqlx::query("INSERT INTO typed_evidence_validation_results (id,attempt_id,payload_sha256,outcome,validator_facts) VALUES ($1,$2,$3,'unresolved',$4)")
-        .bind(&validation).bind(&old_attempt).bind(old_hash)
-        .bind(serde_json::json!({"validator_version":"TribunalEvidenceReturnV1","raw_payload_sha256":format!("{:x}", Sha256::digest(&old_payload_bytes)),"server_hydrated":true,"outcome":"unresolved"}))
+        .bind(&validation).bind(&old_attempt).bind(&old_hash)
+        .bind(serde_json::json!({"validator_version":"TribunalEvidenceReturnV1","raw_payload_sha256":old_hash,"server_hydrated":true,"outcome":"unresolved"}))
         .execute(db.pool()).await.unwrap();
     sqlx::query("INSERT INTO typed_evidence_check_results (id,validation_result_id,planned_check_id,status,detail) VALUES ($1,$2,$3,'failed','repository unavailable')")
         .bind(uuid::Uuid::now_v7().to_string()).bind(&validation).bind(&old_check)

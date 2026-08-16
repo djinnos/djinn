@@ -103,10 +103,12 @@ pub async fn seed_unknown_direct_delivery_epoch_for_test(db: &Database) {
 mod evidence_dispatch_recovery;
 mod refinement_read_only;
 mod test_support_retry;
+mod typed_evidence_ingress;
 
 pub use evidence_dispatch_recovery::*;
 pub use refinement_read_only::*;
 pub use test_support_retry::*;
+pub use typed_evidence_ingress::*;
 
 /// Counts every demand-owned relation for one proposal and its target project.
 ///
@@ -195,7 +197,7 @@ pub async fn materialize_judge_authority_for_test(
     .await
     .expect("failed to materialize Judge authority intent");
     sqlx::query(
-        "UPDATE tasks SET refinement_run_id = $1, refinement_intent_id = $2, \
+        "UPDATE tasks SET agent_type = 'judge', refinement_run_id = $1, refinement_intent_id = $2, \
          refinement_generation = $3, refinement_round = 1, \
          refinement_phase = 'judge_adjudication', refinement_role = 'judge' WHERE id = $4",
     )
