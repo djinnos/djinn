@@ -10,6 +10,32 @@ use djinn_db::{
     EffectiveCreatorProvenance, ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository,
 };
 
+async fn seed_typed_return_delivery(
+    db: &djinn_db::Database,
+    proposal_id: &str,
+    spike_task_id: &str,
+) -> String {
+    let fixture = djinn_db::test_support::seed_typed_evidence_ingress_fixture_for_test(
+        db,
+        proposal_id,
+        spike_task_id,
+        "resume-check",
+    )
+    .await;
+    let raw = serde_json::json!({"version":"TribunalEvidenceReturnV1","finding_id":fixture.finding_id,"spike_task_id":spike_task_id,"attempt_id":fixture.attempt_id,"conclusion":"typed receipt","checks":[{"check_id":"resume-check","method":"code","status":"passed","anchors":[]}]}).to_string();
+    TaskRepository::new(db.clone(), EventBus::noop())
+        .log_activity(
+            Some(spike_task_id),
+            "worker",
+            "worker",
+            "tribunal_evidence_return_v1",
+            &raw,
+        )
+        .await
+        .expect("log durable typed return");
+    raw
+}
+
 /// Successful evidence receipt clears the linked spike/claim and resumes with
 /// the next Advocate task, carrying the findings adjacent to proposal/debate context.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -101,6 +127,8 @@ async fn evidence_receipt_clears_link_and_dispatches_advocate_with_findings_cont
         .await
         .expect("close spike completed");
 
+    let raw = seed_typed_return_delivery(&db, &fixture.proposal_id, &spike_task_id).await;
+
     let task = task_repo
         .get(&spike_task_id)
         .await
@@ -120,9 +148,23 @@ async fn evidence_receipt_clears_link_and_dispatches_advocate_with_findings_cont
     state.record_needs_evidence();
     actor.active_refinements.insert("run-123".into(), state);
 
-    actor
-        .persist_terminal_linked_spike_evidence_from_closed_task(&task)
+    let live = actor
+        .ingest_raw_tribunal_evidence_return_v1(&task.id, &raw)
+        .await
+        .expect("live typed delivery persisted");
+    let replay = actor
+        .recover_terminal_linked_spike_evidence_for_task(&task.id)
         .await;
+    assert_eq!(replay.len(), 1);
+    assert!(replay[0].replayed);
+    assert_eq!(replay[0].validation_id, live.validation_id);
+    let transitions =
+        djinn_db::test_support::typed_evidence_transition_count_for_validation_for_test(
+            &db,
+            &live.validation_id,
+        )
+        .await;
+    assert_eq!(transitions, 1);
 
     let updated = proposal_repo
         .get(&fixture.proposal_id)
@@ -237,6 +279,7 @@ async fn evidence_receipt_respects_freeze_without_auto_dispatch() {
         .set_status_with_reason(&spike_task_id, "closed", Some("completed"))
         .await
         .expect("close spike completed");
+    let raw = seed_typed_return_delivery(&db, &fixture.proposal_id, &spike_task_id).await;
     let task = task_repo
         .get(&spike_task_id)
         .await
@@ -254,9 +297,16 @@ async fn evidence_receipt_respects_freeze_without_auto_dispatch() {
         .expect("state exists")
         .record_needs_evidence();
 
-    actor
-        .persist_terminal_linked_spike_evidence_from_closed_task(&task)
+    let live = actor
+        .ingest_raw_tribunal_evidence_return_v1(&task.id, &raw)
+        .await
+        .expect("live typed delivery persisted");
+    let replay = actor
+        .recover_terminal_linked_spike_evidence_for_task(&task.id)
         .await;
+    assert_eq!(replay.len(), 1);
+    assert!(replay[0].replayed);
+    assert_eq!(replay[0].validation_id, live.validation_id);
 
     let updated = proposal_repo
         .get(&fixture.proposal_id)

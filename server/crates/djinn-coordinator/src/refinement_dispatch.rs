@@ -1753,9 +1753,9 @@ impl CoordinatorActor {
     }
 
     /// Resume a refinement loop after a linked evidence spike completed with
-    /// valid findings. This clears the durable evidence block through the
-    /// substrate helper, advances the in-memory loop to the Advocate, then
-    /// dispatches only if the normal administrative gates permit it.
+    /// valid findings. The typed repository has already atomically cleared any
+    /// matching compatibility link; this only advances the in-memory Advocate
+    /// when normal administrative gates permit it.
     pub(super) async fn resume_refinement_after_evidence_received(
         &mut self,
         proposal_id: &str,
@@ -1764,12 +1764,12 @@ impl CoordinatorActor {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = djinn_db::ProposalRepository::new(self.db.clone(), event_bus);
 
-        match proposal_repo.clear_needs_evidence_spike(proposal_id).await {
-            Ok(proposal) => {
+        match proposal_repo.get(proposal_id).await {
+            Ok(Some(proposal)) => {
                 tracing::info!(
                     proposal_id = %proposal_id,
                     spike_task_id = %spike_task_id,
-                    "Cleared linked evidence spike after valid findings receipt"
+                    "Re-driving refinement after typed evidence receipt"
                 );
 
                 let Some(run_id) = self.active_refinements.iter().find_map(|(run_id, state)| {
@@ -1800,12 +1800,15 @@ impl CoordinatorActor {
 
                 poll_stack::boxed(|| self.dispatch_next_refinement_phase(&run_id)).await;
             }
+            Ok(None) => {
+                tracing::debug!(proposal_id = %proposal_id, "typed evidence proposal no longer exists")
+            }
             Err(e) => {
                 tracing::warn!(
                     proposal_id = %proposal_id,
                     spike_task_id = %spike_task_id,
                     error = %e,
-                    "Failed to clear linked evidence spike after valid findings receipt"
+                    "Failed to load proposal after typed evidence receipt"
                 );
             }
         }

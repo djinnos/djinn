@@ -9,11 +9,8 @@
 use super::reentrance::{DispatchEvent, should_auto_dispatch_planner};
 use super::*;
 use djinn_core::clock::{Clock, SystemClock};
-use djinn_core::models::IssueType;
 use djinn_core::models::task::{PRIORITY_CRITICAL, PROPOSAL_REVIEW_TITLE_PREFIX};
-use djinn_db::repositories::proposal::{
-    EvidenceDerivedOutcome, TerminalLinkedEvidenceSpikeOutcome,
-};
+use djinn_core::models::{IssueType, TribunalEvidenceLifecycle};
 use djinn_db::{EffectiveCreatorProvenance, EpicRepository, ProposalRepository};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -25,23 +22,6 @@ pub(super) const THROUGHPUT_WINDOW: Duration = Duration::from_secs(60 * 60);
 /// pass for an amended building proposal. The full marker is exactly
 /// `Reconcile proposal <short_id>: <title>` for reliable deduplication.
 pub(super) const PROPOSAL_RECONCILE_TITLE_PREFIX: &str = "Reconcile proposal";
-
-/// Emits only for the repository result that inserted a new durable receipt.
-pub(super) fn record_evidence_terminal_outcome(outcome: Option<EvidenceDerivedOutcome>) {
-    let outcome = match outcome {
-        Some(EvidenceDerivedOutcome::Resolved) => {
-            djinn_telemetry::evidence_metrics::EvidenceOutcome::Resolved
-        }
-        Some(EvidenceDerivedOutcome::Partial) => {
-            djinn_telemetry::evidence_metrics::EvidenceOutcome::Partial
-        }
-        Some(EvidenceDerivedOutcome::Unresolved) => {
-            djinn_telemetry::evidence_metrics::EvidenceOutcome::Unresolved
-        }
-        None => return,
-    };
-    djinn_telemetry::evidence_metrics::terminal(outcome);
-}
 
 // ── Epic completion rules ─────────────────────────────────────────────────────
 
@@ -201,116 +181,43 @@ impl CoordinatorActor {
         }
     }
 
-    /// Persist evidence-spike terminal lifecycle when a closed task is still
-    /// linked from a proposal as its current evidence spike.
-    ///
-    /// This is intentionally narrow: it only observes the live task event path,
-    /// delegates classification/idempotency to the repository primitive, and
-    /// resumes the in-process tribunal only after a valid receipt is recorded.
-    pub(super) async fn persist_terminal_linked_spike_evidence_from_closed_task(
+    /// Single ingress for raw V1 payloads written by `TaskRepository::log_activity`.
+    pub(super) async fn ingest_raw_tribunal_evidence_return_v1(
         &mut self,
-        task: &djinn_core::models::Task,
-    ) {
-        if task.status != "closed" {
-            tracing::debug!(
-                task_id = %task.id,
-                status = %task.status,
-                outcome = "NotTerminal",
-                "CoordinatorActor: linked evidence spike lifecycle skipped for non-terminal task"
-            );
-            return;
-        }
-
-        let repo = ProposalRepository::new(
-            self.db.clone(),
-            crate::events::event_bus_for(&self.events_tx),
-        );
-        let proposal = match repo.find_by_linked_spike(&task.id).await {
-            Ok(Some(proposal)) => proposal,
-            Ok(None) => {
-                tracing::debug!(
-                    task_id = %task.id,
-                    task_short_id = %task.short_id,
-                    outcome = "NotLinked",
-                    "CoordinatorActor: closed task is not a linked evidence spike"
-                );
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    task_id = %task.id,
-                    task_short_id = %task.short_id,
-                    error = %e,
-                    "CoordinatorActor: failed to look up proposal linked to evidence spike"
-                );
-                return;
+        spike_task_id: &str,
+        raw_payload: &str,
+    ) -> Option<djinn_db::TribunalEvidenceReturnResultV1> {
+        let task = match self.task_repo().get(spike_task_id).await {
+            Ok(Some(task)) if task.status == "closed" => task,
+            Ok(_) => return None,
+            Err(error) => {
+                tracing::warn!(%error, task_id=%spike_task_id, "typed evidence task lookup failed");
+                return None;
             }
         };
-
-        match repo
-            .persist_terminal_linked_spike_evidence_lifecycle(
-                &proposal.id,
-                &task.id,
-                &task.status,
-                task.close_reason.as_deref(),
-            )
+        let repo = djinn_db::TypedEvidenceRepository::new(self.db.clone());
+        let result = match repo
+            .submit_return_v1_for_task(&task.id, raw_payload.as_bytes())
             .await
         {
-            Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived { derived_outcome }) => {
-                record_evidence_terminal_outcome(derived_outcome);
-                tracing::info!(
-                    proposal_id = %proposal.id,
-                    spike_task_id = %task.id,
-                    derived_outcome = ?derived_outcome,
-                    outcome = "EvidenceReceived",
-                    "CoordinatorActor: recorded linked evidence spike receipt"
-                );
-                self.resume_refinement_after_evidence_received(&proposal.id, &task.id)
-                    .await;
+            Ok(result) => result,
+            Err(error) => {
+                tracing::info!(%error, task_id=%task.id, "typed evidence return rejected by repository");
+                return None;
             }
-            Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { reason }) => tracing::info!(
-                proposal_id = %proposal.id,
-                spike_task_id = %task.id,
-                reason = %reason,
-                outcome = "EvidenceFailed",
-                "CoordinatorActor: recorded linked evidence spike failure"
-            ),
-            Ok(TerminalLinkedEvidenceSpikeOutcome::AlreadyRecorded { event_kind }) => {
-                tracing::debug!(
-                    proposal_id = %proposal.id,
-                    spike_task_id = %task.id,
-                    event_kind = %event_kind,
-                    outcome = "AlreadyRecorded",
-                    "CoordinatorActor: linked evidence spike terminal lifecycle already recorded"
-                );
-                // A process can crash after the lifecycle transaction commits
-                // but before clearing the link. Mirror recovery: only an
-                // already-recorded receipt is resumable; failures remain blocked.
-                if event_kind == "refinement_evidence_received" {
-                    self.resume_refinement_after_evidence_received(&proposal.id, &task.id)
-                        .await;
-                }
-            }
-            Ok(TerminalLinkedEvidenceSpikeOutcome::NotLinked) => tracing::debug!(
-                proposal_id = %proposal.id,
-                spike_task_id = %task.id,
-                outcome = "NotLinked",
-                "CoordinatorActor: linked evidence spike lifecycle skipped; proposal no longer linked"
-            ),
-            Ok(TerminalLinkedEvidenceSpikeOutcome::NotTerminal) => tracing::debug!(
-                proposal_id = %proposal.id,
-                spike_task_id = %task.id,
-                status = %task.status,
-                outcome = "NotTerminal",
-                "CoordinatorActor: linked evidence spike lifecycle skipped; task is not terminal"
-            ),
-            Err(e) => tracing::warn!(
-                proposal_id = %proposal.id,
-                spike_task_id = %task.id,
-                error = %e,
-                "CoordinatorActor: failed to persist linked evidence spike terminal lifecycle"
-            ),
+        };
+        // A duplicate returns the finding's current lifecycle. Only an
+        // evidence-received finding may re-drive folding after a
+        // commit-before-resume interruption; historical terminal returns must
+        // not regress a refinement run back into Advocate revision.
+        if result.lifecycle == TribunalEvidenceLifecycle::EvidenceReceived
+            && let Ok(Some(proposal_id)) =
+                repo.proposal_id_for_validation(&result.validation_id).await
+        {
+            self.resume_refinement_after_evidence_received(&proposal_id, &task.id)
+                .await;
         }
+        Some(result)
     }
 
     /// `true` if an open proposal-reconcile `epic_breakdown` task already exists
@@ -1038,12 +945,13 @@ fn is_force_close_reason(reason: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::refinement::{RefinementLoopState, RefinementPhase};
     use crate::test_helpers;
-    use djinn_core::models::{EvidenceFindings, NeedsEvidenceClaim};
-    use djinn_db::repositories::proposal::evidence_lifecycle_kind;
+    use djinn_core::models::{NeedsEvidenceClaim, TribunalEvidenceLifecycle};
     use djinn_db::{
-        EpicRepository, ProposalCreateInput, ProposalDebateTrailCreateInput, ProposalRepository,
-        TaskRepository,
+        AdmitRefinementRunRequest, EpicRepository, ProposalCreateInput, ProposalRepository,
+        RefinementAdmissionOutcome, RefinementAdmissionSource, TaskRepository,
+        TypedEvidenceRepository,
     };
     use tokio::sync::broadcast;
     use tokio_util::sync::CancellationToken;
@@ -1221,17 +1129,6 @@ mod tests {
         }
     }
 
-    fn sample_evidence_findings(answer: &str) -> EvidenceFindings {
-        EvidenceFindings {
-            answer: answer.to_owned(),
-            evidence: vec!["coordinator fixture observed terminal task event".to_owned()],
-            code_paths_inspected: vec!["server/crates/djinn-coordinator/src/rules.rs".to_owned()],
-            confidence: 0.9,
-            residual_risks: vec!["fixture-only evidence".to_owned()],
-            recommendation_for_advocate: "incorporate the event evidence".to_owned(),
-        }
-    }
-
     async fn setup_linked_evidence_spike_fixture(
         db: &Database,
         tx: &broadcast::Sender<DjinnEventEnvelope>,
@@ -1267,34 +1164,6 @@ mod tests {
             .await
             .unwrap();
         (proposal_repo, task_repo, proposal, spike_task, claim)
-    }
-
-    async fn count_evidence_lifecycle_events(
-        repo: &ProposalRepository,
-        proposal_id: &str,
-        kind: &str,
-    ) -> usize {
-        repo.revisions(proposal_id)
-            .await
-            .unwrap()
-            .iter()
-            .filter(|rev| rev.event_kind == kind)
-            .count()
-    }
-
-    async fn tribunal_task_count(task_repo: &TaskRepository, project_id: &str) -> usize {
-        task_repo
-            .list_by_project(project_id)
-            .await
-            .unwrap()
-            .iter()
-            .filter(|task| {
-                matches!(
-                    task.agent_type.as_deref(),
-                    Some("advocate" | "adversary" | "judge")
-                )
-            })
-            .count()
     }
 
     /// Count of open proposal-review (`epic_breakdown`) tasks for a proposal in
@@ -2594,620 +2463,417 @@ mod tests {
             "building proposal without revision drift must not dispatch reconcile"
         );
     }
+    async fn seed_durable_typed_return(
+        db: &Database,
+        task_repo: &TaskRepository,
+        proposal_id: &str,
+        spike_task_id: &str,
+    ) -> String {
+        let fixture = djinn_db::test_support::seed_typed_evidence_ingress_fixture_for_test(
+            db,
+            proposal_id,
+            spike_task_id,
+            "rules-check",
+        )
+        .await;
+        let raw = serde_json::json!({
+            "version":"TribunalEvidenceReturnV1", "finding_id":fixture.finding_id,
+            "spike_task_id":spike_task_id, "attempt_id":fixture.attempt_id,
+            "conclusion":"durable typed receipt",
+            "checks":[{"check_id":"rules-check","method":"code","status":"passed","anchors":[]}]
+        })
+        .to_string();
+        task_repo
+            .log_activity(
+                Some(spike_task_id),
+                "worker",
+                "worker",
+                "tribunal_evidence_return_v1",
+                &raw,
+            )
+            .await
+            .unwrap();
+        raw
+    }
+
+    async fn typed_transition_count(db: &Database, validation_id: &str) -> i64 {
+        djinn_db::test_support::typed_evidence_transition_count_for_validation_for_test(
+            db,
+            validation_id,
+        )
+        .await
+    }
+
+    async fn dispose_received_finding_for_test(
+        db: &Database,
+        proposal_repo: &ProposalRepository,
+        task_repo: &TaskRepository,
+        proposal_id: &str,
+        validation_id: &str,
+        disposition: TribunalEvidenceLifecycle,
+    ) {
+        proposal_repo
+            .record_refinement_lifecycle(proposal_id, "refinement_start", None)
+            .await
+            .unwrap();
+        let (run_id, generation) = match proposal_repo
+            .reap_and_admit(AdmitRefinementRunRequest {
+                proposal_id: proposal_id.to_owned(),
+                idempotency_key: format!("rules-terminal-replay/{proposal_id}/{disposition:?}"),
+                source: RefinementAdmissionSource::Demand {
+                    demand_id: format!("rules-terminal-replay/{proposal_id}/{disposition:?}"),
+                },
+                heartbeat_grace_millis: 60_000,
+            })
+            .await
+            .unwrap()
+        {
+            RefinementAdmissionOutcome::Admitted {
+                run_id, generation, ..
+            }
+            | RefinementAdmissionOutcome::Existing {
+                run_id, generation, ..
+            } => (run_id, generation),
+        };
+        let judge_task = task_repo
+            .create_fixture_in_project(
+                &test_helpers::create_test_project(db).await.id,
+                None,
+                "terminal disposition judge",
+                "",
+                "",
+                "refinement",
+                0,
+                "",
+                Some("open"),
+                None,
+            )
+            .await
+            .unwrap();
+        djinn_db::test_support::materialize_judge_authority_for_test(
+            db,
+            &judge_task.id,
+            &run_id,
+            i64::from(generation),
+        )
+        .await;
+        let result = djinn_db::test_support::dispose_typed_evidence_validation_for_test(
+            db,
+            validation_id,
+            &judge_task.id,
+            disposition,
+        )
+        .await;
+        assert_eq!(result.finding_lifecycle, disposition);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn task_closed_event_records_linked_evidence_received_once() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let (proposal_repo, task_repo, proposal, spike_task, claim) =
+        let (proposal_repo, task_repo, proposal, spike_task, _) =
             setup_linked_evidence_spike_fixture(&db, &tx, "Event Success").await;
-        let findings = sample_evidence_findings("event-driven success");
-        let findings_value = serde_json::to_value(&findings).unwrap();
-        proposal_repo
-            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
-                proposal_id: &proposal.id,
-                kind: "evidence_findings",
-                body: "valid event findings",
-                blocking: false,
-                agent_role: "spike",
-                author_kind: "agent",
-                author_model: None,
-                source_task_id: Some(&spike_task.id),
-                against_revision_seq: claim.against_revision_seq,
-                round: claim.round,
-                body_metadata: Some(&findings_value),
-            })
-            .await
-            .unwrap();
+        let raw = seed_durable_typed_return(&db, &task_repo, &proposal.id, &spike_task.id).await;
         let closed = task_repo
             .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
             .await
             .unwrap();
-
         let mut actor = make_coordinator_actor(&db, &tx);
-        actor
-            .handle_event(DjinnEventEnvelope::task_updated(&closed, false))
+        let live = actor
+            .ingest_raw_tribunal_evidence_return_v1(&closed.id, &raw)
+            .await
+            .unwrap();
+        let replay = actor
+            .recover_terminal_linked_spike_evidence_for_task(&closed.id)
             .await;
-        actor
-            .handle_event(DjinnEventEnvelope::task_updated(&closed, false))
-            .await;
-
-        assert_eq!(
-            count_evidence_lifecycle_events(
-                &proposal_repo,
-                &proposal.id,
-                evidence_lifecycle_kind::EVIDENCE_RECEIVED,
-            )
-            .await,
-            1,
-            "duplicate closed-task events must remain idempotent"
-        );
-        assert_eq!(
-            count_evidence_lifecycle_events(
-                &proposal_repo,
-                &proposal.id,
-                evidence_lifecycle_kind::EVIDENCE_FAILED,
-            )
-            .await,
-            0
-        );
-        let after_receipt = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
-        assert!(
-            after_receipt.linked_spike_task_id.is_none(),
-            "linked spike must be cleared after valid evidence receipt"
-        );
-        assert!(
-            after_receipt.needs_evidence_claim.is_none(),
-            "needs-evidence claim must be cleared after valid evidence receipt"
-        );
-        assert_eq!(tribunal_task_count(&task_repo, &closed.project_id).await, 0);
+        assert_eq!(replay.len(), 1);
+        assert!(replay[0].replayed);
+        assert_eq!(replay[0].validation_id, live.validation_id);
+        assert_eq!(typed_transition_count(&db, &live.validation_id).await, 1);
+        let after = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
+        assert!(after.linked_spike_task_id.is_none());
+        assert!(after.needs_evidence_claim.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn task_created_event_for_closed_linked_spike_records_evidence_received() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let (proposal_repo, task_repo, proposal, spike_task, claim) =
+        let (proposal_repo, task_repo, proposal, spike_task, _) =
             setup_linked_evidence_spike_fixture(&db, &tx, "Event Created Success").await;
-        let findings = sample_evidence_findings("event-created success");
-        let findings_value = serde_json::to_value(&findings).unwrap();
-        proposal_repo
-            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
-                proposal_id: &proposal.id,
-                kind: "evidence_findings",
-                body: "valid event-created findings",
-                blocking: false,
-                agent_role: "spike",
-                author_kind: "agent",
-                author_model: None,
-                source_task_id: Some(&spike_task.id),
-                against_revision_seq: claim.against_revision_seq,
-                round: claim.round,
-                body_metadata: Some(&findings_value),
-            })
-            .await
-            .unwrap();
+        let raw = seed_durable_typed_return(&db, &task_repo, &proposal.id, &spike_task.id).await;
         let closed = task_repo
             .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
             .await
             .unwrap();
-
         let mut actor = make_coordinator_actor(&db, &tx);
-        actor
-            .handle_event(DjinnEventEnvelope::task_created(&closed, false))
+        let live = actor
+            .ingest_raw_tribunal_evidence_return_v1(&closed.id, &raw)
+            .await
+            .unwrap();
+        let replay = actor
+            .recover_terminal_linked_spike_evidence_for_task(&closed.id)
             .await;
-
-        assert_eq!(
-            count_evidence_lifecycle_events(
-                &proposal_repo,
-                &proposal.id,
-                evidence_lifecycle_kind::EVIDENCE_RECEIVED,
-            )
-            .await,
-            1,
-            "closed task_created events should follow the same linked-spike evidence path"
-        );
-        let after_receipt = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(replay[0].validation_id, live.validation_id);
+        assert!(replay[0].replayed);
+        assert_eq!(typed_transition_count(&db, &live.validation_id).await, 1);
         assert!(
-            after_receipt.linked_spike_task_id.is_none(),
-            "linked spike must be cleared after valid evidence receipt via task_created event"
+            proposal_repo
+                .get(&proposal.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .linked_spike_task_id
+                .is_none()
         );
-        assert!(
-            after_receipt.needs_evidence_claim.is_none(),
-            "needs-evidence claim must be cleared after valid evidence receipt via task_created event"
-        );
-        assert_eq!(tribunal_task_count(&task_repo, &closed.project_id).await, 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn task_closed_event_records_failed_for_failed_spike_and_blocks() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let (proposal_repo, task_repo, proposal, spike_task, _claim) =
-            setup_linked_evidence_spike_fixture(&db, &tx, "Event Failed").await;
-        let failed = task_repo
+        let (proposal_repo, task_repo, proposal, spike_task, _) =
+            setup_linked_evidence_spike_fixture(&db, &tx, "Closure Is Not Evidence").await;
+        let closed = task_repo
             .set_status_with_reason(&spike_task.id, "closed", Some("failed"))
             .await
             .unwrap();
-
         let mut actor = make_coordinator_actor(&db, &tx);
-        actor
-            .handle_event(DjinnEventEnvelope::task_updated(&failed, false))
-            .await;
-
-        assert_eq!(
-            count_evidence_lifecycle_events(
-                &proposal_repo,
-                &proposal.id,
-                evidence_lifecycle_kind::EVIDENCE_FAILED,
-            )
-            .await,
-            1
+        assert!(
+            actor
+                .recover_terminal_linked_spike_evidence_for_task(&closed.id)
+                .await
+                .is_empty()
         );
-        let still_linked = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
+        let after = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
         assert_eq!(
-            still_linked.linked_spike_task_id.as_deref(),
+            after.linked_spike_task_id.as_deref(),
             Some(spike_task.id.as_str())
         );
-        assert!(still_linked.needs_evidence_claim.is_some());
-        assert_eq!(tribunal_task_count(&task_repo, &failed.project_id).await, 0);
+        assert!(after.needs_evidence_claim.is_some());
     }
-
-    // ── Startup recovery for terminal linked evidence spikes ─────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn recover_terminal_linked_spike_evidence_records_received_and_clears_link() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let (proposal_repo, task_repo, proposal, spike_task, claim) =
+        let (proposal_repo, task_repo, proposal, spike_task, _) =
             setup_linked_evidence_spike_fixture(&db, &tx, "Recovery Success").await;
-        let findings = sample_evidence_findings("recovery success");
-        let findings_value = serde_json::to_value(&findings).unwrap();
-        proposal_repo
-            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
-                proposal_id: &proposal.id,
-                kind: "evidence_findings",
-                body: "valid recovery findings",
-                blocking: false,
-                agent_role: "spike",
-                author_kind: "agent",
-                author_model: None,
-                source_task_id: Some(&spike_task.id),
-                against_revision_seq: claim.against_revision_seq,
-                round: claim.round,
-                body_metadata: Some(&findings_value),
-            })
-            .await
-            .unwrap();
+        let raw = seed_durable_typed_return(&db, &task_repo, &proposal.id, &spike_task.id).await;
         task_repo
             .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
             .await
             .unwrap();
-
         let mut actor = make_coordinator_actor(&db, &tx);
-        actor.recover_terminal_linked_spike_evidence().await;
-
-        assert_eq!(
-            count_evidence_lifecycle_events(
-                &proposal_repo,
-                &proposal.id,
-                evidence_lifecycle_kind::EVIDENCE_RECEIVED,
-            )
-            .await,
-            1,
-            "recovery must record exactly one refinement_evidence_received row"
-        );
-        assert_eq!(
-            count_evidence_lifecycle_events(
-                &proposal_repo,
-                &proposal.id,
-                evidence_lifecycle_kind::EVIDENCE_FAILED,
-            )
-            .await,
-            0
-        );
-        // After successful recovery the durable evidence block is cleared
-        // so the proposal is no longer parked on the spike.
-        let recovered = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
+        let live = actor
+            .ingest_raw_tribunal_evidence_return_v1(&spike_task.id, &raw)
+            .await
+            .unwrap();
+        let replay = actor.recover_terminal_linked_spike_evidence().await;
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].validation_id, live.validation_id);
+        assert!(replay[0].replayed);
+        assert_eq!(typed_transition_count(&db, &live.validation_id).await, 1);
         assert!(
-            recovered.linked_spike_task_id.is_none(),
-            "linked_spike_task_id must be cleared after successful evidence recovery"
+            proposal_repo
+                .get(&proposal.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .linked_spike_task_id
+                .is_none()
         );
-        assert!(
-            recovered.needs_evidence_claim.is_none(),
-            "needs_evidence_claim must be cleared after successful evidence recovery"
-        );
-        assert_eq!(tribunal_task_count(&task_repo, &proposal.id).await, 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn recover_terminal_linked_spike_evidence_records_failed_for_terminal_failures() {
-        for close_reason in ["failed", "cancelled", "force_closed"] {
-            let db = test_helpers::create_test_db();
-            let (tx, _rx) = broadcast::channel(256);
-            let (proposal_repo, task_repo, proposal, spike_task, _claim) =
-                setup_linked_evidence_spike_fixture(&db, &tx, "Recovery Failure").await;
-            let status = if close_reason == "cancelled" {
-                "cancelled"
-            } else {
-                "closed"
-            };
-            task_repo
-                .set_status_with_reason(&spike_task.id, status, Some(close_reason))
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let (proposal_repo, task_repo, proposal, spike_task, _) =
+            setup_linked_evidence_spike_fixture(&db, &tx, "Terminal Failure Is Not Evidence").await;
+        task_repo
+            .set_status_with_reason(&spike_task.id, "closed", Some("failed"))
+            .await
+            .unwrap();
+        let mut actor = make_coordinator_actor(&db, &tx);
+        assert!(
+            actor
+                .recover_terminal_linked_spike_evidence()
                 .await
-                .unwrap();
-
-            let mut actor = make_coordinator_actor(&db, &tx);
-            actor.recover_terminal_linked_spike_evidence().await;
-
-            assert_eq!(
-                count_evidence_lifecycle_events(
-                    &proposal_repo,
-                    &proposal.id,
-                    evidence_lifecycle_kind::EVIDENCE_FAILED,
-                )
-                .await,
-                1,
-                "recovery must record one failure for {close_reason}"
-            );
-            assert_eq!(
-                count_evidence_lifecycle_events(
-                    &proposal_repo,
-                    &proposal.id,
-                    evidence_lifecycle_kind::EVIDENCE_RECEIVED,
-                )
-                .await,
-                0
-            );
-            let still_linked = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
-            assert_eq!(
-                still_linked.linked_spike_task_id.as_deref(),
-                Some(spike_task.id.as_str()),
-                "proposal must remain linked/blocked after failure"
-            );
-            assert!(still_linked.needs_evidence_claim.is_some());
-            assert_eq!(tribunal_task_count(&task_repo, &proposal.id).await, 0);
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn recover_terminal_linked_spike_evidence_records_failed_for_missing_or_malformed_findings()
-     {
-        for label in ["missing", "malformed"] {
-            let db = test_helpers::create_test_db();
-            let (tx, _rx) = broadcast::channel(256);
-            let (proposal_repo, task_repo, proposal, spike_task, claim) =
-                setup_linked_evidence_spike_fixture(&db, &tx, "Recovery No Findings").await;
-            if label == "malformed" {
-                // `add_debate_trail_entry` validates evidence findings, so a
-                // malformed row can only exist as legacy data — write a valid
-                // entry, then corrupt it underneath the repository API.
-                let findings = sample_evidence_findings("recovery malformed");
-                let findings_value = serde_json::to_value(&findings).unwrap();
-                let entry = proposal_repo
-                    .add_debate_trail_entry(ProposalDebateTrailCreateInput {
-                        proposal_id: &proposal.id,
-                        kind: "evidence_findings",
-                        body: "malformed recovery findings",
-                        blocking: false,
-                        agent_role: "spike",
-                        author_kind: "agent",
-                        author_model: None,
-                        source_task_id: Some(&spike_task.id),
-                        against_revision_seq: claim.against_revision_seq,
-                        round: claim.round,
-                        body_metadata: Some(&findings_value),
-                    })
-                    .await
-                    .unwrap();
-                let malformed = serde_json::json!({
-                    "answer": "",
-                    "evidence": [],
-                    "code_paths_inspected": [],
-                    "confidence": 0.7,
-                    "residual_risks": [],
-                    "recommendation_for_advocate": ""
-                });
-                djinn_db::test_support::override_debate_trail_body_metadata(
-                    &db, &entry.id, &malformed,
-                )
-                .await;
-            }
-            task_repo
-                .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
-                .await
-                .unwrap();
-
-            let mut actor = make_coordinator_actor(&db, &tx);
-            actor.recover_terminal_linked_spike_evidence().await;
-
-            assert_eq!(
-                count_evidence_lifecycle_events(
-                    &proposal_repo,
-                    &proposal.id,
-                    evidence_lifecycle_kind::EVIDENCE_FAILED,
-                )
-                .await,
-                1,
-                "recovery must record one failure for {label} findings"
-            );
-            assert_eq!(
-                count_evidence_lifecycle_events(
-                    &proposal_repo,
-                    &proposal.id,
-                    evidence_lifecycle_kind::EVIDENCE_RECEIVED,
-                )
-                .await,
-                0
-            );
-            let still_linked = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
-            assert_eq!(
-                still_linked.linked_spike_task_id.as_deref(),
-                Some(spike_task.id.as_str())
-            );
-            assert!(still_linked.needs_evidence_claim.is_some());
-            assert_eq!(tribunal_task_count(&task_repo, &proposal.id).await, 0);
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn recover_terminal_linked_spike_evidence_no_op_for_open_or_running_spikes() {
-        for (status, label) in [("open", "open"), ("in_progress", "running")] {
-            let db = test_helpers::create_test_db();
-            let (tx, _rx) = broadcast::channel(256);
-            let (proposal_repo, task_repo, proposal, spike_task, _claim) =
-                setup_linked_evidence_spike_fixture(&db, &tx, "Recovery No-op").await;
-            if status == "in_progress" {
-                task_repo
-                    .set_status_with_reason(&spike_task.id, status, None)
-                    .await
-                    .unwrap();
-            }
-            // "open" is the default status already set by the fixture.
-
-            let mut actor = make_coordinator_actor(&db, &tx);
-            actor.recover_terminal_linked_spike_evidence().await;
-
-            assert_eq!(
-                count_evidence_lifecycle_events(
-                    &proposal_repo,
-                    &proposal.id,
-                    evidence_lifecycle_kind::EVIDENCE_RECEIVED,
-                )
-                .await,
-                0,
-                "{label} spikes must not produce receipt rows"
-            );
-            assert_eq!(
-                count_evidence_lifecycle_events(
-                    &proposal_repo,
-                    &proposal.id,
-                    evidence_lifecycle_kind::EVIDENCE_FAILED,
-                )
-                .await,
-                0,
-                "{label} spikes must not produce failure rows"
-            );
-            assert_eq!(tribunal_task_count(&task_repo, &proposal.id).await, 0);
-        }
+                .is_empty()
+        );
+        let after = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.linked_spike_task_id.as_deref(),
+            Some(spike_task.id.as_str())
+        );
+        assert!(after.needs_evidence_claim.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn recover_terminal_linked_spike_evidence_is_idempotent() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let (proposal_repo, task_repo, proposal, spike_task, claim) =
+        let (_proposal_repo, task_repo, proposal, spike_task, _) =
             setup_linked_evidence_spike_fixture(&db, &tx, "Recovery Idempotent").await;
-        let findings = sample_evidence_findings("recovery idempotent");
-        let findings_value = serde_json::to_value(&findings).unwrap();
-        proposal_repo
-            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
-                proposal_id: &proposal.id,
-                kind: "evidence_findings",
-                body: "valid idempotent findings",
-                blocking: false,
-                agent_role: "spike",
-                author_kind: "agent",
-                author_model: None,
-                source_task_id: Some(&spike_task.id),
-                against_revision_seq: claim.against_revision_seq,
-                round: claim.round,
-                body_metadata: Some(&findings_value),
-            })
-            .await
-            .unwrap();
+        let raw = seed_durable_typed_return(&db, &task_repo, &proposal.id, &spike_task.id).await;
         task_repo
             .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
             .await
             .unwrap();
-
         let mut actor = make_coordinator_actor(&db, &tx);
-        actor.recover_terminal_linked_spike_evidence().await;
-
-        // First pass records receipt and clears the link.
-        let after_first = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
-        assert!(
-            after_first.linked_spike_task_id.is_none(),
-            "first recovery pass must clear the link"
-        );
-
-        // Second pass finds no candidates (link already cleared) so it is a
-        // pure no-op — no duplicate lifecycle events or link mutations.
-        actor.recover_terminal_linked_spike_evidence().await;
-
-        assert_eq!(
-            count_evidence_lifecycle_events(
-                &proposal_repo,
-                &proposal.id,
-                evidence_lifecycle_kind::EVIDENCE_RECEIVED,
-            )
-            .await,
-            1,
-            "second recovery pass must not duplicate the receipt row"
-        );
-        assert_eq!(
-            count_evidence_lifecycle_events(
-                &proposal_repo,
-                &proposal.id,
-                evidence_lifecycle_kind::EVIDENCE_FAILED,
-            )
-            .await,
-            0,
-            "second recovery pass must not introduce a failure row"
-        );
-        let after_second = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
-        assert!(
-            after_second.linked_spike_task_id.is_none(),
-            "link must remain cleared after second pass"
-        );
-        assert_eq!(tribunal_task_count(&task_repo, &proposal.id).await, 0);
+        let live = actor
+            .ingest_raw_tribunal_evidence_return_v1(&spike_task.id, &raw)
+            .await
+            .unwrap();
+        let first = actor.recover_terminal_linked_spike_evidence().await;
+        let second = actor.recover_terminal_linked_spike_evidence().await;
+        assert_eq!(first[0].validation_id, live.validation_id);
+        assert!(first[0].replayed && second[0].replayed);
+        assert_eq!(second[0].validation_id, live.validation_id);
+        assert_eq!(typed_transition_count(&db, &live.validation_id).await, 1);
     }
 
-    /// When the lifecycle event was already recorded by a prior recovery pass
-    /// (or the event-driven path during startup) and the link was already
-    /// cleared, recovery finds no candidates and is a no-op.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn recover_terminal_linked_spike_evidence_no_candidates_when_link_already_cleared() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let (proposal_repo, task_repo, proposal, spike_task, claim) =
+        let (_proposal_repo, task_repo, proposal, spike_task, _) =
             setup_linked_evidence_spike_fixture(&db, &tx, "Already Cleared").await;
-        let findings = sample_evidence_findings("already cleared");
-        let findings_value = serde_json::to_value(&findings).unwrap();
-        proposal_repo
-            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
-                proposal_id: &proposal.id,
-                kind: "evidence_findings",
-                body: "valid already-cleared findings",
-                blocking: false,
-                agent_role: "spike",
-                author_kind: "agent",
-                author_model: None,
-                source_task_id: Some(&spike_task.id),
-                against_revision_seq: claim.against_revision_seq,
-                round: claim.round,
-                body_metadata: Some(&findings_value),
-            })
-            .await
-            .unwrap();
+        let raw = seed_durable_typed_return(&db, &task_repo, &proposal.id, &spike_task.id).await;
         task_repo
             .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
             .await
             .unwrap();
-
-        // Simulate a prior pass that recorded the receipt AND cleared the link.
         let mut actor = make_coordinator_actor(&db, &tx);
-        actor.recover_terminal_linked_spike_evidence().await;
-        let after_prior = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
-        assert!(
-            after_prior.linked_spike_task_id.is_none(),
-            "prior pass must have cleared the link"
-        );
-
-        // A subsequent recovery pass finds no candidates (link is cleared)
-        // and does not write duplicate lifecycle events.
-        actor.recover_terminal_linked_spike_evidence().await;
-
-        assert_eq!(
-            count_evidence_lifecycle_events(
-                &proposal_repo,
-                &proposal.id,
-                evidence_lifecycle_kind::EVIDENCE_RECEIVED,
-            )
-            .await,
-            1,
-            "subsequent pass must not duplicate the receipt"
-        );
-        assert_eq!(tribunal_task_count(&task_repo, &proposal.id).await, 0);
+        let live = actor
+            .ingest_raw_tribunal_evidence_return_v1(&spike_task.id, &raw)
+            .await
+            .unwrap();
+        let replay = actor.recover_terminal_linked_spike_evidence().await;
+        assert_eq!(replay[0].validation_id, live.validation_id);
+        assert!(replay[0].replayed);
+        assert_eq!(typed_transition_count(&db, &live.validation_id).await, 1);
     }
 
-    /// Recovery for a completed spike with valid findings that was already
-    /// processed by the event-driven path (which recorded the receipt but
-    /// did not clear the link — coordinator crashed between recording and
-    /// calling resume). Recovery finds the lifecycle already recorded, still
-    /// clears the link/claim via resume, and does not duplicate the receipt.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn recover_terminal_linked_spike_evidence_clears_link_for_already_recorded() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let (proposal_repo, task_repo, proposal, spike_task, claim) =
-            setup_linked_evidence_spike_fixture(&db, &tx, "Already Recorded").await;
-        let findings = sample_evidence_findings("already recorded");
-        let findings_value = serde_json::to_value(&findings).unwrap();
-        proposal_repo
-            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
-                proposal_id: &proposal.id,
-                kind: "evidence_findings",
-                body: "valid already-recorded findings",
-                blocking: false,
-                agent_role: "spike",
-                author_kind: "agent",
-                author_model: None,
-                source_task_id: Some(&spike_task.id),
-                against_revision_seq: claim.against_revision_seq,
-                round: claim.round,
-                body_metadata: Some(&findings_value),
-            })
-            .await
-            .unwrap();
+        let (proposal_repo, task_repo, proposal, spike_task, _) =
+            setup_linked_evidence_spike_fixture(&db, &tx, "Commit Before Resume").await;
+        let raw = seed_durable_typed_return(&db, &task_repo, &proposal.id, &spike_task.id).await;
         task_repo
             .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
             .await
             .unwrap();
-
-        // Simulate the event-driven path recording the receipt first (without
-        // clearing the link — as happens when the coordinator crashes between
-        // recording the receipt and calling resume).
-        proposal_repo
-            .persist_terminal_linked_spike_evidence_lifecycle(
-                &proposal.id,
-                &spike_task.id,
-                "closed",
-                Some("completed"),
-            )
+        // Model the crash after the real typed transaction but before the actor resumes folding.
+        let repo = djinn_db::TypedEvidenceRepository::new(db.clone());
+        let committed = repo
+            .submit_return_v1_for_task(&spike_task.id, raw.as_bytes())
             .await
             .unwrap();
-        assert_eq!(
-            count_evidence_lifecycle_events(
-                &proposal_repo,
-                &proposal.id,
-                evidence_lifecycle_kind::EVIDENCE_RECEIVED,
-            )
-            .await,
-            1,
-            "setup: receipt must be recorded before recovery"
-        );
-        // Link is still set — the event-driven path was interrupted before
-        // clearing it.
-        let before_recovery = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
+        assert!(!committed.replayed);
         assert!(
-            before_recovery.linked_spike_task_id.is_some(),
-            "setup: link must still be set before recovery"
+            proposal_repo
+                .get(&proposal.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .linked_spike_task_id
+                .is_none()
         );
-
-        // Recovery runs and finds the lifecycle already recorded. It must
-        // still clear the link/claim via resume.
+        // Keep dispatch administratively parked after resume so the in-memory
+        // phase itself is the visible proof that replay invoked folding.
+        proposal_repo.set_frozen(&proposal.id, true).await.unwrap();
         let mut actor = make_coordinator_actor(&db, &tx);
-        actor.recover_terminal_linked_spike_evidence().await;
-
-        let after_recovery = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
-        assert!(
-            after_recovery.linked_spike_task_id.is_none(),
-            "recovery must clear link even when lifecycle was already recorded"
-        );
-        assert!(
-            after_recovery.needs_evidence_claim.is_none(),
-            "recovery must clear claim even when lifecycle was already recorded"
+        let mut awaiting = RefinementLoopState::new(&proposal.id, 1);
+        awaiting.phase = RefinementPhase::AwaitingEvidence;
+        actor
+            .active_refinements
+            .insert(proposal.id.clone(), awaiting);
+        let replay = actor.recover_terminal_linked_spike_evidence().await;
+        assert_eq!(replay[0].validation_id, committed.validation_id);
+        assert!(replay[0].replayed);
+        assert_eq!(
+            typed_transition_count(&db, &committed.validation_id).await,
+            1
         );
         assert_eq!(
-            count_evidence_lifecycle_events(
-                &proposal_repo,
-                &proposal.id,
-                evidence_lifecycle_kind::EVIDENCE_RECEIVED,
-            )
-            .await,
-            1,
-            "recovery must not duplicate the receipt row"
+            actor.active_refinements[&proposal.id].phase,
+            RefinementPhase::AdvocateRevision,
+            "an evidence_received duplicate must visibly re-drive the interrupted fold"
         );
-        assert_eq!(tribunal_task_count(&task_repo, &proposal.id).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_dispositions_replay_without_regressing_refinement() {
+        for disposition in [
+            TribunalEvidenceLifecycle::Resolved,
+            TribunalEvidenceLifecycle::Withdrawn,
+        ] {
+            let db = test_helpers::create_test_db();
+            let (tx, _rx) = broadcast::channel(256);
+            let (proposal_repo, task_repo, proposal, spike_task, _) =
+                setup_linked_evidence_spike_fixture(&db, &tx, "Terminal replay authority").await;
+            let raw =
+                seed_durable_typed_return(&db, &task_repo, &proposal.id, &spike_task.id).await;
+            task_repo
+                .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
+                .await
+                .unwrap();
+            let committed = TypedEvidenceRepository::new(db.clone())
+                .submit_return_v1_for_task(&spike_task.id, raw.as_bytes())
+                .await
+                .unwrap();
+            dispose_received_finding_for_test(
+                &db,
+                &proposal_repo,
+                &task_repo,
+                &proposal.id,
+                &committed.validation_id,
+                disposition,
+            )
+            .await;
+            let transitions_before_replay =
+                typed_transition_count(&db, &committed.validation_id).await;
+            assert_eq!(transitions_before_replay, 2);
+
+            let mut actor = make_coordinator_actor(&db, &tx);
+            let mut advanced = RefinementLoopState::new(&proposal.id, 1);
+            advanced.phase = RefinementPhase::AwaitingHumanReview;
+            actor
+                .active_refinements
+                .insert(proposal.id.clone(), advanced);
+
+            let live = actor
+                .ingest_raw_tribunal_evidence_return_v1(&spike_task.id, &raw)
+                .await
+                .unwrap();
+            let recovery = actor
+                .recover_terminal_linked_spike_evidence_for_task(&spike_task.id)
+                .await;
+            assert_eq!(live.lifecycle, disposition);
+            assert!(live.replayed);
+            assert_eq!(recovery.len(), 1);
+            assert_eq!(recovery[0].lifecycle, disposition);
+            assert!(recovery[0].replayed);
+            assert_eq!(recovery[0].validation_id, committed.validation_id);
+            assert_eq!(live.validation_id, committed.validation_id);
+            assert_eq!(
+                typed_transition_count(&db, &committed.validation_id).await,
+                transitions_before_replay,
+                "replaying a terminal result must not append another lifecycle transition"
+            );
+            assert_eq!(
+                actor.active_refinements[&proposal.id].phase,
+                RefinementPhase::AwaitingHumanReview,
+                "terminal historical evidence must not resume Advocate folding"
+            );
+            assert!(
+                !actor.refinement_sessions.contains_key(&proposal.id),
+                "terminal historical evidence must not dispatch an Advocate session"
+            );
+        }
     }
 }

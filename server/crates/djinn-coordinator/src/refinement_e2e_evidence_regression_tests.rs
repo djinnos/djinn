@@ -34,12 +34,9 @@ use crate::refinement_dispatch::refinement_cap_tests::{
 };
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{NeedsEvidenceClaim, TribunalEvidenceLifecycle};
-use djinn_db::repositories::proposal::TerminalLinkedEvidenceSpikeOutcome;
-use djinn_db::repositories::test_support::{UsageTestSessionSeed, seed_session_row_with_id};
 use djinn_db::{
-    EffectiveCreatorProvenance, EvidenceRepository, InsertEvidenceFinalizedProjection,
-    InsertEvidencePlan, InsertEvidencePlanCheck, ProposalDebateTrailCreateInput,
-    ProposalRepository, TaskRepository, TypedEvidenceLifecycleProjection, TypedEvidenceRepository,
+    EffectiveCreatorProvenance, ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository,
+    TypedEvidenceLifecycleProjection, TypedEvidenceRepository,
 };
 use serde::Deserialize;
 
@@ -53,9 +50,6 @@ struct EvidenceLifecycleFixture {
 #[derive(Deserialize)]
 struct EvidenceLifecycleCase {
     name: String,
-    structured_completion: Option<String>,
-    terminal_success: bool,
-    resume_refinement: bool,
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -177,69 +171,31 @@ async fn seed_linked_spike(
     (spike_task_id, judge_task_id)
 }
 
-/// Seed the authoritative frozen plan and V1 projection consumed by the
-/// lifecycle repository. The production query validates these arrays and
-/// derives its typed receipt from `payload.outcome`.
-async fn seed_v1_completion(
+/// Seed the canonical typed authority and a production durable delivery.
+async fn seed_typed_return_delivery(
     db: &djinn_db::Database,
-    fixture: &crate::refinement_dispatch::refinement_cap_tests::RefinementFixture,
+    proposal_id: &str,
     spike_task_id: &str,
-    outcome: Option<&str>,
-) {
-    let session_id = uuid::Uuid::now_v7().to_string();
-    seed_session_row_with_id(
+) -> String {
+    let fixture = djinn_db::test_support::seed_typed_evidence_ingress_fixture_for_test(
         db,
-        &session_id,
-        UsageTestSessionSeed {
-            project_id: &fixture.project_id,
-            model_id: TEST_MODEL,
-            agent_type: "worker",
-            started_at: "2025-01-01T00:00:00.000Z",
-            tokens_in: 0,
-            tokens_out: 0,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            cost_usd: None,
-            cost_basis: "unpriced",
-            task_id: Some(spike_task_id),
-        },
+        proposal_id,
+        spike_task_id,
+        "e2e-check",
     )
     .await;
-    let plan_id = uuid::Uuid::now_v7().to_string();
-    let evidence = EvidenceRepository::new(db.clone());
-    evidence
-        .insert_plan(InsertEvidencePlan {
-            id: plan_id.clone(),
-            spike_task_id: spike_task_id.to_owned(),
-            session_id,
-            captured_commit_sha: "evidence-lifecycle-fixture".to_owned(),
-            worktree_fingerprint: "fixture-worktree".to_owned(),
-            checks: vec![InsertEvidencePlanCheck {
-                check_id: "lifecycle-check".to_owned(),
-                question: "Does the V1 completion reach the lifecycle receipt?".to_owned(),
-                method: "code".to_owned(),
-            }],
-        })
+    let raw = serde_json::json!({"version":"TribunalEvidenceReturnV1","finding_id":fixture.finding_id,"spike_task_id":spike_task_id,"attempt_id":fixture.attempt_id,"conclusion":"typed receipt","checks":[{"check_id":"e2e-check","method":"code","status":"passed","anchors":[]}]}).to_string();
+    TaskRepository::new(db.clone(), EventBus::noop())
+        .log_activity(
+            Some(spike_task_id),
+            "worker",
+            "worker",
+            "tribunal_evidence_return_v1",
+            &raw,
+        )
         .await
-        .expect("insert frozen evidence plan");
-    if let Some(outcome) = outcome {
-        evidence
-            .insert_finalized_projection(InsertEvidenceFinalizedProjection {
-                id: uuid::Uuid::now_v7().to_string(),
-                plan_id: plan_id.clone(),
-                version: 1,
-                payload: serde_json::json!({
-                    "schema_version": 1,
-                    "plan_id": plan_id,
-                    "outcome": outcome,
-                    "checks": [],
-                    "findings": [],
-                    "gaps": []
-                }),
-            })
-            .await
-            .expect("insert finalized V1 projection");
-    }
+        .expect("log durable typed return");
+    raw
 }
 
 /// Count the number of refinement tasks in the project with the given agent
@@ -340,6 +296,7 @@ async fn valid_evidence_completion_resumes_only_advocate_and_leaves_typed_findin
         Some(sample_findings_metadata("FINDINGS-ANSWER-E2E valid")),
     )
     .await;
+    let raw = seed_typed_return_delivery(&db, &fixture.proposal_id, &spike_task_id).await;
 
     let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
     seed_refinement_state(
@@ -359,11 +316,25 @@ async fn valid_evidence_completion_resumes_only_advocate_and_leaves_typed_findin
         .await
         .expect("read spike")
         .expect("spike exists");
-    actor
-        .persist_terminal_linked_spike_evidence_from_closed_task(&task)
+    let live = actor
+        .ingest_raw_tribunal_evidence_return_v1(&task.id, &raw)
+        .await
+        .expect("live typed delivery persisted");
+    let replay = actor
+        .recover_terminal_linked_spike_evidence_for_task(&task.id)
         .await;
+    assert_eq!(replay.len(), 1);
+    assert!(replay[0].replayed);
+    assert_eq!(replay[0].validation_id, live.validation_id);
+    let transitions =
+        djinn_db::test_support::typed_evidence_transition_count_for_validation_for_test(
+            &db,
+            &live.validation_id,
+        )
+        .await;
+    assert_eq!(transitions, 1);
 
-    // Link and claim are cleared exactly once.
+    // Link and claim are cleared exactly once by the typed transaction.
     let proposal = proposal_repo
         .get(&fixture.proposal_id)
         .await
@@ -371,17 +342,6 @@ async fn valid_evidence_completion_resumes_only_advocate_and_leaves_typed_findin
         .expect("proposal exists");
     assert!(proposal.linked_spike_task_id.is_none());
     assert!(proposal.needs_evidence_claim.is_none());
-
-    // Exactly one receipt lifecycle event.
-    let lifecycle = proposal_repo
-        .revisions(&fixture.proposal_id)
-        .await
-        .expect("read lifecycle");
-    let receipt_events: Vec<_> = lifecycle
-        .iter()
-        .filter(|r| r.event_kind == "refinement_evidence_received")
-        .collect();
-    assert_eq!(receipt_events.len(), 1);
 
     // The next Advocate session is in-flight with findings in context.
     let session = actor
@@ -461,88 +421,26 @@ async fn valid_evidence_completion_resumes_only_advocate_and_leaves_typed_findin
     );
 }
 
-/// The lifecycle fixture is behavioral: every row first calls the production
-/// persistence primitive, then redelivers through the coordinator event path.
-/// Typed outcomes are read from finalized V1 projections rather than inferred
-/// by this test.
+/// Legacy terminal/prose state is not evidence: only a durable V1 activity can
+/// cross the coordinator ingress, regardless of the old lifecycle case label.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn evidence_rollout_contract_executes_every_lifecycle_case() {
+async fn legacy_terminal_lifecycle_cases_do_not_manufacture_typed_receipts() {
     let contract: EvidenceLifecycleFixture =
         serde_json::from_str(LIFECYCLE_CASES).expect("valid lifecycle fixture");
-    assert_eq!(contract.cases.len(), 6, "fixture remains a closed contract");
-
     for case in contract.cases {
         let db = crate::test_helpers::create_test_db();
         let fixture = seed_refinement_fixture(&db).await;
         let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
         let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
         let proposal_repo = ProposalRepository::new(db.clone(), EventBus::noop());
-        let terminal_failure = case.name == "task_failure";
         let (spike_task_id, _) = seed_linked_spike(
             &db,
             &fixture,
             "closed",
-            Some(if terminal_failure {
-                "failed"
-            } else {
-                "completed"
-            }),
-            Some(sample_findings_metadata(&format!(
-                "{} V1 findings",
-                case.name
-            ))),
+            Some("completed"),
+            Some(sample_findings_metadata(&case.name)),
         )
         .await;
-
-        // Missing completion has a frozen plan but no V1 projection; malformed
-        // completion has the authoritative shape with an invalid outcome.
-        let projection_outcome = case
-            .structured_completion
-            .as_deref()
-            .filter(|outcome| *outcome != "missing");
-        seed_v1_completion(&db, &fixture, &spike_task_id, projection_outcome).await;
-
-        // Exercise the repository's authoritative V1 classification directly.
-        // This is deliberately before coordinator delivery to model a crash
-        // after receipt persistence and before the linked spike is cleared.
-        let persisted = proposal_repo
-            .persist_terminal_linked_spike_evidence_lifecycle(
-                &fixture.proposal_id,
-                &spike_task_id,
-                "closed",
-                if terminal_failure {
-                    Some("failed")
-                } else {
-                    Some("completed")
-                },
-            )
-            .await
-            .expect("persist lifecycle through production repository path");
-        match persisted {
-            TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived { derived_outcome } => {
-                assert!(
-                    case.terminal_success,
-                    "{} must not classify as a typed receipt",
-                    case.name
-                );
-                assert_eq!(
-                    serde_json::to_value(derived_outcome).expect("serialize derived outcome"),
-                    serde_json::json!(case.structured_completion),
-                    "{} typed outcome must come from the V1 projection",
-                    case.name
-                );
-            }
-            TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { .. } => assert!(
-                !case.terminal_success,
-                "{} must produce a typed receipt",
-                case.name
-            ),
-            other => panic!(
-                "{} first production persistence must classify a terminal spike, got {other:?}",
-                case.name
-            ),
-        }
-
         let mut actor = build_refinement_actor(&db, &events_tx, spawn_test_pool(&db, 4));
         seed_refinement_state(
             &mut actor,
@@ -554,65 +452,28 @@ async fn evidence_rollout_contract_executes_every_lifecycle_case() {
             .get_mut(&fixture.proposal_id)
             .expect("state exists")
             .record_needs_evidence();
-        let task = task_repo
-            .get(&spike_task_id)
-            .await
-            .expect("read spike")
-            .expect("spike exists");
-        // Redelivery takes the production event-driven AlreadyRecorded branch.
-        // That branch must hydrate the same receipt and resume only successes.
-        actor
-            .persist_terminal_linked_spike_evidence_from_closed_task(&task)
+        let results = actor
+            .recover_terminal_linked_spike_evidence_for_task(&spike_task_id)
             .await;
-
-        let revisions = proposal_repo
-            .revisions(&fixture.proposal_id)
+        assert!(
+            results.is_empty(),
+            "{}: closure/prose alone is not a typed delivery",
+            case.name
+        );
+        let proposal = proposal_repo
+            .get(&fixture.proposal_id)
             .await
-            .expect("read lifecycle rows");
-        let received = revisions
-            .iter()
-            .find(|revision| revision.event_kind == "refinement_evidence_received");
-        let failed = revisions
-            .iter()
-            .find(|revision| revision.event_kind == "refinement_evidence_failed");
+            .expect("read proposal")
+            .expect("proposal exists");
         assert_eq!(
-            received.is_some(),
-            case.terminal_success,
-            "{} receipt classification must use production persistence",
-            case.name
+            proposal.linked_spike_task_id.as_deref(),
+            Some(spike_task_id.as_str())
         );
+        assert!(proposal.needs_evidence_claim.is_some());
+        assert!(actor.refinement_sessions.is_empty());
         assert_eq!(
-            failed.is_some(),
-            !case.terminal_success,
-            "{} failure",
-            case.name
-        );
-
-        if let Some(receipt) = received {
-            let metadata =
-                djinn_db::repositories::proposal::EvidenceLifecycleMetadata::parse_event_metadata(
-                    receipt.event_metadata.as_deref(),
-                )
-                .expect("read receipt metadata")
-                .expect("receipt metadata exists");
-            assert_eq!(
-                serde_json::to_value(metadata.derived_outcome).expect("serialize derived outcome"),
-                serde_json::json!(case.structured_completion),
-                "{} typed outcome persisted from V1 projection",
-                case.name
-            );
-        }
-
-        assert_eq!(
-            actor.refinement_sessions.contains_key(&fixture.proposal_id),
-            case.resume_refinement,
-            "{} must {} refinement through the production resume helper",
-            case.name,
-            if case.resume_refinement {
-                "resume"
-            } else {
-                "block"
-            }
+            count_refinement_tasks(&task_repo, &fixture.project_id, "advocate").await,
+            0
         );
     }
 }
@@ -648,9 +509,13 @@ async fn missing_findings_record_failure_and_block_resume() {
         .await
         .expect("read spike")
         .expect("spike exists");
-    actor
-        .persist_terminal_linked_spike_evidence_from_closed_task(&task)
+    let results = actor
+        .recover_terminal_linked_spike_evidence_for_task(&task.id)
         .await;
+    assert!(
+        results.is_empty(),
+        "closure/prose alone is not a typed delivery"
+    );
 
     // Link and claim remain set; failure lifecycle recorded; no Advocate.
     let proposal = proposal_repo
@@ -672,7 +537,11 @@ async fn missing_findings_record_failure_and_block_resume() {
         .iter()
         .filter(|r| r.event_kind == "refinement_evidence_failed")
         .collect();
-    assert_eq!(failure_events.len(), 1);
+    assert_eq!(
+        failure_events.len(),
+        0,
+        "no typed payload means no failure receipt"
+    );
 
     assert!(actor.refinement_sessions.is_empty());
     assert_eq!(
@@ -716,9 +585,13 @@ async fn failed_spike_records_failure_and_blocks_resume() {
         .await
         .expect("read spike")
         .expect("spike exists");
-    actor
-        .persist_terminal_linked_spike_evidence_from_closed_task(&task)
+    let results = actor
+        .recover_terminal_linked_spike_evidence_for_task(&task.id)
         .await;
+    assert!(
+        results.is_empty(),
+        "closure/prose alone is not a typed delivery"
+    );
 
     let lifecycle = proposal_repo
         .revisions(&fixture.proposal_id)
@@ -728,7 +601,11 @@ async fn failed_spike_records_failure_and_blocks_resume() {
         .iter()
         .filter(|r| r.event_kind == "refinement_evidence_failed")
         .collect();
-    assert_eq!(failure_events.len(), 1);
+    assert_eq!(
+        failure_events.len(),
+        0,
+        "no typed payload means no failure receipt"
+    );
 
     assert!(actor.refinement_sessions.is_empty());
 }
@@ -752,6 +629,7 @@ async fn freeze_precedence_after_receipt_records_but_does_not_resume() {
         Some(sample_findings_metadata("freeze gate finding")),
     )
     .await;
+    let raw = seed_typed_return_delivery(&db, &fixture.proposal_id, &spike_task_id).await;
 
     // Freeze the proposal before processing the closed spike.
     proposal_repo
@@ -776,11 +654,18 @@ async fn freeze_precedence_after_receipt_records_but_does_not_resume() {
         .await
         .expect("read spike")
         .expect("spike exists");
-    actor
-        .persist_terminal_linked_spike_evidence_from_closed_task(&task)
+    let live = actor
+        .ingest_raw_tribunal_evidence_return_v1(&task.id, &raw)
+        .await
+        .expect("live typed delivery persisted");
+    let replay = actor
+        .recover_terminal_linked_spike_evidence_for_task(&task.id)
         .await;
+    assert_eq!(replay.len(), 1);
+    assert!(replay[0].replayed);
+    assert_eq!(replay[0].validation_id, live.validation_id);
 
-    // Receipt is recorded and link/claim cleared.
+    // Receipt is recorded and link/claim cleared by the typed transaction.
     let proposal = proposal_repo
         .get(&fixture.proposal_id)
         .await
@@ -788,16 +673,6 @@ async fn freeze_precedence_after_receipt_records_but_does_not_resume() {
         .expect("proposal exists");
     assert!(proposal.linked_spike_task_id.is_none());
     assert!(proposal.needs_evidence_claim.is_none());
-    let lifecycle = proposal_repo
-        .revisions(&fixture.proposal_id)
-        .await
-        .expect("read lifecycle");
-    assert!(
-        lifecycle
-            .iter()
-            .any(|r| r.event_kind == "refinement_evidence_received")
-    );
-
     // But no automatic resume while frozen.
     assert!(actor.refinement_sessions.is_empty());
     assert_eq!(
@@ -885,11 +760,11 @@ async fn redrive_closed_with_findings_is_idempotent() {
         .iter()
         .filter(|r| r.event_kind == "refinement_evidence_received")
         .collect();
-    assert_eq!(receipt_events.len(), 1);
+    assert_eq!(receipt_events.len(), 0, "no typed payload means no receipt");
 
     assert_eq!(
         count_refinement_tasks(&task_repo, &fixture.project_id, "advocate").await,
-        1
+        0
     );
 }
 
@@ -922,7 +797,11 @@ async fn redrive_closed_without_findings_is_idempotent() {
         .iter()
         .filter(|r| r.event_kind == "refinement_evidence_failed")
         .collect();
-    assert_eq!(failure_events.len(), 1);
+    assert_eq!(
+        failure_events.len(),
+        0,
+        "no typed payload means no failure receipt"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -961,7 +840,11 @@ async fn redrive_failed_spike_is_idempotent() {
         .iter()
         .filter(|r| r.event_kind == "refinement_evidence_failed")
         .collect();
-    assert_eq!(failure_events.len(), 1);
+    assert_eq!(
+        failure_events.len(),
+        0,
+        "no typed payload means no failure receipt"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1004,7 +887,7 @@ async fn redrive_already_processed_lifecycle_is_idempotent() {
         .iter()
         .filter(|r| r.event_kind == "refinement_evidence_received")
         .collect();
-    assert_eq!(receipt_events.len(), 1);
+    assert_eq!(receipt_events.len(), 0, "no typed payload means no receipt");
 }
 
 // ── AC#6: races ──────────────────────────────────────────────────────────────
@@ -1185,9 +1068,13 @@ async fn sibling_refinement_completions_after_awaiting_evidence_do_not_enqueue_e
         .await
         .expect("read advocate task")
         .expect("advocate task exists");
-    actor
-        .persist_terminal_linked_spike_evidence_from_closed_task(&task)
+    let results = actor
+        .recover_terminal_linked_spike_evidence_for_task(&task.id)
         .await;
+    assert!(
+        results.is_empty(),
+        "closure/prose alone is not a typed delivery"
+    );
     actor.drive_active_refinements().await;
 
     let advocate_count = count_refinement_tasks(&task_repo, &fixture.project_id, "advocate").await;
