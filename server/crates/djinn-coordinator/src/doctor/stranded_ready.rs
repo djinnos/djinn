@@ -10,6 +10,14 @@
 //! can and cannot claim is decided in `djinn-db`'s
 //! `repositories::task::board_health_dispatch_gate`, so read that module before
 //! changing what a finding here asserts.
+//!
+//! The one nuance is `gate_escalation`. The DB section excludes tasks whose
+//! non-dispatch a visible gate explains, but only for a bounded time
+//! (`board_health::GATE_EXCLUSION_BOUND_MINUTES`); past that bound the task is
+//! reported with the gate carried as evidence. Such a candidate has a `blocked`
+//! verdict — a durable gate really is firing — so the ordinary "only
+//! `unexplained` fires" rule would drop it and leave the bound inert. It is
+//! therefore the single exception below.
 
 use djinn_core::doctor::{
     DoctorCheck, DoctorCheckCadence, DoctorResult, Finding, FindingSeverity, ResolverSnapshot,
@@ -51,6 +59,12 @@ pub struct StrandedReadyCandidate {
     pub severity: String,
     pub threshold: serde_json::Value,
     pub dispatch_gate: serde_json::Value,
+    /// Present and `escalated: true` when a visible dispatch gate has been
+    /// suppressing this task's finding for longer than the DB section's
+    /// `gate_exclusion_bound_minutes`. Optional so a payload predating the
+    /// bounded exclusions still parses.
+    #[serde(default)]
+    pub gate_escalation: Option<serde_json::Value>,
 }
 
 impl StrandedReadyCandidate {
@@ -78,7 +92,22 @@ impl StrandedReadyCandidate {
             severity: value.get("severity")?.as_str()?.to_owned(),
             threshold: value.get("threshold")?.clone(),
             dispatch_gate: value.get("dispatch_gate")?.clone(),
+            gate_escalation: value
+                .get("gate_escalation")
+                .filter(|v| !v.is_null())
+                .cloned(),
         })
+    }
+
+    /// The gate-escalation payload, but only when it actually claims one.
+    ///
+    /// A `null` or `escalated: false` value is not an escalation, and reading
+    /// it as one would resurrect the failure this field exists to fix from the
+    /// other direction.
+    fn escalation(&self) -> Option<&serde_json::Value> {
+        self.gate_escalation
+            .as_ref()
+            .filter(|value| value.get("escalated").and_then(|v| v.as_bool()) == Some(true))
     }
 }
 
@@ -160,7 +189,16 @@ impl StrandedReadyCheck {
             // A payload with no verdict at all told us nothing, which is
             // exactly what `unexplained` means.
             .unwrap_or("unexplained");
-        if gate_verdict != "unexplained" {
+
+        // An escalated candidate is the one case where a `blocked` verdict
+        // must still raise a finding. The verdict is honest — a durable gate
+        // IS firing — but the DB section has already established that the gate
+        // has been firing for longer than it can plausibly be transient, which
+        // is a different claim and one no `blocked` candidate can make on its
+        // own. Dropping it here would move the silencer from `djinn-db` into
+        // this file and leave the whole bound inert.
+        let escalation = candidate.escalation().cloned();
+        if escalation.is_none() && gate_verdict != "unexplained" {
             return None;
         }
 
@@ -178,24 +216,47 @@ impl StrandedReadyCheck {
             "elapsed_minutes": candidate.elapsed_minutes,
             "threshold": candidate.threshold,
             "dispatch_gate": candidate.dispatch_gate,
+            "gate_escalation": escalation,
         });
         let outputs = json!({
             "is_stranded": true,
             "severity": severity_label,
-            "reason": "stranded_ready",
+            "reason": if escalation.is_some() { "stranded_ready_gate_escalation" } else { "stranded_ready" },
             "gate_verdict": gate_verdict,
             "unevaluated_gate_count": unevaluated,
+            "gate_escalated": escalation.is_some(),
         });
         let snapshot =
             ResolverSnapshot::new("resolve_stranded_ready", inputs.clone(), outputs.clone());
         // The detail states the bound rather than implying the board proved
-        // nothing was wrong.
-        let detail = format!(
-            "task {} ({}) has been dispatchable and unclaimed for {} minutes (severity: {}); \
-             no gate board_health can evaluate explains it, and {unevaluated} dispatcher \
-             gates were not consulted",
-            candidate.short_id, candidate.title, candidate.elapsed_minutes, severity_label
-        );
+        // nothing was wrong. An escalated candidate says something stronger and
+        // more specific, so it gets its own sentence rather than being folded
+        // into the "nothing explains it" wording, which would be false.
+        let detail = match escalation.as_ref() {
+            Some(escalation) => format!(
+                "task {} ({}) has been dispatchable and unclaimed for {} minutes (severity: {}); \
+                 {}, which is past the {}-minute bound on how long a dispatch gate may explain a \
+                 strand — the gate is evidence, not an all-clear",
+                candidate.short_id,
+                candidate.title,
+                candidate.elapsed_minutes,
+                severity_label,
+                escalation
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("a dispatch gate has been suppressing this finding"),
+                escalation
+                    .get("bound_minutes")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or_default(),
+            ),
+            None => format!(
+                "task {} ({}) has been dispatchable and unclaimed for {} minutes (severity: {}); \
+                 no gate board_health can evaluate explains it, and {unevaluated} dispatcher \
+                 gates were not consulted",
+                candidate.short_id, candidate.title, candidate.elapsed_minutes, severity_label
+            ),
+        };
         let evidence = json!({
             "task_id": candidate.id,
             "short_id": candidate.short_id,
@@ -210,6 +271,7 @@ impl StrandedReadyCheck {
             "severity": severity_label,
             "threshold": candidate.threshold,
             "dispatch_gate": candidate.dispatch_gate,
+            "gate_escalation": escalation,
         });
 
         Some(
@@ -555,6 +617,105 @@ mod tests {
             findings.is_empty(),
             "a candidate with a named durable cause must not fire the starvation alarm"
         );
+    }
+
+    /// A gate that has been suppressing a task past the DB section's bound is
+    /// reported by `djinn-db` with a `blocked` verdict and a `gate_escalation`
+    /// block. If this check applied the plain "only `unexplained` fires" rule
+    /// it would drop that candidate and the whole bound would be inert — the
+    /// silencer would just have moved one crate over.
+    #[test]
+    fn escalated_gate_candidate_fires_despite_a_blocked_verdict() {
+        let mut overrides = serde_json::Map::new();
+        overrides.insert("elapsed_minutes".to_owned(), json!(5_760));
+        overrides.insert(
+            "dispatch_gate".to_owned(),
+            json!({
+                "evaluated_role": "worker",
+                "toolset": ["task_edit"],
+                "model_requirement": "openai/gpt-5.6-terra",
+                "image_ready": true,
+                "breaker_open": true,
+                "manually_paused": false,
+                "rate_limited": false,
+                "credential_available": true,
+                "gate_verdict": "blocked",
+                "reasons": ["breaker_cooldown_sustained_past_bound"],
+                "cooldown_until": "2026-08-16T12:00:00.000Z",
+            }),
+        );
+        overrides.insert(
+            "gate_escalation".to_owned(),
+            json!({
+                "escalated": true,
+                "overridden_gates": ["breaker_cooldown"],
+                "suppressed_minutes": 5_760,
+                "bound_minutes": 180,
+                "evidence": {
+                    "cooldown_until": "2026-08-16T12:00:00.000Z",
+                    "failure_streak": 0,
+                    "inflight_model_id": "openai/gpt-5.6-terra",
+                },
+                "summary": "a breaker cooldown on model openai/gpt-5.6-terra \
+                            (cooldown_until=2026-08-16T12:00:00.000Z) has suppressed this task \
+                            for 5760 minutes",
+            }),
+        );
+        let source = Arc::new(MemoryStrandedReadySource::new(snapshot_with(vec![
+            candidate_json(overrides),
+        ])));
+        let findings = StrandedReadyCheck::new(source).run().expect("run");
+        assert_eq!(
+            findings.len(),
+            1,
+            "a gate that has been suppressing a task past the bound must raise a finding"
+        );
+        let finding = &findings[0];
+        assert_eq!(finding.severity, FindingSeverity::Critical);
+        assert_eq!(
+            finding.resolver_snapshot.outputs["reason"],
+            "stranded_ready_gate_escalation"
+        );
+        assert_eq!(finding.resolver_snapshot.outputs["gate_escalated"], true);
+        assert_eq!(
+            finding.evidence["gate_escalation"]["overridden_gates"][0],
+            "breaker_cooldown"
+        );
+        assert_eq!(
+            finding.evidence["gate_escalation"]["evidence"]["inflight_model_id"],
+            "openai/gpt-5.6-terra"
+        );
+        assert!(
+            finding.detail.contains("openai/gpt-5.6-terra")
+                && finding.detail.contains("180-minute bound"),
+            "the detail must name the model and the bound: {}",
+            finding.detail
+        );
+        assert!(
+            !finding
+                .detail
+                .contains("no gate board_health can evaluate explains it"),
+            "an escalated finding must not claim nothing explains it: {}",
+            finding.detail
+        );
+    }
+
+    /// The escalation flag is a claim, not a key. A `gate_escalation` block
+    /// that says `escalated: false` must not turn a `blocked` candidate into a
+    /// finding.
+    #[test]
+    fn a_non_escalated_gate_escalation_block_does_not_fire() {
+        let mut overrides = serde_json::Map::new();
+        overrides.insert(
+            "dispatch_gate".to_owned(),
+            json!({"gate_verdict": "blocked", "reasons": ["build_pool_at_capacity"]}),
+        );
+        overrides.insert("gate_escalation".to_owned(), json!({"escalated": false}));
+        let source = Arc::new(MemoryStrandedReadySource::new(snapshot_with(vec![
+            candidate_json(overrides),
+        ])));
+        let findings = StrandedReadyCheck::new(source).run().expect("run");
+        assert!(findings.is_empty());
     }
 
     /// A payload with no verdict at all told us nothing, which is what
