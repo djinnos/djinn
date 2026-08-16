@@ -18,6 +18,8 @@ pub(crate) use tokio::sync::broadcast;
 mod board_health;
 #[path = "task_tests/board_health_dispatch_gate.rs"]
 mod board_health_dispatch_gate;
+#[path = "task_tests/board_health_gate_escalation.rs"]
+mod board_health_gate_escalation;
 #[path = "task_tests/board_health_kueue_admission.rs"]
 mod board_health_kueue_admission;
 #[path = "task_tests/closed_task_sync.rs"]
