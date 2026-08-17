@@ -115,6 +115,32 @@ pub async fn direct_delivery_generations_for_test(
     db: &Database,
     task_id: &str,
 ) -> Vec<DirectDeliveryGenerationSnapshotForTest> {
+    read_direct_delivery_generations(db, task_id)
+        .await
+        .expect("read direct-delivery generations for test")
+}
+
+/// Like `direct_delivery_generations_for_test`, but `None` when the ledger
+/// relation itself cannot be read.
+///
+/// The strict variant panics on a missing relation deliberately: a caller that
+/// expects generations and silently receives an empty vector is asserting
+/// nothing. The fail-closed matrix genuinely drops `task_deliveries`, so it
+/// needs to tell "no rows" (`Some(vec![])`) apart from "no table" (`None`)
+/// rather than have either collapse into the other.
+///
+/// **Not for production use.** Panics on non-schema SQL errors.
+pub async fn direct_delivery_generations_if_readable_for_test(
+    db: &Database,
+    task_id: &str,
+) -> Option<Vec<DirectDeliveryGenerationSnapshotForTest>> {
+    read_direct_delivery_generations(db, task_id).await.ok()
+}
+
+async fn read_direct_delivery_generations(
+    db: &Database,
+    task_id: &str,
+) -> Result<Vec<DirectDeliveryGenerationSnapshotForTest>, sqlx::Error> {
     db.ensure_initialized().await.unwrap();
     let rows = sqlx::query_as::<_, (String, i64, String, String, String, Option<String>, bool)>(
         "SELECT build_attempt_id, delivery_generation, state, candidate_sha, base_sha, \
@@ -124,9 +150,9 @@ pub async fn direct_delivery_generations_for_test(
     )
     .bind(task_id)
     .fetch_all(db.pool())
-    .await
-    .expect("read direct-delivery generations for test");
-    rows.into_iter()
+    .await?;
+    Ok(rows
+        .into_iter()
         .map(
             |(
                 build_attempt_id,
@@ -146,7 +172,7 @@ pub async fn direct_delivery_generations_for_test(
                 applied,
             },
         )
-        .collect()
+        .collect())
 }
 
 /// How many candidates one task's ledger has ever named, and how many of them
@@ -359,6 +385,64 @@ pub async fn seed_unknown_direct_delivery_epoch_for_test(db: &Database) {
     .execute(db.pool())
     .await
     .expect("failed to seed unknown direct-delivery epoch state");
+}
+
+/// Corrupt one task's persisted delivery-contract state to a value the typed
+/// contract does not define.
+///
+/// The `task_deliveries_state_check` constraint exists precisely so this cannot
+/// happen through any production write, so it is dropped here. That keeps the
+/// malformed case confined to test support: no production parser or SQLx query
+/// is loosened to manufacture it.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn seed_unknown_task_delivery_state_for_test(db: &Database, task_id: &str, state: &str) {
+    db.ensure_initialized().await.unwrap();
+    let _ = sqlx::query("ALTER TABLE task_deliveries DROP CONSTRAINT task_deliveries_state_check")
+        .execute(db.pool())
+        .await;
+    let _ =
+        sqlx::query("ALTER TABLE task_deliveries DROP CONSTRAINT task_deliveries_applied_shape")
+            .execute(db.pool())
+            .await;
+    // The immutability trigger is the other reason production cannot write this
+    // row. Dropping it here keeps the corruption a property of the fixture
+    // rather than a loosening of any production write path.
+    let _ = sqlx::query(
+        "DROP TRIGGER IF EXISTS task_deliveries_immutable_generation ON task_deliveries",
+    )
+    .execute(db.pool())
+    .await;
+    let updated = sqlx::query("UPDATE task_deliveries SET state = $1 WHERE task_id = $2")
+        .bind(state)
+        .bind(task_id)
+        .execute(db.pool())
+        .await
+        .expect("failed to seed unknown task delivery state")
+        .rows_affected();
+    assert!(
+        updated > 0,
+        "seed_unknown_task_delivery_state_for_test matched no delivery row for task {task_id}; \
+         the fixture would have silently proven nothing"
+    );
+}
+
+/// Delete every persisted delivery generation for one task without touching its
+/// attempt or epoch, so callers can exercise "the contract state is gone" apart
+/// from "the schema is gone".
+///
+/// Returns the number of rows removed so a caller can prove the fixture was not
+/// a no-op.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn remove_task_delivery_rows_for_test(db: &Database, task_id: &str) -> u64 {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("DELETE FROM task_deliveries WHERE task_id = $1")
+        .bind(task_id)
+        .execute(db.pool())
+        .await
+        .expect("failed to remove task delivery rows")
+        .rows_affected()
 }
 
 mod evidence_dispatch_recovery;

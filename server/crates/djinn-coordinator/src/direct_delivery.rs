@@ -3563,4 +3563,387 @@ mod ready_dispatch_repository_liveness_tests {
             );
         }
     }
+
+    /// Every persisted routing case this slice covers, named by the persisted
+    /// state that selects it rather than by the outcome it is expected to
+    /// produce — the outcome is what the assertions have to earn.
+    #[derive(Clone, Copy, Debug)]
+    enum ReadyRoutingCase {
+        /// Attempt-owning proposal exists but no epic carries it.
+        UnresolvedOwnership,
+        /// The delivery ledger relation is absent entirely.
+        MissingSchema,
+        /// No epoch row at all.
+        MissingEpoch,
+        /// An epoch row whose state string the typed contract does not define.
+        UnknownEpoch,
+        /// An active epoch and a resolvable attempt, but the persisted delivery
+        /// generation carries a state the typed contract does not define.
+        UnknownPersistedDeliveryState,
+        /// An active epoch and a resolvable attempt with no ledger row at all —
+        /// the canonical active-direct case.
+        ActiveDirectNoLedgerRow,
+        /// Epoch present and supported, but switched off.
+        SupportedDisabled,
+        /// Epoch active, task explicitly labelled back onto legacy delivery.
+        SupportedActiveExplicitLegacy,
+    }
+
+    /// What the shared frame did, and whether anything moved underneath it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct ReadyRoutingObservation {
+        continuation: Option<String>,
+        errored: bool,
+        legacy_continuations: usize,
+        reconciliations: usize,
+        task_pr_operations: usize,
+        direct_appends: usize,
+        remote_ref_pushes: usize,
+        task_updates: usize,
+    }
+
+    /// Repository state a fail-closed decision must leave exactly as it found
+    /// it. `status` is deliberately excluded: parking *is* the fail-closed
+    /// action, so it is asserted separately rather than smuggled in here.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct ReadyRoutingPersistedState {
+        pr_url: Option<String>,
+        merge_commit_sha: Option<String>,
+        task_attempts: i64,
+        matrix: djinn_db::test_support::DirectDeliveryMatrixCountsForTest,
+        generations: Option<Vec<djinn_db::test_support::DirectDeliveryGenerationSnapshotForTest>>,
+    }
+
+    /// Route the malformed/fail-closed and positive retained-legacy matrix
+    /// through the *same* top-level frame production `dispatch_ready_tasks`
+    /// calls.
+    ///
+    /// The pre-existing admission matrix asserts on `admit_ready_direct_delivery`
+    /// directly. That proves the classifier, not the frame: a regression that
+    /// classified correctly and then continued into spawn anyway would leave it
+    /// green. Here `continue_ready_dispatch` is the only boundary invoked, and
+    /// the legacy continuation is a real closure whose invocation is counted, so
+    /// "failed closed" means the spawn path was never entered — not merely that
+    /// an enum said so.
+    ///
+    /// Routing is established entirely by typed repository state — epoch row,
+    /// resolved attempt, persisted delivery generation, task labels. `pr_url`
+    /// stays null in every case below precisely so nothing can be inferred from
+    /// it.
+    #[tokio::test]
+    async fn ready_dispatch_frame_fails_closed_and_retains_legacy_by_persisted_state() {
+        use djinn_core::events::EventBus;
+        use djinn_db::test_support::{
+            direct_delivery_generations_if_readable_for_test,
+            direct_delivery_matrix_counts_for_test, drop_table_cascade_for_test,
+            remove_direct_delivery_epoch_for_test, remove_task_delivery_rows_for_test,
+            seed_direct_delivery_liveness_fixture_for_test, seed_direct_delivery_proposal_for_test,
+            seed_unknown_direct_delivery_epoch_for_test, seed_unknown_task_delivery_state_for_test,
+            task_attempt_count_for_test,
+        };
+        use djinn_db::{Database, EpicRepository, TaskRepository};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let boundary_operations = boundary_operations_scope().await;
+
+        for case in [
+            ReadyRoutingCase::UnresolvedOwnership,
+            ReadyRoutingCase::MissingSchema,
+            ReadyRoutingCase::MissingEpoch,
+            ReadyRoutingCase::UnknownEpoch,
+            ReadyRoutingCase::UnknownPersistedDeliveryState,
+            ReadyRoutingCase::ActiveDirectNoLedgerRow,
+            ReadyRoutingCase::SupportedDisabled,
+            ReadyRoutingCase::SupportedActiveExplicitLegacy,
+        ] {
+            let db = Database::open_in_memory().unwrap();
+            let task_updates = Arc::new(Mutex::new(0usize));
+            let observed_updates = task_updates.clone();
+            let observing_events = EventBus::new(move |event| {
+                if event.entity_type == "task" && event.action == "updated" {
+                    *observed_updates.lock().unwrap() += 1;
+                }
+            });
+            let epic = EpicRepository::new(db.clone(), EventBus::noop())
+                .create("routing", "", "", "", "", None)
+                .await
+                .unwrap();
+            let tasks = TaskRepository::new(db.clone(), observing_events);
+            let task = tasks
+                .create(&epic.id, "routing", "", "", "task", 0, "", Some("approved"))
+                .await
+                .unwrap();
+            assert!(
+                task.pr_url.is_none(),
+                "{case:?}: routing must never have nullable PR data to infer from"
+            );
+
+            match case {
+                ReadyRoutingCase::UnresolvedOwnership => {
+                    // A proposal exists and is active, but no epic carries it,
+                    // so `resolve_task_active_attempt` cannot reach an owner.
+                    djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
+                    seed_direct_delivery_proposal_for_test(&db, &task.id, &task.id[..8]).await;
+                }
+                ReadyRoutingCase::MissingSchema => {
+                    seed_direct_delivery_liveness_fixture_for_test(
+                        &db,
+                        &epic.id,
+                        &task.id,
+                        Some("applying"),
+                    )
+                    .await;
+                    drop_table_cascade_for_test(&db, "task_deliveries").await;
+                }
+                ReadyRoutingCase::MissingEpoch => {
+                    seed_direct_delivery_liveness_fixture_for_test(
+                        &db,
+                        &epic.id,
+                        &task.id,
+                        Some("applying"),
+                    )
+                    .await;
+                    remove_direct_delivery_epoch_for_test(&db).await;
+                }
+                ReadyRoutingCase::UnknownEpoch => {
+                    seed_direct_delivery_liveness_fixture_for_test(
+                        &db,
+                        &epic.id,
+                        &task.id,
+                        Some("applying"),
+                    )
+                    .await;
+                    seed_unknown_direct_delivery_epoch_for_test(&db).await;
+                }
+                ReadyRoutingCase::UnknownPersistedDeliveryState => {
+                    seed_direct_delivery_liveness_fixture_for_test(
+                        &db,
+                        &epic.id,
+                        &task.id,
+                        Some("applying"),
+                    )
+                    .await;
+                    seed_unknown_task_delivery_state_for_test(&db, &task.id, "quiesced").await;
+                }
+                ReadyRoutingCase::ActiveDirectNoLedgerRow => {
+                    seed_direct_delivery_liveness_fixture_for_test(
+                        &db,
+                        &epic.id,
+                        &task.id,
+                        Some("applying"),
+                    )
+                    .await;
+                    let removed = remove_task_delivery_rows_for_test(&db, &task.id).await;
+                    assert_eq!(
+                        removed, 1,
+                        "{case:?}: the no-ledger-row case must actually have removed a row"
+                    );
+                }
+                ReadyRoutingCase::SupportedDisabled => {
+                    seed_direct_delivery_liveness_fixture_for_test(
+                        &db,
+                        &epic.id,
+                        &task.id,
+                        Some("applying"),
+                    )
+                    .await;
+                    djinn_db::test_support::disable_direct_delivery_epoch_for_test(&db).await;
+                }
+                ReadyRoutingCase::SupportedActiveExplicitLegacy => {
+                    seed_direct_delivery_liveness_fixture_for_test(
+                        &db,
+                        &epic.id,
+                        &task.id,
+                        Some("applying"),
+                    )
+                    .await;
+                    tasks
+                        .update_labels(&task.id, &format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#))
+                        .await
+                        .unwrap();
+                }
+            }
+
+            async fn persisted(
+                db: &Database,
+                tasks: &TaskRepository,
+                task_id: &str,
+            ) -> (String, ReadyRoutingPersistedState) {
+                let task = tasks.get(task_id).await.unwrap().unwrap();
+                (
+                    task.status,
+                    ReadyRoutingPersistedState {
+                        pr_url: task.pr_url,
+                        merge_commit_sha: task.merge_commit_sha,
+                        task_attempts: task_attempt_count_for_test(db, task_id).await,
+                        matrix: direct_delivery_matrix_counts_for_test(db).await,
+                        generations: direct_delivery_generations_if_readable_for_test(db, task_id)
+                            .await,
+                    },
+                )
+            }
+
+            let (status_before, state_before) = persisted(&db, &tasks, &task.id).await;
+            *task_updates.lock().unwrap() = 0;
+            let checkpoint = boundary_operations.checkpoint();
+            let legacy_continuations = Arc::new(AtomicUsize::new(0));
+            let reconciliations = Arc::new(AtomicUsize::new(0));
+            let remote_pushes = Arc::new(AtomicUsize::new(0));
+            let legacy_for_call = legacy_continuations.clone();
+            let reconcile_for_call = reconciliations.clone();
+            let pushes_for_call = remote_pushes.clone();
+
+            let decision = crate::dispatch::task_dispatch::continue_ready_dispatch(
+                db.clone(),
+                &tasks,
+                &task.id,
+                || async move {
+                    reconcile_for_call.fetch_add(1, Ordering::SeqCst);
+                    // A reconcile that is reached at all in this matrix is the
+                    // failure; make it push before returning so a wrongly
+                    // admitted case cannot look inert.
+                    pushes_for_call.fetch_add(1, Ordering::SeqCst);
+                    Ok(DeliveryOutcome::Integrated {
+                        candidate_sha: "unexpected-reconcile".into(),
+                    })
+                },
+                || async move {
+                    legacy_for_call.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await;
+
+            let operations = boundary_operations.operations_since(checkpoint);
+            let observation = ReadyRoutingObservation {
+                continuation: decision
+                    .as_ref()
+                    .ok()
+                    .map(|decision| format!("{decision:?}")),
+                errored: decision.is_err(),
+                legacy_continuations: legacy_continuations.load(Ordering::SeqCst),
+                reconciliations: reconciliations.load(Ordering::SeqCst),
+                task_pr_operations: operations.iter().filter(|op| task_pr_operation(op)).count(),
+                direct_appends: operations
+                    .iter()
+                    .filter(|op| matches!(op, BoundaryOperation::DirectAppend))
+                    .count(),
+                remote_ref_pushes: remote_pushes.load(Ordering::SeqCst),
+                task_updates: *task_updates.lock().unwrap(),
+            };
+            let (status_after, state_after) = persisted(&db, &tasks, &task.id).await;
+
+            match case {
+                // ---- fail closed -------------------------------------------
+                ReadyRoutingCase::UnresolvedOwnership
+                | ReadyRoutingCase::MissingSchema
+                | ReadyRoutingCase::MissingEpoch
+                | ReadyRoutingCase::UnknownEpoch => {
+                    assert_eq!(
+                        observation,
+                        ReadyRoutingObservation {
+                            continuation: Some("Parked".to_owned()),
+                            errored: false,
+                            legacy_continuations: 0,
+                            reconciliations: 0,
+                            task_pr_operations: 0,
+                            direct_appends: 0,
+                            remote_ref_pushes: 0,
+                            // The single update is the fail-closed park itself.
+                            task_updates: 1,
+                        },
+                        "{case:?}: must park before any spawn, task-PR, append, or push effect"
+                    );
+                    assert_eq!(
+                        status_after, "needs_lead_intervention",
+                        "{case:?}: failing closed must escalate rather than dispatch"
+                    );
+                    assert_ne!(
+                        status_before, "needs_lead_intervention",
+                        "{case:?}: the fixture must not start already parked"
+                    );
+                    assert_eq!(
+                        state_after, state_before,
+                        "{case:?}: parking must not touch PR identity, integration, task \
+                         attempts, or the delivery ledger"
+                    );
+                }
+                // ---- fail closed, as an error ------------------------------
+                ReadyRoutingCase::UnknownPersistedDeliveryState => {
+                    assert_eq!(
+                        observation,
+                        ReadyRoutingObservation {
+                            continuation: None,
+                            errored: true,
+                            legacy_continuations: 0,
+                            reconciliations: 0,
+                            task_pr_operations: 0,
+                            direct_appends: 0,
+                            remote_ref_pushes: 0,
+                            task_updates: 0,
+                        },
+                        "{case:?}: an undefined persisted contract state must abort the pass \
+                         without spawning, reconciling, or mutating anything"
+                    );
+                    assert_eq!(
+                        status_after, status_before,
+                        "{case:?}: an unreadable ledger row must not move the task at all"
+                    );
+                    assert_eq!(state_after, state_before);
+                }
+                // ---- positive retained legacy / canonical direct dispatch ---
+                ReadyRoutingCase::ActiveDirectNoLedgerRow
+                | ReadyRoutingCase::SupportedDisabled
+                | ReadyRoutingCase::SupportedActiveExplicitLegacy => {
+                    assert_eq!(
+                        observation,
+                        ReadyRoutingObservation {
+                            continuation: Some("LegacyDispatch(())".to_owned()),
+                            errored: false,
+                            legacy_continuations: 1,
+                            reconciliations: 0,
+                            task_pr_operations: 0,
+                            direct_appends: 0,
+                            remote_ref_pushes: 0,
+                            task_updates: 0,
+                        },
+                        "{case:?}: must positively reach the retained legacy/dispatch \
+                         continuation exactly once"
+                    );
+                    assert_eq!(
+                        status_after, status_before,
+                        "{case:?}: entering the continuation is not itself a task mutation"
+                    );
+                    assert_eq!(state_after, state_before);
+                }
+            }
+
+            // Routing evidence: which typed reads the frame actually performed.
+            // SupportedDisabled short-circuits at the epoch, so it never
+            // resolves an attempt; every other supported case must.
+            let probes = operations
+                .iter()
+                .filter(|op| matches!(op, BoundaryOperation::CapabilityProbe))
+                .count();
+            assert_eq!(probes, 1, "{case:?}: the epoch must be probed exactly once");
+            let resolutions = operations
+                .iter()
+                .filter(|op| matches!(op, BoundaryOperation::ResolveTaskActiveAttempt))
+                .count();
+            let expected_resolutions = match case {
+                ReadyRoutingCase::MissingSchema
+                | ReadyRoutingCase::MissingEpoch
+                | ReadyRoutingCase::UnknownEpoch
+                | ReadyRoutingCase::SupportedDisabled
+                | ReadyRoutingCase::SupportedActiveExplicitLegacy => 0,
+                ReadyRoutingCase::UnresolvedOwnership
+                | ReadyRoutingCase::UnknownPersistedDeliveryState
+                | ReadyRoutingCase::ActiveDirectNoLedgerRow => 1,
+            };
+            assert_eq!(
+                resolutions, expected_resolutions,
+                "{case:?}: ownership resolution must be driven by persisted epoch/label state"
+            );
+        }
+    }
 }
