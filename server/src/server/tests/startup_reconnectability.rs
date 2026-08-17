@@ -14,10 +14,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::events::EventBus;
 use crate::server::AppState;
-use crate::server::state::stage_a_identity_is_destructive;
 use djinn_coordinator::startup_census::{GoneProvenance, StartupCensus, TaskRunWitness};
 use djinn_db::repositories::session::CreateSessionParams;
-use djinn_db::test_support::{backdate_task_attempt_created_at, capture_queries};
+use djinn_db::test_support::{
+    backdate_task_attempt_created_at, capture_queries,
+    seed_legacy_session_without_task_run_ledger_for_test,
+};
 use djinn_db::{
     CreateTaskAttemptParams, Database, SessionRepository, TaskAttemptRepository, TaskRepository,
     TaskRunRepository,
@@ -139,6 +141,8 @@ async fn startup_stage_a_identity_matrix() {
     let completed = "matrix-ledger-completed";
     let failed = "matrix-ledger-failed";
     let future = "matrix-ledger-future";
+    let blank = "   ";
+    let missing = "matrix-missing-ledger-row";
     let absent_starting_session = seed_session_for_run(
         &db,
         &events,
@@ -215,6 +219,13 @@ async fn startup_stage_a_identity_matrix() {
         .await
         .expect("create null-identity session")
         .id;
+    // These identities deliberately have no task-run ledger row. They still
+    // must traverse the production Stage A session enumeration and fail
+    // closed, rather than being tested only through the identity predicate.
+    let blank_session =
+        seed_session_without_ledger(&db, &events, &project_id, &task_id, blank).await;
+    let missing_session =
+        seed_session_without_ledger(&db, &events, &project_id, &task_id, missing).await;
 
     let mut presence = HashMap::new();
     for run_id in [absent_starting, absent_running, connected_gone] {
@@ -274,30 +285,6 @@ async fn startup_stage_a_identity_matrix() {
             .count(),
         2
     );
-    let gone_ids = census
-        .runs()
-        .iter()
-        .filter(|run| matches!(run.witness, TaskRunWitness::Gone(_)))
-        .map(|run| run.task_run_id.as_str())
-        .collect();
-    assert!(!stage_a_identity_is_destructive(
-        Some("   "),
-        &gone_ids,
-        false
-    ));
-    assert!(!stage_a_identity_is_destructive(
-        Some("matrix-missing-ledger-row"),
-        &gone_ids,
-        false
-    ));
-    for invalid_ledger_identity in [completed, failed, future] {
-        assert!(!stage_a_identity_is_destructive(
-            Some(invalid_ledger_identity),
-            &gone_ids,
-            false
-        ));
-    }
-
     // Persist linked attempts before the production Stage-A entry point.  This
     // asserts that identity handling is not merely an enum-level decision.
     for (index, run_id) in [
@@ -311,6 +298,8 @@ async fn startup_stage_a_identity_matrix() {
         completed,
         failed,
         future,
+        blank,
+        missing,
     ]
     .into_iter()
     .enumerate()
@@ -327,6 +316,17 @@ async fn startup_stage_a_identity_matrix() {
         .interrupt_stale_sessions_on_startup_with_census(&census)
         .await;
     let repo = SessionRepository::new(db.clone(), events);
+    assert_eq!(
+        repo.list_for_task_run(live)
+            .await
+            .expect("list live matrix session")
+            .as_slice()
+            .iter()
+            .map(|session| session.status.as_str())
+            .collect::<Vec<_>>(),
+        ["running"],
+        "the Live census witness preserves its durable linked session"
+    );
     for id in [
         absent_starting_session,
         absent_running_session,
@@ -349,6 +349,8 @@ async fn startup_stage_a_identity_matrix() {
         disconnected_live_session,
         unknown_session,
         null_session,
+        blank_session,
+        missing_session,
         completed_session,
         failed_session,
         future_session,
@@ -367,9 +369,33 @@ async fn startup_stage_a_identity_matrix() {
             .await
             .expect("list remaining sessions")
             .len(),
-        8,
-        "exactly four of twelve matrix sessions transition; eight fail closed"
+        10,
+        "exactly four of fourteen matrix sessions transition; ten fail closed"
     );
+    for (run_id, expected_status) in [
+        (live, "running"),
+        (absent_starting, "starting"),
+        (absent_running, "running"),
+        (terminal_starting, "starting"),
+        (terminal_running, "running"),
+        (unknown, "running"),
+        (connected_gone, "running"),
+        (disconnected_live, "running"),
+        (completed, "completed"),
+        (failed, "failed"),
+        (future, "future_status"),
+    ] {
+        assert_eq!(
+            TaskRunRepository::new(db.clone())
+                .get(run_id)
+                .await
+                .expect("read durable matrix task run")
+                .expect("durable matrix task run exists")
+                .status,
+            expected_status,
+            "Stage A must not mutate task-run {run_id}"
+        );
+    }
     assert_eq!(
         TaskRunRepository::new(db.clone())
             .list_for_task(&task_id)
@@ -377,7 +403,7 @@ async fn startup_stage_a_identity_matrix() {
             .expect("list durable matrix task runs")
             .len(),
         11,
-        "Stage A must preserve the seed run and all ten matrix ledger rows"
+        "Stage A must preserve all eleven durable matrix ledger rows"
     );
     assert_eq!(
         TaskAttemptRepository::new(db)
@@ -385,7 +411,7 @@ async fn startup_stage_a_identity_matrix() {
             .await
             .expect("list durable matrix attempts")
             .len(),
-        10,
+        12,
         "Stage A must not terminalize linked attempts"
     );
 }
@@ -1293,7 +1319,7 @@ async fn seed_session_for_run(
         })
         .await
         .expect("create matrix task run");
-    SessionRepository::new(db.clone(), events.clone())
+    let session_id = SessionRepository::new(db.clone(), events.clone())
         .create(CreateSessionParams {
             project_id,
             task_id: Some(task_id),
@@ -1306,7 +1332,47 @@ async fn seed_session_for_run(
         })
         .await
         .expect("create matrix session")
-        .id
+        .id;
+
+    // `SessionRepository::create` promotes a linked starting run. Restore the
+    // committed pre-CREATE state so the matrix contains real starting rows.
+    if status == "starting" {
+        TaskRunRepository::new(db.clone())
+            .update_status(task_run_id, djinn_core::models::TaskRunStatus::Starting)
+            .await
+            .expect("restore matrix starting task-run state");
+    }
+
+    session_id
+}
+
+async fn seed_session_without_ledger(
+    db: &Database,
+    events: &EventBus,
+    project_id: &str,
+    task_id: &str,
+    task_run_id: &str,
+) -> String {
+    // Production data normally cannot outlive the task-run FK. The startup
+    // census must nevertheless fail closed for durable historical rows from
+    // before that invariant, so construct that persisted legacy shape only in
+    // this isolated test database.
+    seed_legacy_session_without_task_run_ledger_for_test(
+        db,
+        events.clone(),
+        CreateSessionParams {
+            project_id,
+            task_id: Some(task_id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(task_run_id),
+            pricing: None,
+            cost_basis: None,
+        },
+    )
+    .await
+    .id
 }
 
 async fn seed_attempt_for_task(db: &Database, task_id: &str, attempt_id: &str, key: &str) {
