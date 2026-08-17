@@ -17,6 +17,7 @@ use crate::server::AppState;
 use crate::server::state::stage_a_identity_is_destructive;
 use djinn_coordinator::startup_census::{GoneProvenance, StartupCensus, TaskRunWitness};
 use djinn_db::repositories::session::CreateSessionParams;
+use djinn_db::test_support::{backdate_task_attempt_created_at, capture_queries};
 use djinn_db::{
     CreateTaskAttemptParams, Database, SessionRepository, TaskAttemptRepository, TaskRepository,
     TaskRunRepository,
@@ -117,7 +118,7 @@ impl WorkloadInventory for CountingInventory {
 /// The configured Stage A identity table is exact: only disconnected,
 /// non-terminal starting/running rows with positive Gone evidence transition.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn startup_stage_a_identity_matrix_uses_only_positive_gone_evidence() {
+async fn startup_stage_a_identity_matrix() {
     let db = create_test_db();
     let events = test_events();
     let live = "matrix-live-running";
@@ -134,6 +135,7 @@ async fn startup_stage_a_identity_matrix_uses_only_positive_gone_evidence() {
     let terminal_running = "matrix-terminal-running";
     let unknown = "matrix-unknown-running";
     let connected_gone = "matrix-connected-gone";
+    let disconnected_live = "matrix-disconnected-live";
     let completed = "matrix-ledger-completed";
     let failed = "matrix-ledger-failed";
     let future = "matrix-ledger-future";
@@ -184,6 +186,15 @@ async fn startup_stage_a_identity_matrix_uses_only_positive_gone_evidence() {
         "running",
     )
     .await;
+    let disconnected_live_session = seed_session_for_run(
+        &db,
+        &events,
+        &project_id,
+        &task_id,
+        disconnected_live,
+        "running",
+    )
+    .await;
     let completed_session =
         seed_session_for_run(&db, &events, &project_id, &task_id, completed, "completed").await;
     let failed_session =
@@ -218,6 +229,9 @@ async fn startup_stage_a_identity_matrix_uses_only_positive_gone_evidence() {
         Some(Arc::new(MatrixInventory {
             listed: vec![
                 job(live, false),
+                // `connected=false` is not absence evidence: this disconnected
+                // worker remains present in the immutable cluster census.
+                job(disconnected_live, false),
                 job(terminal_starting, true),
                 job(terminal_running, true),
             ],
@@ -284,6 +298,26 @@ async fn startup_stage_a_identity_matrix_uses_only_positive_gone_evidence() {
         ));
     }
 
+    // Persist linked attempts before the production Stage-A entry point.  This
+    // asserts that identity handling is not merely an enum-level decision.
+    for (index, run_id) in [
+        absent_starting,
+        absent_running,
+        terminal_starting,
+        terminal_running,
+        unknown,
+        connected_gone,
+        disconnected_live,
+        completed,
+        failed,
+        future,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        seed_attempt_for_task(&db, &task_id, &format!("matrix-attempt-{index}"), run_id).await;
+    }
+
     let state = AppState::new(db.clone(), tokio_util::sync::CancellationToken::new());
     state
         .rpc_registry()
@@ -292,7 +326,7 @@ async fn startup_stage_a_identity_matrix_uses_only_positive_gone_evidence() {
     state
         .interrupt_stale_sessions_on_startup_with_census(&census)
         .await;
-    let repo = SessionRepository::new(db, events);
+    let repo = SessionRepository::new(db.clone(), events);
     for id in [
         absent_starting_session,
         absent_running_session,
@@ -310,6 +344,9 @@ async fn startup_stage_a_identity_matrix_uses_only_positive_gone_evidence() {
     }
     for id in [
         connected_session,
+        // The registry intentionally has no connection for this identity; the
+        // Live census witness—not connection absence—preserves it.
+        disconnected_live_session,
         unknown_session,
         null_session,
         completed_session,
@@ -330,8 +367,26 @@ async fn startup_stage_a_identity_matrix_uses_only_positive_gone_evidence() {
             .await
             .expect("list remaining sessions")
             .len(),
-        7,
-        "exactly four of eleven matrix sessions transition; seven fail closed"
+        8,
+        "exactly four of twelve matrix sessions transition; eight fail closed"
+    );
+    assert_eq!(
+        TaskRunRepository::new(db.clone())
+            .list_for_task(&task_id)
+            .await
+            .expect("list durable matrix task runs")
+            .len(),
+        11,
+        "Stage A must preserve the seed run and all ten matrix ledger rows"
+    );
+    assert_eq!(
+        TaskAttemptRepository::new(db)
+            .list_pending_before("9999-01-01T00:00:00.000Z")
+            .await
+            .expect("list durable matrix attempts")
+            .len(),
+        10,
+        "Stage A must not terminalize linked attempts"
     );
 }
 
@@ -372,7 +427,10 @@ async fn seed_startup_rows_with_status(
         .unwrap()[0]
         .id
         .clone();
-    let attempt = format!("attempt-{run_id}");
+    // Durable attempt IDs are VARCHAR(36). Run IDs in these descriptive
+    // startup fixtures may be longer, so use the UUID-shaped identity that
+    // production uses instead of deriving an overlong primary key from one.
+    let attempt = uuid::Uuid::now_v7().to_string();
     let dispatch_key = format!("dispatch-{run_id}");
     TaskAttemptRepository::new(db.clone())
         .create_or_get_pending(CreateTaskAttemptParams {
@@ -460,6 +518,321 @@ impl FullStartupFixture {
             .expect("read fixture attempt")
             .expect("fixture attempt exists");
         (session.status, run.status, attempt.outcome)
+    }
+
+    async fn add_task_run(&self, run_id: &str, status: &str) -> String {
+        let primary = TaskRunRepository::new(self.db.clone())
+            .get(&self.run_id)
+            .await
+            .expect("read primary fixture run")
+            .expect("primary fixture run exists");
+        let session_id = seed_session_for_run(
+            &self.db,
+            &self.events,
+            &primary.project_id,
+            &primary.task_id,
+            run_id,
+            status,
+        )
+        .await;
+        if status == "starting" {
+            TaskRunRepository::new(self.db.clone())
+                .update_status(run_id, djinn_core::models::TaskRunStatus::Starting)
+                .await
+                .expect("restore secondary starting state");
+        }
+        session_id
+    }
+
+    async fn session_status(&self, session_id: &str) -> String {
+        SessionRepository::new(self.db.clone(), self.events.clone())
+            .get(session_id)
+            .await
+            .expect("read fixture session")
+            .expect("fixture session exists")
+            .status
+    }
+
+    async fn task_run_status(&self, run_id: &str) -> String {
+        TaskRunRepository::new(self.db.clone())
+            .get(run_id)
+            .await
+            .expect("read fixture task run")
+            .expect("fixture task run exists")
+            .status
+    }
+}
+
+/// SQLx emits these statements from its execution path, so this is a real
+/// repository/query spy rather than a counter maintained by reaper code.
+fn assert_stage_c_does_not_requery_liveness(trace: &djinn_db::test_support::QueryTrace) {
+    assert!(trace.round_trips() > 0, "SQL observer must not be vacuous");
+    let statements = trace
+        .statements
+        .iter()
+        .map(|statement| statement.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let stage_b_end = statements
+        .iter()
+        .rposition(|statement| statement.contains("update task_runs"))
+        .expect("Stage B must persist its authorized mutation");
+    assert!(
+        statements[stage_b_end + 1..]
+            .iter()
+            .all(|statement| !statement.contains("from sessions")
+                && !statement.contains("from task_runs")),
+        "Stage C queried post-Stage-B liveness instead of the census:\n{}",
+        trace.rendered()
+    );
+}
+
+/// Exercise the production startup ordering with linked durable records. The
+/// post-Stage-B run is interrupted before Stage C handles the attempt, proving
+/// that C consumes the immutable census rather than rebuilding liveness from
+/// the task-run state changed by B.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_census_precedes_every_mutation() {
+    let run_id = "startup-immutable-census-order";
+    let mut presence = HashMap::new();
+    presence.insert(djinn_k8s::taskrun_job_name(run_id), ObjectPresence::Absent);
+    let fixture =
+        FullStartupFixture::seeded(run_id, CountingInventory::listed(Vec::new(), presence)).await;
+
+    let census = StartupCensus::acquire(fixture.db.clone(), Some(fixture.inventory.clone()))
+        .await
+        .expect("capture the immutable census before Stage A");
+    assert_eq!(fixture.inventory.list_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.inventory.presence_calls.load(Ordering::SeqCst), 1);
+    assert!(census.runs().iter().any(|run| {
+        run.task_run_id == run_id
+            && run.witness == TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent)
+    }));
+    assert_eq!(
+        fixture.durable_statuses().await,
+        ("running".into(), "running".into(), "pending".into()),
+        "census acquisition must complete before every lifecycle mutation"
+    );
+
+    let state = AppState::new(
+        fixture.db.clone(),
+        tokio_util::sync::CancellationToken::new(),
+    );
+    state
+        .interrupt_stale_sessions_on_startup_with_census(&census)
+        .await;
+    assert_eq!(
+        fixture.durable_statuses().await,
+        ("interrupted".into(), "running".into(), "pending".into()),
+        "Stage A consumes the same census before the coordinator mutates task runs"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_secs(11)).await;
+    let ((), query_trace) = capture_queries(djinn_coordinator::complete_startup_reaper_phase(
+        &fixture.db,
+        "startup-immutable-census-incarnation",
+        Some(&census),
+    ))
+    .await;
+    assert_stage_c_does_not_requery_liveness(&query_trace);
+    assert_eq!(
+        fixture.durable_statuses().await,
+        (
+            "interrupted".into(),
+            "interrupted".into(),
+            "interrupted".into()
+        ),
+        "Stage C classifies the linked attempt from pre-Stage-B census evidence"
+    );
+    assert_eq!(fixture.inventory.list_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.inventory.presence_calls.load(Ordering::SeqCst), 1);
+    assert!(census.runs().iter().any(|run| {
+        run.task_run_id == run_id
+            && run.witness == TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent)
+    }));
+}
+
+/// Projection coverage through the full server sequence. A second historical
+/// durable run for the same task makes Stage C consume the task projection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_stage_c_task_projection() {
+    for (index, (name, second_status, listed_second, first_presence, second_presence, expected)) in
+        [
+            (
+                "gone-live",
+                "running",
+                true,
+                ObjectPresence::Absent,
+                ObjectPresence::Uncertain,
+                "pending",
+            ),
+            (
+                "gone-creation-transit",
+                "starting",
+                false,
+                ObjectPresence::Absent,
+                ObjectPresence::Absent,
+                "pending",
+            ),
+            (
+                "gone-unknown",
+                "running",
+                false,
+                ObjectPresence::Absent,
+                ObjectPresence::Uncertain,
+                "pending",
+            ),
+            (
+                "all-gone",
+                "running",
+                false,
+                ObjectPresence::Absent,
+                ObjectPresence::Absent,
+                "interrupted",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+    {
+        // Task-run IDs are VARCHAR(36); keep the descriptive case name in
+        // assertions while using compact, stable durable fixture identities.
+        let primary = format!("projection-{index}-primary");
+        let secondary = format!("projection-{index}-secondary");
+        let mut presence = HashMap::from([(djinn_k8s::taskrun_job_name(&primary), first_presence)]);
+        presence.insert(djinn_k8s::taskrun_job_name(&secondary), second_presence);
+        let listed = listed_second
+            .then(|| job(&secondary, false))
+            .into_iter()
+            .collect();
+        let fixture =
+            FullStartupFixture::seeded(&primary, CountingInventory::listed(listed, presence)).await;
+        let secondary_session = fixture.add_task_run(&secondary, second_status).await;
+        backdate_task_attempt_created_at(&fixture.db, &fixture.attempt_id, "1 minute").await;
+        let census = StartupCensus::acquire(fixture.db.clone(), Some(fixture.inventory.clone()))
+            .await
+            .expect("acquire one production census");
+        let task_id = TaskRunRepository::new(fixture.db.clone())
+            .get(&primary)
+            .await
+            .expect("read projection task")
+            .expect("projection task exists")
+            .task_id;
+        assert!(
+            census.task_projection(&task_id).is_some(),
+            "non-terminal durable runs must not project NotApplicable"
+        );
+        AppState::new(
+            fixture.db.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .interrupt_stale_sessions_on_startup_with_census(&census)
+        .await;
+        let secondary_stage_a_session = match name {
+            "gone-live" | "gone-unknown" => "running",
+            "gone-creation-transit" | "all-gone" => "interrupted",
+            _ => unreachable!("projection matrix row is exhaustive"),
+        };
+        assert_eq!(
+            fixture.session_status(&fixture.session_id).await,
+            "interrupted",
+            "Stage A must consume Gone evidence for the primary linked session"
+        );
+        assert_eq!(
+            fixture.session_status(&secondary_session).await,
+            secondary_stage_a_session,
+            "Stage A linked secondary session for {name}"
+        );
+        assert_eq!(
+            fixture.task_run_status(&primary).await,
+            "running",
+            "Stage A does not mutate the primary task-run ledger"
+        );
+        assert_eq!(
+            fixture.task_run_status(&secondary).await,
+            second_status,
+            "Stage A does not mutate the historical/non-terminal task-run ledger"
+        );
+        assert_eq!(
+            TaskAttemptRepository::new(fixture.db.clone())
+                .get(&fixture.attempt_id)
+                .await
+                .expect("read Stage-A attempt")
+                .expect("Stage-A attempt exists")
+                .outcome,
+            "pending",
+            "Stage A does not classify pending attempts"
+        );
+        let traces = TraceBuffer::default();
+        let (_, trace) = if name == "gone-unknown" {
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_writer(traces.clone())
+                .finish();
+            async {
+                tracing::callsite::rebuild_interest_cache();
+                capture_queries(djinn_coordinator::complete_startup_reaper_phase(
+                    &fixture.db,
+                    "projection-census-incarnation",
+                    Some(&census),
+                ))
+                .await
+            }
+            .with_subscriber(subscriber)
+            .await
+        } else {
+            // A scoped tracing subscriber replaces the SQLx query observer.
+            // Only Unknown needs trace capture; leave the observer installed
+            // for the destructive row's no-post-Stage-B-query proof.
+            capture_queries(djinn_coordinator::complete_startup_reaper_phase(
+                &fixture.db,
+                "projection-census-incarnation",
+                Some(&census),
+            ))
+            .await
+        };
+        if name == "all-gone" {
+            assert_stage_c_does_not_requery_liveness(&trace);
+        }
+        if name == "gone-unknown" {
+            assert!(
+                traces.contents().lines().any(|line| {
+                    line.contains("stage=\"startup_stage_c\"")
+                        && line.contains("reason=\"unknown\"")
+                }),
+                "Gone+Unknown must emit the Stage C structured unknown deferral"
+            );
+        }
+        assert_eq!(
+            fixture.session_status(&fixture.session_id).await,
+            "interrupted"
+        );
+        assert_eq!(fixture.task_run_status(&primary).await, "interrupted");
+        let (secondary_session_status, secondary_run_status) = match name {
+            "gone-live" | "gone-unknown" => ("running", "running"),
+            "gone-creation-transit" => ("interrupted", "starting"),
+            "all-gone" => ("interrupted", "interrupted"),
+            _ => unreachable!("projection matrix row is exhaustive"),
+        };
+        assert_eq!(
+            fixture.session_status(&secondary_session).await,
+            secondary_session_status,
+            "linked secondary session for {name}"
+        );
+        assert_eq!(
+            fixture.task_run_status(&secondary).await,
+            secondary_run_status,
+            "historical/non-terminal task run for {name}"
+        );
+        assert_eq!(
+            TaskAttemptRepository::new(fixture.db.clone())
+                .get(&fixture.attempt_id)
+                .await
+                .expect("read projected attempt")
+                .expect("projected attempt exists")
+                .outcome,
+            expected,
+            "projection case {name}"
+        );
     }
 }
 
@@ -934,6 +1307,22 @@ async fn seed_session_for_run(
         .await
         .expect("create matrix session")
         .id
+}
+
+async fn seed_attempt_for_task(db: &Database, task_id: &str, attempt_id: &str, key: &str) {
+    TaskAttemptRepository::new(db.clone())
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: attempt_id,
+            task_id,
+            role: "worker",
+            dispatch_key: &format!("matrix-dispatch-{key}"),
+            session_id: None,
+            attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .expect("create durable matrix attempt");
 }
 
 /// A deterministic test that creates one running session with a `task_run_id`
