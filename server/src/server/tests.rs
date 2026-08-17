@@ -20,6 +20,8 @@ mod readiness;
 mod router;
 #[path = "tests/startup_reconnectability.rs"]
 mod startup_reconnectability;
+#[path = "tests/startup_refinement_outcome.rs"]
+mod startup_refinement_outcome;
 #[path = "tests/tool_schemas.rs"]
 mod tool_schemas;
 #[path = "tests/usage_analytics.rs"]

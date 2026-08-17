@@ -434,3 +434,278 @@ pub async fn run_startup_reaper_stage_c(
 ) {
     crate::actor::startup_reaper_stage_c(db, coordinator_incarnation_id, census).await;
 }
+
+// ── Startup refinement fixtures ──────────────────────────────────────────
+//
+// These live here, outside every refinement implementation file, so a
+// server-layer regression can drive the production startup census through
+// Stage A/B/C against a durable refinement run and then enter the production
+// refinement recovery path. Nothing below reimplements refinement behaviour:
+// each step calls the same repository or actor entry point production uses.
+
+/// The durable coordinates of one materialized refinement role dispatch.
+pub struct StartupRefinementFixture {
+    pub proposal_id: String,
+    pub project_id: String,
+    pub user_id: String,
+    pub run_id: String,
+    pub generation: i32,
+    pub intent_id: String,
+    /// The refinement role task created for the claimed intent.
+    pub task_id: String,
+    /// The task-run whose Kubernetes Job the startup census observes.
+    pub task_run_id: String,
+    /// The running agent session linked to that task-run.
+    pub session_id: String,
+}
+
+/// Seed a refinement run that has reached the shape a live role dispatch has:
+/// an admitted run, a claimed-then-materialized intent, its correlated role
+/// task, and a `running` task-run with a `running` session linked to it.
+///
+/// `suffix` keeps the durable identities unique across fixtures in one database.
+pub async fn seed_startup_refinement_fixture(
+    actor: &crate::actor::CoordinatorActor,
+    db: &Database,
+    suffix: &str,
+) -> StartupRefinementFixture {
+    use djinn_core::models::TaskRefinementCorrelation;
+    use djinn_core::refinement_liveness::{RefinementPhase as DurablePhase, RefinementRole};
+    use djinn_db::{
+        AcknowledgeRefinementTaskMaterializationRequest, AdmitRefinementRunRequest,
+        ClaimRefinementIntentRequest, CreateTaskRunParams, ProposalCreateInput, ProposalRepository,
+        RefinementAdmissionOutcome, RefinementAdmissionSource, SessionRepository,
+        TaskRunRepository, UserRepository,
+    };
+    use djinn_provider::repos::CredentialRepository;
+
+    let events = EventBus::noop();
+    let project = create_test_project(db).await;
+    let github_id = 900_000
+        + i64::try_from(uuid::Uuid::now_v7().as_u128() % 1_000_000).expect("bounded github id");
+    let user = UserRepository::new(db.clone())
+        .upsert_from_github(
+            github_id,
+            &format!("startup-refinement-{suffix}-{}", uuid::Uuid::now_v7()),
+            None,
+            None,
+        )
+        .await
+        .expect("seed refinement owner");
+    CredentialRepository::new(db.clone(), events.clone())
+        .set_with_owner(
+            "test",
+            "TEST_API_KEY",
+            "owner-test-credential",
+            Some(&user.id),
+        )
+        .await
+        .expect("seed owner credential");
+
+    let proposal = djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(user.id.clone()), async {
+            ProposalRepository::new(db.clone(), events.clone())
+                .create(ProposalCreateInput {
+                    title: "Startup refinement fixture",
+                    body: "A durable refinement run observed across a server restart.",
+                    acceptance_criteria: Some("[]"),
+                    status: Some("building"),
+                    body_format: None,
+                })
+                .await
+                .expect("create refinement proposal")
+        })
+        .await;
+
+    let repo = ProposalRepository::new(db.clone(), events.clone());
+    repo.add_target(&proposal.id, &project.id, "primary")
+        .await
+        .expect("link proposal to project");
+    repo.start_refinement_with_owner(&proposal.id, Some(&user.id))
+        .await
+        .expect("persist refinement owner");
+
+    let (run_id, generation, intent_id) = match repo
+        .admit_refinement_run(AdmitRefinementRunRequest {
+            proposal_id: proposal.id.clone(),
+            idempotency_key: format!("startup-refinement-{suffix}"),
+            source: RefinementAdmissionSource::ExplicitStart {
+                actor: "startup-refinement-fixture".into(),
+            },
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .expect("admit refinement run")
+    {
+        RefinementAdmissionOutcome::Admitted {
+            run_id,
+            generation,
+            intent_id,
+        }
+        | RefinementAdmissionOutcome::Existing {
+            run_id,
+            generation,
+            intent_id,
+        } => (run_id, generation, intent_id),
+    };
+
+    let owner = format!("startup-refinement-fixture-{suffix}");
+    let lease = repo
+        .claim_refinement_intent(ClaimRefinementIntentRequest {
+            run_id: run_id.clone(),
+            intent_id: intent_id.clone(),
+            generation,
+            owner: owner.clone(),
+            lease_millis: 600_000,
+        })
+        .await
+        .expect("claim refinement intent")
+        .expect("acquire refinement lease");
+
+    let correlation = TaskRefinementCorrelation::new(
+        run_id.clone(),
+        intent_id.clone(),
+        i64::from(generation),
+        i64::from(lease.round),
+        DurablePhase::AdversaryAttack,
+        RefinementRole::Adversary,
+    )
+    .expect("valid refinement correlation");
+    let task_id = actor
+        .create_refinement_task_with_context_and_correlation(
+            &proposal.id,
+            "adversary",
+            lease.round,
+            0,
+            "startup refinement fixture",
+            None,
+            Some(&user.id),
+            Some(&correlation),
+        )
+        .await
+        .expect("create correlated refinement role task");
+    repo.acknowledge_refinement_task_materialization(
+        AcknowledgeRefinementTaskMaterializationRequest {
+            run_id: run_id.clone(),
+            intent_id: intent_id.clone(),
+            generation,
+            task_id: task_id.clone(),
+            owner,
+        },
+    )
+    .await
+    .expect("acknowledge refinement task materialization");
+
+    // The dispatched role runs in a task-run Job; the agent's session is what
+    // startup Stage A decides about.
+    let task_run_id = uuid::Uuid::now_v7().to_string();
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: &task_run_id,
+            project_id: &project.id,
+            task_id: &task_id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .expect("create refinement task run");
+    let session_id = SessionRepository::new(db.clone(), events)
+        .create(djinn_db::CreateSessionParams {
+            project_id: &project.id,
+            task_id: Some(&task_id),
+            model: "test/mock",
+            agent_type: "adversary",
+            metadata_json: None,
+            task_run_id: Some(&task_run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("create refinement role session")
+        .id;
+
+    StartupRefinementFixture {
+        proposal_id: proposal.id,
+        project_id: project.id,
+        user_id: user.id,
+        run_id,
+        generation,
+        intent_id,
+        task_id,
+        task_run_id,
+        session_id,
+    }
+}
+
+/// Drive the production refinement rehydration path.
+///
+/// Forwards to `CoordinatorActor::recover_interrupted_refinements` with no
+/// logic of its own — the same call `CoordinatorActor::run` makes at boot.
+pub async fn run_refinement_recovery(actor: &mut crate::actor::CoordinatorActor) {
+    actor.recover_interrupted_refinements().await;
+}
+
+/// The round the production rehydration path rebuilt for `run_id`, or `None`
+/// when it rebuilt no projection at all. Lets a regression assert rehydration
+/// itself rather than a log line.
+pub fn rehydrated_refinement_round(
+    actor: &crate::actor::CoordinatorActor,
+    run_id: &str,
+) -> Option<i32> {
+    actor
+        .active_refinements
+        .get(run_id)
+        .map(|state| state.current_round)
+}
+
+/// Enter the production stalled-outcome path for one materialized role
+/// dispatch, exactly as `drive_one_refinement` does when a round's session is
+/// gone and its outcome could not be applied.
+///
+/// This exists because the in-memory session projection the loop keys that
+/// path on is deliberately not persisted across a restart; a server-layer
+/// regression therefore cannot reach the path through a boot alone.
+pub async fn apply_stalled_refinement_outcome(
+    actor: &mut crate::actor::CoordinatorActor,
+    fixture: &StartupRefinementFixture,
+) {
+    use crate::refinement::RefinementPhase;
+    use crate::refinement_dispatch::RefinementSession;
+    use crate::refinement_outcome::RefinementOutcomeApplication;
+
+    let session = RefinementSession {
+        run_id: fixture.run_id.clone(),
+        generation: fixture.generation,
+        task_id: fixture.task_id.clone(),
+        phase: RefinementPhase::AdversaryAttack,
+        dispatched_at: std::time::Instant::now(),
+        session_started_at: Some(std::time::Instant::now()),
+        model_id: "test/mock".to_owned(),
+    };
+    actor
+        .handle_stalled_outcome_application(
+            &fixture.run_id.clone(),
+            &session,
+            RefinementOutcomeApplication::Retryable,
+        )
+        .await;
+}
+
+/// Close a materialized refinement role task through the production
+/// `close_refinement_task` entry point — what the loop does when a round's
+/// task finishes. This is the durable state the stalled-outcome retry ledger
+/// is keyed on.
+pub async fn close_refinement_role_task(
+    actor: &mut crate::actor::CoordinatorActor,
+    fixture: &StartupRefinementFixture,
+) {
+    actor
+        .close_refinement_task(
+            &fixture.task_id,
+            "startup refinement fixture round complete",
+        )
+        .await;
+}
