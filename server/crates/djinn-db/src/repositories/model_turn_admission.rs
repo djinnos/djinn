@@ -702,6 +702,39 @@ impl ModelTurnAdmissionRepository {
             .transpose()
     }
 
+    /// Corrupt both correlated durable label copies for a fail-closed learner
+    /// regression. Raw mutation stays in DB test support so dependent crates do
+    /// not acquire SQL access solely to model damaged rows.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn corrupt_controller_window_labels_for_test(
+        &self,
+        pool_id: i64,
+        window_sequence: i64,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("UPDATE model_turn_pools SET provider_id = $2, model_id = $3 WHERE id = $1")
+            .bind(pool_id)
+            .bind(provider_id)
+            .bind(model_id)
+            .execute(self.db.pool())
+            .await?;
+        let summary = ModelTurnControllerWindowSummary {
+            provider_id: provider_id.to_owned(),
+            model_id: model_id.to_owned(),
+            trainable: true,
+            diagnostics: Vec::new(),
+        };
+        sqlx::query("UPDATE model_turn_controller_windows SET summary = $3 WHERE pool_id = $1 AND window_sequence = $2")
+            .bind(pool_id)
+            .bind(window_sequence)
+            .bind(serde_json::to_string(&summary).map_err(|error| crate::Error::InvalidData(error.to_string()))?)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
     /// Exact-bound fail-closed projection; the coordinator revalidates catalog membership.
     pub async fn learner_window(
         &self,

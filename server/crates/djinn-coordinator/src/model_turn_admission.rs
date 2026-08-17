@@ -151,8 +151,8 @@ pub async fn persist_catalog_qualified_phase_c_window_v1(
             completed_turns,
             summary: ModelTurnControllerWindowSummary {
                 // `find_model` accepts alternate and bare IDs. Persist the
-                // canonical active-catalog ID, never that caller path spelling.
-                provider_id: path.provider.clone(),
+                // canonical active-catalog labels, never caller path spelling.
+                provider_id: model.provider_id,
                 model_id: model.id,
                 trainable: qualification.admitted,
                 diagnostics,
@@ -176,10 +176,14 @@ pub async fn learner_catalog_qualified_phase_c_window_v1(
     else {
         return Ok(None);
     };
-    if catalog
-        .find_model(&format!("{}/{}", window.provider_id, window.model_id))
-        .is_none()
-    {
+    let Some(model) = catalog.find_model(&format!("{}/{}", window.provider_id, window.model_id))
+    else {
+        return Ok(None);
+    };
+    // `find_model` intentionally accepts bare aliases. Durable labels are
+    // trusted only when they exactly equal the active catalog's canonical
+    // result; correlated corruption of both pool and summary must fail closed.
+    if model.provider_id != window.provider_id || model.id != window.model_id {
         return Ok(None);
     }
     Ok(Some(PhaseCLearnerWindowV1 {
@@ -673,6 +677,7 @@ async fn resolve_planned_routes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use djinn_core::models::{Model, Pricing, Provider};
     use djinn_db::{
         Database, ModelTurnBucketDebit, ModelTurnBucketKind,
         repositories::test_support::seed_scoped_model_turn_admission_fixture,
@@ -1285,6 +1290,105 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn learner_rejects_correlated_bare_alias_label_corruption() {
+        let db = Database::ephemeral().await.expect("db");
+        let pool_id = seed(
+            &db,
+            "window-canonical",
+            "canonical-provider",
+            "namespace/foo",
+        )
+        .await;
+        let repository = ModelTurnAdmissionRepository::new(db);
+        let catalog = CatalogService::new();
+        catalog.add_custom_provider(
+            Provider {
+                id: "canonical-provider".into(),
+                name: "Canonical Provider".into(),
+                npm: String::new(),
+                env_vars: vec!["CANONICAL_API_KEY".into()],
+                base_url: "https://example.invalid/v1".into(),
+                docs_url: String::new(),
+                is_openai_compatible: true,
+            },
+            vec![Model {
+                id: "namespace/foo".into(),
+                provider_id: "canonical-provider".into(),
+                name: "Canonical Foo".into(),
+                tool_call: false,
+                reasoning: false,
+                attachment: false,
+                context_window: 1,
+                output_limit: 1,
+                pricing: Pricing::default(),
+            }],
+        );
+        persist_catalog_qualified_phase_c_window_v1(
+            &repository,
+            &catalog,
+            &ExpectedAttemptPathV1 {
+                slot_pod_uid: "slot".into(),
+                deployment_revision: "revision".into(),
+                provider: "canonical-provider".into(),
+                model_scope: "foo".into(),
+                pool_id,
+            },
+            2,
+            "1970-01-01T00:02:00Z".into(),
+            "1970-01-01T00:03:00Z".into(),
+            1,
+            1,
+            &PhaseCWindowQualificationV1 {
+                admitted: true,
+                diagnostics: Vec::new(),
+            },
+        )
+        .await
+        .expect("canonical write");
+        let summary = repository
+            .controller_window_summary_for_test(pool_id, 2)
+            .await
+            .expect("summary read")
+            .expect("summary");
+        assert_eq!(
+            (summary.provider_id.as_str(), summary.model_id.as_str()),
+            ("canonical-provider", "namespace/foo")
+        );
+        assert!(
+            learner_catalog_qualified_phase_c_window_v1(
+                &repository,
+                &catalog,
+                pool_id,
+                2,
+                "1970-01-01T00:02:00Z",
+                "1970-01-01T00:03:00Z",
+            )
+            .await
+            .expect("canonical learner read")
+            .is_some()
+        );
+
+        repository
+            .corrupt_controller_window_labels_for_test(pool_id, 2, "canonical-provider", "foo")
+            .await
+            .expect("corrupt both durable label copies");
+        assert!(
+            learner_catalog_qualified_phase_c_window_v1(
+                &repository,
+                &catalog,
+                pool_id,
+                2,
+                "1970-01-01T00:02:00Z",
+                "1970-01-01T00:03:00Z",
+            )
+            .await
+            .expect("corrupt learner read")
+            .is_none(),
+            "a resolving bare alias is still durable label corruption"
+        );
+    }
+
     /// Production source inventory for the Phase-C boundary audit. This walks
     /// both server source roots so a new caller in another crate cannot hide
     /// behind this module's local source assertions.
@@ -1367,7 +1471,10 @@ mod tests {
         assert_eq!(coordinator_source.matches(storage_write).count(), 1);
         assert_eq!(coordinator_source.matches(storage_read).count(), 1);
         assert!(coordinator_source.contains("let Some(model) = catalog.find_model"));
+        assert!(coordinator_source.contains("provider_id: model.provider_id"));
         assert!(coordinator_source.contains("model_id: model.id"));
+        assert!(coordinator_source.contains("model.provider_id != window.provider_id"));
+        assert!(coordinator_source.contains("model.id != window.model_id"));
 
         // The database is structural storage, not another catalog, and the
         // only raw controller-window table access remains in that repository.
