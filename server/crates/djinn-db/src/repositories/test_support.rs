@@ -1762,6 +1762,28 @@ pub async fn backdate_task_attempt_created_at(db: &Database, attempt_id: &str, i
     .unwrap();
 }
 
+/// Backdate a `task_runs` row's `started_at` by a PostgreSQL `interval`
+/// string (e.g. `'1 hour'`).
+///
+/// Test-fixture helper for the legacy startup stale-task-run reaper, whose age
+/// threshold compares against `started_at`. Lets a startup regression pin the
+/// legacy transition table deterministically instead of sleeping past a
+/// wall-clock threshold.
+pub async fn backdate_task_run_started_at(db: &Database, task_run_id: &str, interval: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "UPDATE task_runs SET started_at = to_char(
+             now() AT TIME ZONE 'utc' - $1::interval,
+             'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
+         WHERE id = $2",
+    )
+    .bind(interval)
+    .bind(task_run_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+}
+
 /// Close a task at an explicit timestamp. Test-fixture helper: production
 /// `closed_at` is stamped automatically by terminal status transitions.
 pub async fn close_task_at(db: &Database, task_id: &str, closed_at: &str) {

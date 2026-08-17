@@ -60,6 +60,21 @@ pub async fn complete_startup_reaper_phase(
     coordinator_incarnation_id: &str,
     census: Option<&crate::startup_census::StartupCensus>,
 ) {
+    startup_reaper_stage_b(db, census).await;
+    startup_reaper_stage_c(db, coordinator_incarnation_id, census).await;
+}
+
+/// Stage B of the startup reaper phase: stale task-run reaping.
+///
+/// Split out only so a regression can observe the durable transition table at
+/// the Stage B/C boundary. [`complete_startup_reaper_phase`] is the single
+/// production caller and invokes this immediately before
+/// [`startup_reaper_stage_c`]; both halves keep the same
+/// `NotConfigured`-selects-legacy rule.
+pub(crate) async fn startup_reaper_stage_b(
+    db: &Database,
+    census: Option<&crate::startup_census::StartupCensus>,
+) {
     use crate::startup_census::InventoryAvailability;
 
     if matches!(
@@ -68,9 +83,25 @@ pub async fn complete_startup_reaper_phase(
     ) {
         // Explicitly unconfigured inventory retains the historical transition table.
         health::reap_stale_task_runs_for_startup(db).await;
-        health::reap_orphaned_pending_attempts_for_startup(db, coordinator_incarnation_id).await;
     } else if let Some(census) = census {
         health::reap_stale_task_runs_for_startup_with_census(db, census).await;
+    }
+}
+
+/// Stage C of the startup reaper phase: orphaned pending-attempt classification.
+pub(crate) async fn startup_reaper_stage_c(
+    db: &Database,
+    coordinator_incarnation_id: &str,
+    census: Option<&crate::startup_census::StartupCensus>,
+) {
+    use crate::startup_census::InventoryAvailability;
+
+    if matches!(
+        census.map(crate::startup_census::StartupCensus::availability),
+        None | Some(InventoryAvailability::NotConfigured)
+    ) {
+        health::reap_orphaned_pending_attempts_for_startup(db, coordinator_incarnation_id).await;
+    } else if let Some(census) = census {
         health::reap_orphaned_pending_attempts_for_startup_with_census(
             db,
             coordinator_incarnation_id,
