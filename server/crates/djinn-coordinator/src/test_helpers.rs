@@ -407,3 +407,30 @@ pub fn coordinator_context_from_db(
         cache_cleanup: crate::context::CacheCleanupConfig::default(),
     }
 }
+
+/// Run only startup Stage B (stale task-run reaping) of the startup reaper
+/// phase.
+///
+/// [`crate::complete_startup_reaper_phase`] is the production entry point and
+/// is the only caller of the two halves; these re-exports exist so a
+/// server-layer regression can snapshot the durable transition table at the
+/// Stage A/B and Stage B/C boundaries instead of only at the end of the phase.
+/// They call exactly the same functions in exactly the same order, so a
+/// regression that also drives `complete_startup_reaper_phase` end to end still
+/// detects a dropped stage in the production composition.
+pub async fn run_startup_reaper_stage_b(
+    db: &Database,
+    census: Option<&crate::startup_census::StartupCensus>,
+) {
+    crate::actor::startup_reaper_stage_b(db, census).await;
+}
+
+/// Run only startup Stage C (orphaned pending-attempt classification).
+/// See [`run_startup_reaper_stage_b`].
+pub async fn run_startup_reaper_stage_c(
+    db: &Database,
+    coordinator_incarnation_id: &str,
+    census: Option<&crate::startup_census::StartupCensus>,
+) {
+    crate::actor::startup_reaper_stage_c(db, coordinator_incarnation_id, census).await;
+}

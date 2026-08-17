@@ -14,7 +14,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::events::EventBus;
 use crate::server::AppState;
-use djinn_coordinator::startup_census::{GoneProvenance, StartupCensus, TaskRunWitness};
+use djinn_coordinator::startup_census::{
+    GoneProvenance, InventoryAvailability, StartupCensus, TaskRunWitness,
+};
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::test_support::{
     backdate_task_attempt_created_at, capture_queries,
@@ -429,10 +431,6 @@ impl WorkloadInventory for UnavailableInventory {
     async fn presence(&self, _: WorkloadObjectKind, _: &str) -> ObjectPresence {
         ObjectPresence::Uncertain
     }
-}
-
-async fn seed_startup_rows(db: &Database, events: &EventBus, run_id: &str) -> (String, String) {
-    seed_startup_rows_with_status(db, events, run_id, "running").await
 }
 
 async fn seed_startup_rows_with_status(
@@ -1067,101 +1065,203 @@ async fn startup_reaper_fails_closed_on_unknown() {
     }
 }
 
+/// Pin the exact pre-change Stage A/B/C transition table for
+/// `workload_inventory: None`.
+///
+/// Legacy startup recovery is deliberately identity-blind: Stage A interrupts
+/// every running session except those whose worker is *currently connected*,
+/// Stage B interrupts every non-terminal task run past a wall-clock age
+/// threshold — including the connected worker's run — and Stage C classifies
+/// every aged pending attempt whose task then has neither a live run nor a
+/// running session. Configuration absence must keep producing exactly that
+/// table, and must never silently become the configured-inventory
+/// preserve-all/reap-all behaviour, so each stage boundary is snapshotted
+/// separately rather than only the phase's final outcome.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn startup_reaper_not_configured_is_legacy() {
-    let events = test_events();
-    let legacy_db = create_test_db();
-    let (legacy_session, legacy_attempt) =
-        seed_startup_rows(&legacy_db, &events, "legacy-startup-run").await;
-    let legacy = StartupCensus::acquire(legacy_db.clone(), None)
-        .await
-        .unwrap();
-    let unavailable_db = create_test_db();
-    let (unavailable_session, unavailable_attempt) =
-        seed_startup_rows(&unavailable_db, &events, "unavailable-startup-run").await;
-    let unavailable =
-        StartupCensus::acquire(unavailable_db.clone(), Some(Arc::new(UnavailableInventory)))
-            .await
-            .unwrap();
-    tokio::time::sleep(std::time::Duration::from_secs(11)).await;
+    let staged = StartupTable::seed("legacy-staged").await;
+    let seeded_snapshot = vec![
+        ("running", "running", "running", "pending"),
+        ("starting", "running", "starting", "pending"),
+        ("connected", "running", "running", "pending"),
+        ("terminal-ledger", "running", "completed", "pending"),
+        ("null-identity", "running", "absent", "pending"),
+        ("blank-identity", "running", "absent", "pending"),
+    ];
+    assert_eq!(staged.snapshot().await, owned(&seeded_snapshot));
+    assert_eq!(staged.aggregates().await, (6, 3, 6));
 
-    let state = AppState::new(
-        legacy_db.clone(),
-        tokio_util::sync::CancellationToken::new(),
-    );
-    state
+    let legacy = StartupCensus::acquire(staged.db.clone(), None)
+        .await
+        .expect("acquire legacy startup census");
+    assert_eq!(legacy.availability(), InventoryAvailability::NotConfigured);
+
+    // ── Stage A ──────────────────────────────────────────────────────────
+    staged
+        .state
         .interrupt_stale_sessions_on_startup_with_census(&legacy)
         .await;
-    djinn_coordinator::complete_startup_reaper_phase(&legacy_db, "new-incarnation", Some(&legacy))
-        .await;
+    let after_stage_a = vec![
+        ("running", "interrupted", "running", "pending"),
+        ("starting", "interrupted", "starting", "pending"),
+        // Live RPC connectivity is the only preservation lever legacy Stage A
+        // has: not durable state, not cluster evidence.
+        ("connected", "running", "running", "pending"),
+        ("terminal-ledger", "interrupted", "completed", "pending"),
+        ("null-identity", "interrupted", "absent", "pending"),
+        ("blank-identity", "interrupted", "absent", "pending"),
+    ];
     assert_eq!(
-        SessionRepository::new(legacy_db.clone(), events.clone())
-            .get(&legacy_session)
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        "interrupted"
+        staged.snapshot().await,
+        owned(&after_stage_a),
+        "legacy Stage A must interrupt every running session except the connected worker"
     );
-    assert_eq!(
-        TaskRunRepository::new(legacy_db.clone())
-            .get("legacy-startup-run")
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        "interrupted"
-    );
-    assert_eq!(
-        TaskAttemptRepository::new(legacy_db)
-            .get(&legacy_attempt)
-            .await
-            .unwrap()
-            .unwrap()
-            .outcome,
-        "interrupted"
-    );
+    assert_eq!(staged.aggregates().await, (1, 3, 6));
 
-    let state = AppState::new(
-        unavailable_db.clone(),
-        tokio_util::sync::CancellationToken::new(),
+    // ── Stage B ──────────────────────────────────────────────────────────
+    djinn_coordinator::test_helpers::run_startup_reaper_stage_b(&staged.db, Some(&legacy)).await;
+    let after_stage_b = vec![
+        ("running", "interrupted", "interrupted", "pending"),
+        // Legacy Stage B reaps `starting` as readily as `running`: the
+        // durable-commit/CREATE window it cannot see is exactly the hazard the
+        // configured census fences.
+        ("starting", "interrupted", "interrupted", "pending"),
+        // ...and it reaps the connected worker's run that Stage A preserved.
+        ("connected", "running", "interrupted", "pending"),
+        ("terminal-ledger", "interrupted", "completed", "pending"),
+        ("null-identity", "interrupted", "absent", "pending"),
+        ("blank-identity", "interrupted", "absent", "pending"),
+    ];
+    assert_eq!(
+        staged.snapshot().await,
+        owned(&after_stage_b),
+        "legacy Stage B must interrupt every aged non-terminal run regardless of identity"
     );
-    state
-        .interrupt_stale_sessions_on_startup_with_census(&unavailable)
+    assert_eq!(staged.aggregates().await, (1, 0, 6));
+
+    // ── Stage C ──────────────────────────────────────────────────────────
+    djinn_coordinator::test_helpers::run_startup_reaper_stage_c(
+        &staged.db,
+        "legacy-startup-incarnation",
+        Some(&legacy),
+    )
+    .await;
+    let after_stage_c = vec![
+        ("running", "interrupted", "interrupted", "interrupted"),
+        ("starting", "interrupted", "interrupted", "interrupted"),
+        // The still-running session is what withholds this attempt from the
+        // legacy orphan query — post-mutation database state, not census
+        // evidence.
+        ("connected", "running", "interrupted", "pending"),
+        ("terminal-ledger", "interrupted", "completed", "interrupted"),
+        ("null-identity", "interrupted", "absent", "interrupted"),
+        ("blank-identity", "interrupted", "absent", "interrupted"),
+    ];
+    assert_eq!(
+        staged.snapshot().await,
+        owned(&after_stage_c),
+        "legacy Stage C must classify every aged orphan whose task lost both liveness signals"
+    );
+    assert_eq!(staged.aggregates().await, (1, 0, 1));
+
+    // The staged run drives the same two halves the production phase calls.
+    // Replaying the identical table through `complete_startup_reaper_phase`
+    // keeps that composition load-bearing: dropping either stage from the
+    // production entry point diverges here.
+    let composed = StartupTable::seed("legacy-composed").await;
+    let composed_census = StartupCensus::acquire(composed.db.clone(), None)
+        .await
+        .expect("acquire composed legacy startup census");
+    composed
+        .state
+        .interrupt_stale_sessions_on_startup_with_census(&composed_census)
         .await;
     djinn_coordinator::complete_startup_reaper_phase(
-        &unavailable_db,
-        "new-incarnation",
+        &composed.db,
+        "legacy-startup-incarnation",
+        Some(&composed_census),
+    )
+    .await;
+    assert_eq!(
+        composed.snapshot().await,
+        owned(&after_stage_c),
+        "complete_startup_reaper_phase must compose exactly Stage B then Stage C"
+    );
+    assert_eq!(composed.aggregates().await, (1, 0, 1));
+
+    // ── Configured-but-Unavailable control ───────────────────────────────
+    // Same durable table, same stage boundaries, configured inventory whose
+    // LIST failed. Unknown evidence fails closed at every stage; legacy
+    // NotConfigured is never collapsed into it.
+    let unavailable_table = StartupTable::seed("unavailable-staged").await;
+    let unavailable = StartupCensus::acquire(
+        unavailable_table.db.clone(),
+        Some(Arc::new(UnavailableInventory)),
+    )
+    .await
+    .expect("acquire unavailable startup census");
+    assert_eq!(
+        unavailable.availability(),
+        InventoryAvailability::Unavailable
+    );
+    assert!(
+        unavailable
+            .runs()
+            .iter()
+            .all(|run| run.witness == TaskRunWitness::Unknown),
+        "an unavailable LIST yields no positive Gone provenance"
+    );
+
+    unavailable_table
+        .state
+        .interrupt_stale_sessions_on_startup_with_census(&unavailable)
+        .await;
+    assert_eq!(
+        unavailable_table.snapshot().await,
+        owned(&seeded_snapshot),
+        "configured-unavailable Stage A authorizes no session transition"
+    );
+    assert_eq!(unavailable_table.aggregates().await, (6, 3, 6));
+
+    djinn_coordinator::test_helpers::run_startup_reaper_stage_b(
+        &unavailable_table.db,
         Some(&unavailable),
     )
     .await;
     assert_eq!(
-        SessionRepository::new(unavailable_db.clone(), events)
-            .get(&unavailable_session)
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        "running"
+        unavailable_table.snapshot().await,
+        owned(&seeded_snapshot),
+        "configured-unavailable Stage B authorizes no task-run transition"
     );
+    assert_eq!(unavailable_table.aggregates().await, (6, 3, 6));
+
+    djinn_coordinator::test_helpers::run_startup_reaper_stage_c(
+        &unavailable_table.db,
+        "unavailable-startup-incarnation",
+        Some(&unavailable),
+    )
+    .await;
     assert_eq!(
-        TaskRunRepository::new(unavailable_db.clone())
-            .get("unavailable-startup-run")
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        "running"
+        unavailable_table.snapshot().await,
+        owned(&seeded_snapshot),
+        "configured-unavailable Stage C authorizes no attempt classification"
     );
-    assert_eq!(
-        TaskAttemptRepository::new(unavailable_db)
-            .get(&unavailable_attempt)
-            .await
-            .unwrap()
-            .unwrap()
-            .outcome,
-        "pending"
-    );
+    assert_eq!(unavailable_table.aggregates().await, (6, 3, 6));
+}
+
+/// Widen a borrowed expected transition table into the owned shape
+/// [`StartupTable::snapshot`] returns.
+fn owned(rows: &[(&'static str, &str, &str, &str)]) -> Vec<(&'static str, String, String, String)> {
+    rows.iter()
+        .map(|(label, session, run, attempt)| {
+            (
+                *label,
+                (*session).to_owned(),
+                (*run).to_owned(),
+                (*attempt).to_owned(),
+            )
+        })
+        .collect()
 }
 
 #[async_trait::async_trait]
@@ -1671,4 +1771,260 @@ async fn disconnected_worker_has_numerator_zero() {
         measurement.connected_or_reconnectable_sessions, 0,
         "a disconnected session must not be counted as reconnectable"
     );
+}
+
+/// One durable row of the startup transition table: an isolated task with its
+/// own optional task-run ledger row, one `running` session, and one `pending`
+/// attempt. Each row owns its own task so Stage C's per-task orphan query
+/// resolves every row independently instead of collapsing into one aggregate.
+struct StartupTableRow {
+    label: &'static str,
+    run_id: Option<String>,
+    session_id: String,
+    attempt_id: String,
+}
+
+/// How a table row's durable session identity is constructed.
+enum StartupRowIdentity {
+    /// A real ledger row in the given durable status.
+    Ledger(&'static str),
+    /// `sessions.task_run_id IS NULL`.
+    Null,
+    /// A whitespace-only identity with no ledger row (pre-FK historical shape).
+    Blank,
+}
+
+/// The six-row startup transition table plus the durable database holding it.
+struct StartupTable {
+    db: Database,
+    events: EventBus,
+    state: AppState,
+    rows: Vec<StartupTableRow>,
+}
+
+impl StartupTable {
+    /// Seed the identical row set into a fresh database. `connected_label`
+    /// names the single row registered as a connected worker, which is the
+    /// only lever the pre-change Stage A had.
+    async fn seed(prefix: &str) -> Self {
+        let db = create_test_db();
+        let events = test_events();
+        let mut rows = Vec::new();
+        for (label, identity) in [
+            ("running", StartupRowIdentity::Ledger("running")),
+            ("starting", StartupRowIdentity::Ledger("starting")),
+            ("connected", StartupRowIdentity::Ledger("running")),
+            ("terminal-ledger", StartupRowIdentity::Ledger("completed")),
+            ("null-identity", StartupRowIdentity::Null),
+            ("blank-identity", StartupRowIdentity::Blank),
+        ] {
+            rows.push(seed_startup_table_row(&db, &events, prefix, label, identity).await);
+        }
+        let state = AppState::new(db.clone(), tokio_util::sync::CancellationToken::new());
+        state
+            .rpc_registry()
+            .register_connected_for_test(&format!("{prefix}-connected"))
+            .await;
+        Self {
+            db,
+            events,
+            state,
+            rows,
+        }
+    }
+
+    /// `(label, session status, task-run status or `absent`, attempt outcome)`
+    /// for every seeded row, in table order.
+    async fn snapshot(&self) -> Vec<(&'static str, String, String, String)> {
+        let sessions = SessionRepository::new(self.db.clone(), self.events.clone());
+        let runs = TaskRunRepository::new(self.db.clone());
+        let attempts = TaskAttemptRepository::new(self.db.clone());
+        let mut out = Vec::new();
+        for row in &self.rows {
+            let session = sessions
+                .get(&row.session_id)
+                .await
+                .expect("read startup table session")
+                .expect("startup table session exists")
+                .status;
+            let run = match row.run_id.as_deref() {
+                Some(run_id) => {
+                    runs.get(run_id)
+                        .await
+                        .expect("read startup table task run")
+                        .expect("startup table task run exists")
+                        .status
+                }
+                None => "absent".to_owned(),
+            };
+            let attempt = attempts
+                .get(&row.attempt_id)
+                .await
+                .expect("read startup table attempt")
+                .expect("startup table attempt exists")
+                .outcome;
+            out.push((row.label, session, run, attempt));
+        }
+        out
+    }
+
+    /// Aggregate counts `(running sessions, live task runs, pending attempts)`.
+    async fn aggregates(&self) -> (usize, usize, usize) {
+        let sessions = SessionRepository::new(self.db.clone(), self.events.clone())
+            .list_active()
+            .await
+            .expect("list startup table sessions")
+            .len();
+        let live_runs = TaskRunRepository::new(self.db.clone())
+            .list_startup_live()
+            .await
+            .expect("list startup table live runs")
+            .len();
+        let pending = TaskAttemptRepository::new(self.db.clone())
+            .list_pending_before("9999-01-01T00:00:00.000Z")
+            .await
+            .expect("list startup table pending attempts")
+            .len();
+        (sessions, live_runs, pending)
+    }
+}
+
+async fn seed_startup_table_row(
+    db: &Database,
+    events: &EventBus,
+    prefix: &str,
+    label: &'static str,
+    identity: StartupRowIdentity,
+) -> StartupTableRow {
+    use djinn_db::{EpicCreateInput, EpicRepository, ProjectRepository};
+
+    let project = ProjectRepository::new(db.clone(), events.clone())
+        .create(
+            &format!("{prefix}-{label}"),
+            "owner",
+            &format!("{prefix}-{label}"),
+        )
+        .await
+        .expect("create startup table project");
+    let epic = EpicRepository::new(db.clone(), events.clone())
+        .create_for_project(
+            &project.id,
+            EpicCreateInput {
+                title: "startup-table-epic",
+                description: "",
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: None,
+                status: None,
+                auto_breakdown: None,
+                originating_adr_id: None,
+                blocked_by: None,
+            },
+        )
+        .await
+        .expect("create startup table epic");
+    let task = TaskRepository::new(db.clone(), events.clone())
+        .create(&epic.id, label, "", "", "task", 0, "", Some("open"))
+        .await
+        .expect("create startup table task");
+
+    let sessions = SessionRepository::new(db.clone(), events.clone());
+    let (run_id, session_id) = match identity {
+        StartupRowIdentity::Ledger(status) => {
+            let run_id = format!("{prefix}-{label}");
+            TaskRunRepository::new(db.clone())
+                .create(djinn_db::CreateTaskRunParams {
+                    id: &run_id,
+                    project_id: &project.id,
+                    task_id: &task.id,
+                    trigger_type: "manual",
+                    status: Some(status),
+                    workspace_path: None,
+                    mirror_ref: None,
+                    dispatch_group_id: None,
+                })
+                .await
+                .expect("create startup table task run");
+            let session_id = sessions
+                .create(startup_table_session_params(
+                    &project.id,
+                    &task.id,
+                    Some(&run_id),
+                ))
+                .await
+                .expect("create startup table session")
+                .id;
+            // `SessionRepository::create` promotes a linked starting run, so
+            // restore the requested committed durable state.
+            if status == "starting" {
+                TaskRunRepository::new(db.clone())
+                    .update_status(&run_id, djinn_core::models::TaskRunStatus::Starting)
+                    .await
+                    .expect("restore startup table durable starting run");
+            }
+            // The legacy Stage B threshold compares `started_at`; backdating
+            // pins the table without sleeping past a wall-clock window.
+            djinn_db::test_support::backdate_task_run_started_at(db, &run_id, "1 hour").await;
+            (Some(run_id), session_id)
+        }
+        StartupRowIdentity::Null => {
+            let session_id = sessions
+                .create(startup_table_session_params(&project.id, &task.id, None))
+                .await
+                .expect("create null-identity startup table session")
+                .id;
+            (None, session_id)
+        }
+        StartupRowIdentity::Blank => {
+            let session_id = seed_legacy_session_without_task_run_ledger_for_test(
+                db,
+                events.clone(),
+                startup_table_session_params(&project.id, &task.id, Some("   ")),
+            )
+            .await
+            .id;
+            (None, session_id)
+        }
+    };
+
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    TaskAttemptRepository::new(db.clone())
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &attempt_id,
+            task_id: &task.id,
+            role: "worker",
+            dispatch_key: &format!("{prefix}-{label}-dispatch"),
+            session_id: None,
+            attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .expect("create startup table attempt");
+    backdate_task_attempt_created_at(db, &attempt_id, "1 hour").await;
+
+    StartupTableRow {
+        label,
+        run_id,
+        session_id,
+        attempt_id,
+    }
+}
+
+fn startup_table_session_params<'a>(
+    project_id: &'a str,
+    task_id: &'a str,
+    task_run_id: Option<&'a str>,
+) -> CreateSessionParams<'a> {
+    CreateSessionParams {
+        project_id,
+        task_id: Some(task_id),
+        model: "openai/gpt-5.5",
+        agent_type: "worker",
+        metadata_json: None,
+        task_run_id,
+        pricing: None,
+        cost_basis: None,
+    }
 }
