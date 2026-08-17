@@ -939,7 +939,12 @@ mod tests {
         a.stages[0].timestamp_second = 120;
         a.stages[4].timestamp_second = 179;
         assert!(
-            qualify_aligned_phase_c_window_v1(window(), &[path.clone()], &[capability(path)], &[a])
+            qualify_aligned_phase_c_window_v1(
+                window(),
+                std::slice::from_ref(&path),
+                &[capability(path.clone())],
+                &[a],
+            )
                 .admitted
         );
         assert_eq!(window().end_second(), 180);
@@ -967,7 +972,7 @@ mod tests {
     fn qualifier_rejects_silent_stale_replaced_and_partial_capability() {
         let path = ExpectedAttemptPathV1::test_resolved_route(7);
         assert!(has(
-            &qualify_aligned_phase_c_window_v1(window(), &[path.clone()], &[], &[]),
+            &qualify_aligned_phase_c_window_v1(window(), std::slice::from_ref(&path), &[], &[]),
             PhaseCWindowDiagnosticCodeV1::MissingCapability
         ));
         let stale = PhaseCCapabilityEvidenceV1 {
@@ -975,7 +980,12 @@ mod tests {
             ..capability(path.clone())
         };
         assert!(has(
-            &qualify_aligned_phase_c_window_v1(window(), &[path.clone()], &[stale], &[]),
+            &qualify_aligned_phase_c_window_v1(
+                window(),
+                std::slice::from_ref(&path),
+                &[stale],
+                &[],
+            ),
             PhaseCWindowDiagnosticCodeV1::StaleHeartbeat
         ));
         let partial = PhaseCCapabilityEvidenceV1 {
@@ -983,7 +993,12 @@ mod tests {
             ..capability(path.clone())
         };
         assert!(has(
-            &qualify_aligned_phase_c_window_v1(window(), &[path.clone()], &[partial], &[]),
+            &qualify_aligned_phase_c_window_v1(
+                window(),
+                std::slice::from_ref(&path),
+                &[partial],
+                &[],
+            ),
             PhaseCWindowDiagnosticCodeV1::PartialCapabilityCoverage
         ));
         assert!(has(
@@ -1008,8 +1023,12 @@ mod tests {
         a.breaker_open = true;
         a.stages[3].outcome = PhaseCAttemptEvidenceOutcomeV1::Recorded;
         a.stages.push(a.stages[0].clone());
-        let r =
-            qualify_aligned_phase_c_window_v1(window(), &[path.clone()], &[capability(path)], &[a]);
+        let r = qualify_aligned_phase_c_window_v1(
+            window(),
+            std::slice::from_ref(&path),
+            &[capability(path.clone())],
+            &[a],
+        );
         for c in [
             PhaseCWindowDiagnosticCodeV1::MissingUsage,
             PhaseCWindowDiagnosticCodeV1::ExpiredLease,
@@ -1056,8 +1075,12 @@ mod tests {
         let mut a = attempt(path.clone());
         a.stages[0].outcome = PhaseCAttemptEvidenceOutcomeV1::Missing;
         a.stages.pop();
-        let r =
-            qualify_aligned_phase_c_window_v1(window(), &[path.clone()], &[capability(path)], &[a]);
+        let r = qualify_aligned_phase_c_window_v1(
+            window(),
+            std::slice::from_ref(&path),
+            &[capability(path.clone())],
+            &[a],
+        );
         assert!(has(&r, PhaseCWindowDiagnosticCodeV1::MissingStageOutcome));
         assert!(has(&r, PhaseCWindowDiagnosticCodeV1::MissingStage));
     }
@@ -1072,8 +1095,8 @@ mod tests {
         end.stages[4].timestamp_second = 180;
         let r = qualify_aligned_phase_c_window_v1(
             window(),
-            &[path.clone()],
-            &[capability(path)],
+            std::slice::from_ref(&path),
+            &[capability(path.clone())],
             &[unknown, reversed, end],
         );
         for code in [
