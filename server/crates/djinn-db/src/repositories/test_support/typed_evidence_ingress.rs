@@ -75,6 +75,19 @@ pub async fn typed_evidence_validation_snapshot_for_finding_for_test(
     typed_evidence_validation_snapshot_for_test(db, &validation_id).await
 }
 
+/// Count validations for one immutable attempt without selecting a later retry.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn typed_evidence_validation_count_for_attempt_for_test(
+    db: &Database,
+    attempt_id: &str,
+) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM typed_evidence_validation_results WHERE attempt_id=$1")
+        .bind(attempt_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
+
 /// Read lifecycle state even when rejection created no validation result.
 /// **Not for production use.** Panics on SQL errors.
 pub async fn typed_evidence_finding_snapshot_for_test(
@@ -101,27 +114,33 @@ pub async fn typed_evidence_finding_snapshot_for_test(
     .fetch_one(db.pool())
     .await
     .unwrap();
-    let transitions = sqlx::query(
-        "SELECT from_lifecycle,to_lifecycle,metadata FROM typed_evidence_transitions \
+    let transition_rows = sqlx::query(
+        "SELECT id,from_lifecycle,to_lifecycle,metadata FROM typed_evidence_transitions \
          WHERE finding_id=$1 ORDER BY ordinal",
     )
     .bind(finding_id)
     .fetch_all(db.pool())
     .await
-    .unwrap()
-    .into_iter()
-    .map(|row| {
-        serde_json::json!({
-            "from_lifecycle": row.get::<Option<String>, _>("from_lifecycle"),
-            "to_lifecycle": row.get::<String, _>("to_lifecycle"),
-            "metadata": row.get::<serde_json::Value, _>("metadata"),
+    .unwrap();
+    let transition_ids = transition_rows
+        .iter()
+        .map(|row| row.get::<String, _>("id"))
+        .collect();
+    let transitions = transition_rows
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "from_lifecycle": row.get::<Option<String>, _>("from_lifecycle"),
+                "to_lifecycle": row.get::<String, _>("to_lifecycle"),
+                "metadata": row.get::<serde_json::Value, _>("metadata"),
+            })
         })
-    })
-    .collect();
+        .collect();
     TypedEvidenceFindingSnapshotForTest {
         lifecycle,
         attempt_id,
         validation_count,
+        transition_ids,
         transitions,
     }
 }
@@ -143,6 +162,7 @@ pub struct TypedEvidenceFindingSnapshotForTest {
     pub lifecycle: String,
     pub attempt_id: String,
     pub validation_count: i64,
+    pub transition_ids: Vec<String>,
     pub transitions: Vec<serde_json::Value>,
 }
 

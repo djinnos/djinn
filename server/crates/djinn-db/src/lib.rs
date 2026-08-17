@@ -97,6 +97,7 @@ pub mod test_support {
         typed_evidence_disposition_snapshot_for_test, typed_evidence_finding_snapshot_for_test,
         typed_evidence_retry_snapshot_for_test,
         typed_evidence_transition_count_for_validation_for_test,
+        typed_evidence_validation_count_for_attempt_for_test,
         typed_evidence_validation_snapshot_for_finding_for_test,
         typed_evidence_validation_snapshot_for_test,
     };
