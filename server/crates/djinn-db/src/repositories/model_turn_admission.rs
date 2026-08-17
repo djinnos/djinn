@@ -1706,7 +1706,10 @@ mod tests {
                 "blank provider",
                 mutate(&|i| i.summary.provider_id = "   ".into()),
             ),
-            ("blank model", mutate(&|i| i.summary.model_id = String::new())),
+            (
+                "blank model",
+                mutate(&|i| i.summary.model_id = String::new()),
+            ),
             (
                 "overlong provider",
                 mutate(&|i| i.summary.provider_id = "p".repeat(192)),
@@ -1779,7 +1782,9 @@ mod tests {
         });
         assert!(validate_controller_window_input(&bounded).is_ok());
         assert!(
-            serde_json::to_string(&bounded.summary).expect("serialize").len()
+            serde_json::to_string(&bounded.summary)
+                .expect("serialize")
+                .len()
                 <= CONTROLLER_WINDOW_SUMMARY_MAX_BYTES
         );
     }

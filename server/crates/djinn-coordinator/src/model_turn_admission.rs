@@ -1426,8 +1426,18 @@ mod tests {
                 "1970-01-01T00:02:30Z",
                 "1970-01-01T00:03:30Z",
             ),
-            ("ninety second span", 2, WINDOW_START, "1970-01-01T00:03:30Z"),
-            ("thirty second span", 2, WINDOW_START, "1970-01-01T00:02:30Z"),
+            (
+                "ninety second span",
+                2,
+                WINDOW_START,
+                "1970-01-01T00:03:30Z",
+            ),
+            (
+                "thirty second span",
+                2,
+                WINDOW_START,
+                "1970-01-01T00:02:30Z",
+            ),
             ("reversed bounds", 2, WINDOW_END, WINDOW_START),
             ("unparsable bounds", 2, "not-a-time", WINDOW_END),
         ] {
@@ -1507,8 +1517,16 @@ mod tests {
         // Durable second-precision bounds that disagree with the sequence, and
         // an aligned pair that is not the exact 60-second half-open window.
         for (label, started_at, ended_at) in [
-            ("sequence disagrees with durable start", "1970-01-01T00:03:00Z", "1970-01-01T00:04:00Z"),
-            ("sub-minute durable span", "1970-01-01T00:02:00Z", "1970-01-01T00:02:30Z"),
+            (
+                "sequence disagrees with durable start",
+                "1970-01-01T00:03:00Z",
+                "1970-01-01T00:04:00Z",
+            ),
+            (
+                "sub-minute durable span",
+                "1970-01-01T00:02:00Z",
+                "1970-01-01T00:02:30Z",
+            ),
         ] {
             restore().await;
             repository
