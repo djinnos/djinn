@@ -23,8 +23,10 @@ pub async fn typed_evidence_validation_snapshot_for_test(
 ) -> TypedEvidenceValidationSnapshotForTest {
     let row = sqlx::query("SELECT v.id,v.payload_sha256,v.outcome,v.validator_facts,f.lifecycle FROM typed_evidence_validation_results v JOIN typed_evidence_attempts a ON a.id=v.attempt_id JOIN typed_evidence_findings f ON f.id=a.finding_id WHERE v.id=$1").bind(validation_id).fetch_one(db.pool()).await.unwrap();
     let checks = sqlx::query("SELECT p.check_id,p.method,c.status,c.detail,i.invocation_id,i.usable FROM typed_evidence_check_results c JOIN typed_evidence_planned_checks p ON p.id=c.planned_check_id LEFT JOIN typed_evidence_invocation_provenance i ON i.check_result_id=c.id WHERE c.validation_result_id=$1 ORDER BY p.ordinal").bind(validation_id).fetch_all(db.pool()).await.unwrap().into_iter().map(|r| serde_json::json!({"check_id":r.get::<String,_>("check_id"),"method":r.get::<String,_>("method"),"status":r.get::<String,_>("status"),"detail":r.get::<Option<String>,_>("detail"),"invocation_id":r.get::<Option<String>,_>("invocation_id"),"invocation_usable":r.get::<Option<bool>,_>("usable")})).collect();
+    let check_anchors = sqlx::query("SELECT p.check_id,a.method,a.locator,h.health,h.detail,h.immutable_identity,h.method_compatible FROM typed_evidence_anchors a JOIN typed_evidence_anchor_health h ON h.anchor_id=a.id JOIN typed_evidence_check_results c ON c.id=a.check_result_id JOIN typed_evidence_planned_checks p ON p.id=c.planned_check_id WHERE c.validation_result_id=$1 ORDER BY p.ordinal,a.method,a.locator,a.id").bind(validation_id).fetch_all(db.pool()).await.unwrap().into_iter().map(|r| serde_json::json!({"check_id":r.get::<String,_>("check_id"),"method":r.get::<String,_>("method"),"locator":r.get::<String,_>("locator"),"health":r.get::<String,_>("health"),"detail":r.get::<Option<String>,_>("detail"),"immutable_identity":r.get::<serde_json::Value,_>("immutable_identity"),"method_compatible":r.get::<bool,_>("method_compatible")})).collect();
     let findings = sqlx::query("SELECT p.check_id,f.conclusion,f.usable FROM typed_evidence_return_findings f JOIN typed_evidence_planned_checks p ON p.id=f.planned_check_id WHERE f.validation_result_id=$1 ORDER BY p.ordinal").bind(validation_id).fetch_all(db.pool()).await.unwrap().into_iter().map(|r| serde_json::json!({"check_id":r.get::<String,_>("check_id"),"conclusion":r.get::<String,_>("conclusion"),"usable":r.get::<bool,_>("usable")})).collect();
-    let issues = sqlx::query("SELECT p.check_id,i.kind,i.code,i.detail FROM typed_evidence_issues i JOIN typed_evidence_planned_checks p ON p.id=i.planned_check_id WHERE i.validation_result_id=$1").bind(validation_id).fetch_all(db.pool()).await.unwrap();
+    let finding_anchors = sqlx::query("SELECT p.check_id,a.method,a.locator,a.health,a.detail,a.immutable_identity,a.method_compatible FROM typed_evidence_return_finding_anchors a JOIN typed_evidence_return_findings f ON f.id=a.finding_id JOIN typed_evidence_planned_checks p ON p.id=f.planned_check_id WHERE f.validation_result_id=$1 ORDER BY p.ordinal,a.method,a.locator,a.id").bind(validation_id).fetch_all(db.pool()).await.unwrap().into_iter().map(|r| serde_json::json!({"check_id":r.get::<String,_>("check_id"),"method":r.get::<String,_>("method"),"locator":r.get::<String,_>("locator"),"health":r.get::<String,_>("health"),"detail":r.get::<Option<String>,_>("detail"),"immutable_identity":r.get::<serde_json::Value,_>("immutable_identity"),"method_compatible":r.get::<bool,_>("method_compatible")})).collect();
+    let issues = sqlx::query("SELECT p.check_id,i.kind,i.code,i.detail FROM typed_evidence_issues i JOIN typed_evidence_planned_checks p ON p.id=i.planned_check_id WHERE i.validation_result_id=$1 ORDER BY i.kind,p.ordinal,i.code").bind(validation_id).fetch_all(db.pool()).await.unwrap();
     let (mut failures, mut gaps) = (vec![], vec![]);
     for r in issues {
         let v = serde_json::json!({"check_id":r.get::<String,_>("check_id"),"code":r.get::<String,_>("code"),"detail":r.get::<String,_>("detail")});
@@ -40,7 +42,9 @@ pub async fn typed_evidence_validation_snapshot_for_test(
         outcome: row.get("outcome"),
         validator_facts: row.get("validator_facts"),
         checks,
+        check_anchors,
         findings,
+        finding_anchors,
         failures,
         gaps,
         finding_lifecycle: row.get("lifecycle"),
@@ -71,7 +75,12 @@ pub struct TypedEvidenceValidationSnapshotForTest {
     pub outcome: String,
     pub validator_facts: serde_json::Value,
     pub checks: Vec<serde_json::Value>,
+    /// Hydrated check-result anchors, including server-derived health and
+    /// immutable evidence identity.
+    pub check_anchors: Vec<serde_json::Value>,
     pub findings: Vec<serde_json::Value>,
+    /// Hydrated return-finding anchor provenance.
+    pub finding_anchors: Vec<serde_json::Value>,
     pub failures: Vec<serde_json::Value>,
     pub gaps: Vec<serde_json::Value>,
     pub finding_lifecycle: String,
@@ -180,8 +189,8 @@ pub async fn seed_canonical_typed_evidence_ingress_fixture_for_test(
         ),
     };
     TypedEvidenceIngressFixtureForTest {
-        finding_id,
-        attempt_id,
+        finding_id: finding_id.clone(),
+        attempt_id: attempt_id.clone(),
         return_payload: serde_json::json!({"version":"TribunalEvidenceReturnV1","finding_id":finding_id,"spike_task_id":spike_task_id,"attempt_id":attempt_id,"conclusion":"canonical typed evidence","checks":checks,"failures":failures,"gaps":gaps}).to_string(),
     }
 }
