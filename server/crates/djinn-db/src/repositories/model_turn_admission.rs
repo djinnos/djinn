@@ -1473,6 +1473,55 @@ mod tests {
     }
 
     #[test]
+    fn controller_window_summary_serialization_is_closed_and_pool_local() {
+        let summary = ModelTurnControllerWindowSummary {
+            provider_id: "provider".into(),
+            model_id: "namespace/model".into(),
+            trainable: false,
+            diagnostics: vec![ModelTurnControllerWindowDiagnostic {
+                pool_id: 7,
+                code: ModelTurnControllerWindowDiagnosticCode::MissingCapability,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&summary).expect("serialize closed summary"),
+            serde_json::json!({
+                "provider_id": "provider", "model_id": "namespace/model",
+                "trainable": false,
+                "diagnostics": [{"pool_id": 7, "code": "missing_capability"}],
+            })
+        );
+        assert!(
+            serde_json::from_value::<ModelTurnControllerWindowSummary>(serde_json::json!({
+                "provider_id": "provider", "model_id": "model", "trainable": false,
+                "diagnostics": [], "reporter_text": "forbidden"
+            }))
+            .is_err()
+        );
+        let input = ModelTurnControllerWindowInput {
+            pool_id: 7,
+            window_sequence: 2,
+            started_at: "1970-01-01T00:02:00Z".into(),
+            ended_at: "1970-01-01T00:03:00Z".into(),
+            admitted_turns: 0,
+            completed_turns: 0,
+            summary,
+        };
+        assert!(validate_controller_window_input(&input).is_ok());
+        let unrelated = ModelTurnControllerWindowInput {
+            summary: ModelTurnControllerWindowSummary {
+                diagnostics: vec![ModelTurnControllerWindowDiagnostic {
+                    pool_id: 8,
+                    code: ModelTurnControllerWindowDiagnosticCode::MissingCapability,
+                }],
+                ..input.summary.clone()
+            },
+            ..input
+        };
+        assert!(validate_controller_window_input(&unrelated).is_err());
+    }
+
+    #[test]
     fn decision_diagnostics_have_only_fixed_non_identifying_codes() {
         let codes = [
             ModelTurnDecisionDiagnostic::CapabilityUnknown.code(),

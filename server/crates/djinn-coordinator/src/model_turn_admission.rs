@@ -121,14 +121,11 @@ pub async fn persist_catalog_qualified_phase_c_window_v1(
     completed_turns: i64,
     qualification: &PhaseCWindowQualificationV1,
 ) -> djinn_db::Result<()> {
-    if catalog
-        .find_model(&format!("{}/{}", path.provider, path.model_scope))
-        .is_none()
-    {
+    let Some(model) = catalog.find_model(&format!("{}/{}", path.provider, path.model_scope)) else {
         return Err(djinn_db::Error::InvalidData(
             "unknown Phase-C catalog route".into(),
         ));
-    }
+    };
     let diagnostics = qualification
         .diagnostics
         .iter()
@@ -151,8 +148,10 @@ pub async fn persist_catalog_qualified_phase_c_window_v1(
             admitted_turns,
             completed_turns,
             summary: ModelTurnControllerWindowSummary {
+                // `find_model` accepts alternate and bare IDs. Persist the
+                // canonical active-catalog ID, never that caller path spelling.
                 provider_id: path.provider.clone(),
-                model_id: path.model_scope.clone(),
+                model_id: model.id,
                 trainable: qualification.admitted,
                 diagnostics,
             },
@@ -1217,5 +1216,78 @@ mod tests {
             assert!(has(&r, code), "{code:?}");
         }
         assert!(!r.admitted);
+    }
+
+    #[tokio::test]
+    async fn catalog_qualified_persistence_keeps_diagnostics_pool_local() {
+        let db = Database::ephemeral().await.expect("db");
+        let first = seed(&db, "window-a", "zai", "glm-5").await;
+        let second = seed(&db, "window-b", "zai", "glm-5").await;
+        let repository = ModelTurnAdmissionRepository::new(db);
+        let qualification = PhaseCWindowQualificationV1 {
+            admitted: false,
+            diagnostics: vec![
+                PhaseCWindowDiagnosticV1 {
+                    pool_id: 0,
+                    code: PhaseCWindowDiagnosticCodeV1::MissingCapability,
+                },
+                PhaseCWindowDiagnosticV1 {
+                    pool_id: first,
+                    code: PhaseCWindowDiagnosticCodeV1::MissingUsage,
+                },
+                PhaseCWindowDiagnosticV1 {
+                    pool_id: second,
+                    code: PhaseCWindowDiagnosticCodeV1::OpenBreaker,
+                },
+            ],
+        };
+        let catalog = CatalogService::new();
+        for pool_id in [first, second] {
+            persist_catalog_qualified_phase_c_window_v1(
+                &repository,
+                &catalog,
+                &ExpectedAttemptPathV1 {
+                    slot_pod_uid: "slot".into(),
+                    deployment_revision: "revision".into(),
+                    provider: "zai".into(),
+                    model_scope: "glm-5".into(),
+                    pool_id,
+                },
+                2,
+                "1970-01-01T00:02:00Z".into(),
+                "1970-01-01T00:03:00Z".into(),
+                0,
+                0,
+                &qualification,
+            )
+            .await
+            .expect("catalog-qualified write");
+        }
+        for (pool_id, own_code, other_code) in [
+            (first, "missing_usage", "open_breaker"),
+            (second, "open_breaker", "missing_usage"),
+        ] {
+            let summary: serde_json::Value = sqlx::query_scalar(
+                "SELECT summary FROM model_turn_controller_windows WHERE pool_id = $1",
+            )
+            .bind(pool_id)
+            .fetch_one(repository.db.pool())
+            .await
+            .expect("persisted summary");
+            let diagnostics = summary["diagnostics"].as_array().expect("diagnostics");
+            assert!(diagnostics.iter().any(|d| d["pool_id"] == 0));
+            assert!(diagnostics.iter().any(|d| d["code"] == own_code));
+            assert!(!diagnostics.iter().any(|d| d["code"] == other_code));
+        }
+    }
+
+    #[test]
+    fn source_locks_catalog_qualified_production_window_topology() {
+        let source = include_str!("model_turn_admission.rs");
+        assert_eq!(source.matches(".upsert_controller_window(").count(), 1);
+        assert_eq!(source.matches(".learner_window(").count(), 1);
+        assert!(!source.contains("snapshot.json"));
+        assert!(source.contains("let Some(model) = catalog.find_model"));
+        assert!(source.contains("model_id: model.id"));
     }
 }
