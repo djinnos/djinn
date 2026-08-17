@@ -127,62 +127,96 @@ impl CoordinatorActor {
                 )
                 .await;
 
+            // ── GitHub terminal ground truth (BEFORE any advance gate) ───
+            //
+            // A merged PR is ground truth: the work is on the base branch and
+            // no Djinn-side gate can un-land it. Every gate below this point
+            // (tripwire active-hold, CI gate, merge-conflict check, undraft)
+            // exists to stop Djinn *advancing* a PR toward merge. Evaluating
+            // any of them first turns it into a permanent mask over merge
+            // detection — and a task that never terminalizes never releases its
+            // dependents, so the damage is a silently-stalled dependency chain,
+            // not a stale status column.
+            //
+            // This ordering IS the incident. `4vnt`/#3153 and `3kza`/#3155 each
+            // had a `tripwire.gate.held` activity event on the PR's *live* head
+            // (`d41958f6…` and `fef4a526…`), so `reconcile_tripwire_hold`
+            // returned `true` on every tick from the block that used to sit
+            // here. Both PRs were then merged outside Djinn while held; the
+            // loop `continue`d before ever reading `pr.merged`, and the tasks
+            // sat in `pr_draft` with `closed_at: null` for 5 days and 1 minute
+            // respectively — blocking dependents `296y` and `i58q` — until an
+            // operator closed them by hand. `poll_pr_review_tasks` has always
+            // had the correct order; only this loop was inverted.
+            //
+            // Classification is deliberately SHA-free: both branches had been
+            // force-pushed during a rebase, leaving `task_attempts
+            // .github_head_sha` (`b3aaede1…` / `0d67ee6e…`) stale against the
+            // merged head. Merge detection that consults a stored SHA would
+            // have stranded these tasks for a second, independent reason.
+            match merged_reconcile::classify_pr_terminal_state(
+                pr.merged == Some(true),
+                pr.state.clone(),
+            ) {
+                merged_reconcile::PrTerminalState::Merged => {
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        pr = pull_number,
+                        "PR poller: PR merged → closing task"
+                    );
+                    // `nafu`: a merge is authoritative over every pending route
+                    // for this subject. Closing here is what stops a merged PR
+                    // leaving its head's Tier-2 lease held against the next head.
+                    poll_stack::boxed(|| {
+                        self.close_ci_routes_on_success(&task.id, pull_number, true)
+                    })
+                    .await;
+                    poll_stack::boxed(|| {
+                        self.apply_pr_merge(
+                            &task.id,
+                            task.pr_url.as_deref().unwrap_or_default(),
+                            pr.merge_commit_sha.as_deref(),
+                            Some("not_applicable"),
+                            "not_applicable",
+                        )
+                    })
+                    .await;
+                    self.pr_status_cache.remove(&task.id);
+                    self.pr_draft_first_seen.remove(&task.id);
+                    self.review_stuck_sha_first_seen.remove(&task.id);
+                    continue;
+                }
+                merged_reconcile::PrTerminalState::ClosedUnmerged => {
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        pr = pull_number,
+                        "PR poller: PR closed without merge → force-closing task"
+                    );
+                    poll_stack::boxed(|| {
+                        self.apply_pr_transition(
+                            &task.id,
+                            TransitionAction::ForceClose,
+                            Some("PR was closed without merging"),
+                        )
+                    })
+                    .await;
+                    self.pr_status_cache.remove(&task.id);
+                    self.pr_draft_first_seen.remove(&task.id);
+                    self.review_stuck_sha_first_seen.remove(&task.id);
+                    continue;
+                }
+                merged_reconcile::PrTerminalState::Live => {}
+            }
+
             // ── Tripwire active-hold reconciliation ──────────────────────
             // Re-check hold state before any PR advance; reapply tampered labels.
+            // Only reachable for a PR that is still open, so a hold can no
+            // longer mask a merge that already happened.
             if self
                 .reconcile_tripwire_hold(&task, pull_number, &pr.head.sha)
                 .await
             {
                 // Active hold — do not advance; ensure label stays on.
-                self.pr_status_cache.remove(&task.id);
-                self.pr_draft_first_seen.remove(&task.id);
-                self.review_stuck_sha_first_seen.remove(&task.id);
-                continue;
-            }
-
-            // ── Merged? ───────────────────────────────────────────────────────
-            if pr.merged == Some(true) {
-                tracing::info!(
-                    task_id = %task.short_id,
-                    pr = pull_number,
-                    "PR poller: PR merged → closing task"
-                );
-                // `nafu`: a merge is authoritative over every pending route for
-                // this subject. Closing here is what stops a merged PR leaving
-                // its head's Tier-2 lease held against the next head.
-                poll_stack::boxed(|| self.close_ci_routes_on_success(&task.id, pull_number, true))
-                    .await;
-                poll_stack::boxed(|| {
-                    self.apply_pr_merge(
-                        &task.id,
-                        task.pr_url.as_deref().unwrap_or_default(),
-                        pr.merge_commit_sha.as_deref(),
-                        Some("not_applicable"),
-                        "not_applicable",
-                    )
-                })
-                .await;
-                self.pr_status_cache.remove(&task.id);
-                self.pr_draft_first_seen.remove(&task.id);
-                self.review_stuck_sha_first_seen.remove(&task.id);
-                continue;
-            }
-
-            // ── PR closed without merge ───────────────────────────────────────
-            if pr.state == PrState::Closed {
-                tracing::info!(
-                    task_id = %task.short_id,
-                    pr = pull_number,
-                    "PR poller: PR closed without merge → force-closing task"
-                );
-                poll_stack::boxed(|| {
-                    self.apply_pr_transition(
-                        &task.id,
-                        TransitionAction::ForceClose,
-                        Some("PR was closed without merging"),
-                    )
-                })
-                .await;
                 self.pr_status_cache.remove(&task.id);
                 self.pr_draft_first_seen.remove(&task.id);
                 self.review_stuck_sha_first_seen.remove(&task.id);
