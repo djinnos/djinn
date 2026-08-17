@@ -560,3 +560,20 @@ pub async fn initialize_mcp_session_with_headers(
 
     session_id
 }
+
+/// Drive production startup Stage A against an already-captured immutable
+/// census.
+///
+/// [`AppState::interrupt_stale_sessions_on_startup_with_census`] is
+/// crate-visible, so an integration test that must observe Stage A from inside
+/// the production dispatch seam cannot reach it directly. This forwards to that
+/// exact method with no logic of its own — production still enters Stage A
+/// through `run_startup_recovery`, which is what the ordering regressions pin.
+pub async fn run_startup_stage_a(
+    state: &AppState,
+    census: &djinn_coordinator::startup_census::StartupCensus,
+) {
+    state
+        .interrupt_stale_sessions_on_startup_with_census(census)
+        .await;
+}

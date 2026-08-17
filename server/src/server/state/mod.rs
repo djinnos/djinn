@@ -23,9 +23,7 @@ use djinn_coordinator::build_lease::BuildLeaseService;
 use djinn_coordinator::build_lease_reclaim::{BuildLeaseReclaimReport, BuildLeaseReclaimer};
 use djinn_coordinator::graph_warm_lease::BuildLeaseGraphWarmAdapter;
 use djinn_coordinator::run_dir_observe::{RunDirObserveSeams, arm_disk_observation};
-use djinn_coordinator::startup_census::{
-    GoneProvenance, InventoryAvailability, StartupCensus, TaskRunWitness,
-};
+use djinn_coordinator::startup_census::{InventoryAvailability, StartupCensus, TaskRunWitness};
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::models::KnowledgeInjectionConfig;
 use djinn_db::{
@@ -2508,15 +2506,12 @@ impl AppState {
     }
 
     /// Stage A: only positive destructive census evidence authorizes mutation.
-    #[cfg(not(test))]
-    async fn interrupt_stale_sessions_on_startup_with_census(&self, census: &StartupCensus) {
-        self.interrupt_stale_sessions_on_startup_with_census_impl(census)
-            .await;
-    }
-
-    /// Crate-visible only so the startup identity matrix drives the configured
-    /// Stage A path rather than the `NotConfigured` compatibility path.
-    #[cfg(test)]
+    ///
+    /// Crate-visible so the startup identity matrix — and, through
+    /// [`crate::test_helpers::run_startup_stage_a`], the integration test that
+    /// drives Stage A from inside the production dispatch seam — enter the
+    /// configured Stage A path rather than the `NotConfigured` compatibility
+    /// path. Production reaches it from `run_startup_recovery`.
     pub(crate) async fn interrupt_stale_sessions_on_startup_with_census(
         &self,
         census: &StartupCensus,
@@ -2538,17 +2533,18 @@ impl AppState {
                 repo.interrupt_running_except_task_run_ids(ids).await
             }
         } else {
+            // Stage A carries the census's durable run state, not only its
+            // `Gone` provenance. A durable `starting` row whose Job is
+            // authoritatively absent may simply not have been CREATEd yet, so
+            // it is fenced here exactly as it is in Stage B and Stage C —
+            // otherwise the three stages disagree about one identity and the
+            // session of a run that is mid-dispatch is destroyed.
             let gone: HashSet<&str> = census
                 .runs()
                 .iter()
                 .filter_map(|run| {
-                    matches!(
-                        run.witness,
-                        TaskRunWitness::Gone(
-                            GoneProvenance::AuthoritativelyAbsent | GoneProvenance::TerminalPresent
-                        )
-                    )
-                    .then_some(run.task_run_id.as_str())
+                    run.destructive_mutation_authorized()
+                        .then_some(run.task_run_id.as_str())
                 })
                 .collect();
             let mut session_ids = HashSet::new();

@@ -3117,16 +3117,7 @@ pub(super) async fn reap_stale_task_runs_for_startup_with_census(
 /// CREATE, so authoritative absence cannot reap it. This never consults the
 /// startup age threshold or mutable repository state.
 fn startup_task_run_mutation_authorized(run: &crate::startup_census::CensusTaskRun) -> bool {
-    use crate::startup_census::{DurableRunState, GoneProvenance, TaskRunWitness};
-
-    matches!(
-        (run.durable_state, run.witness),
-        (_, TaskRunWitness::Gone(GoneProvenance::TerminalPresent))
-            | (
-                DurableRunState::Running,
-                TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent)
-            )
-    )
+    run.destructive_mutation_authorized()
 }
 
 /// Stage C may classify an attempt only when the immutable reduction proves

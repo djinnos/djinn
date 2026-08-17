@@ -330,7 +330,6 @@ async fn startup_stage_a_identity_matrix() {
         "the Live census witness preserves its durable linked session"
     );
     for id in [
-        absent_starting_session,
         absent_running_session,
         terminal_starting_session,
         terminal_running_session,
@@ -346,6 +345,10 @@ async fn startup_stage_a_identity_matrix() {
     }
     for id in [
         connected_session,
+        // A durable `starting` row whose Job is authoritatively absent may
+        // simply not have been CREATEd yet, so Stage A carries the census's
+        // durable run state and fences it exactly as Stage B and Stage C do.
+        absent_starting_session,
         // The registry intentionally has no connection for this identity; the
         // Live census witness—not connection absence—preserves it.
         disconnected_live_session,
@@ -371,8 +374,8 @@ async fn startup_stage_a_identity_matrix() {
             .await
             .expect("list remaining sessions")
             .len(),
-        10,
-        "exactly four of fourteen matrix sessions transition; ten fail closed"
+        11,
+        "exactly three of fourteen matrix sessions transition; eleven fail closed"
     );
     for (run_id, expected_status) in [
         (live, "running"),
@@ -751,8 +754,12 @@ async fn startup_stage_c_task_projection() {
         .interrupt_stale_sessions_on_startup_with_census(&census)
         .await;
         let secondary_stage_a_session = match name {
-            "gone-live" | "gone-unknown" => "running",
-            "gone-creation-transit" | "all-gone" => "interrupted",
+            // `gone-creation-transit` is a durable `starting` row with
+            // authoritative absence: Stage A carries that durable run state and
+            // preserves the linked session, matching Stage B's fence and the
+            // task-level `CreationTransit` projection Stage C consumes.
+            "gone-live" | "gone-unknown" | "gone-creation-transit" => "running",
+            "all-gone" => "interrupted",
             _ => unreachable!("projection matrix row is exhaustive"),
         };
         assert_eq!(
@@ -833,7 +840,9 @@ async fn startup_stage_c_task_projection() {
         assert_eq!(fixture.task_run_status(&primary).await, "interrupted");
         let (secondary_session_status, secondary_run_status) = match name {
             "gone-live" | "gone-unknown" => ("running", "running"),
-            "gone-creation-transit" => ("interrupted", "starting"),
+            // The starting row's commit-then-CREATE window is fenced in all
+            // three stages, so neither its session nor its ledger row moves.
+            "gone-creation-transit" => ("running", "starting"),
             "all-gone" => ("interrupted", "interrupted"),
             _ => unreachable!("projection matrix row is exhaustive"),
         };
