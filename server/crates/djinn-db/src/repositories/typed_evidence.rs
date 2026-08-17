@@ -89,6 +89,13 @@ pub struct TribunalEvidenceReturnResultV1 {
     pub lifecycle: TribunalEvidenceLifecycle,
     pub replayed: bool,
 }
+/// One durable raw delivery eligible for coordinator replay. The inventory is
+/// rooted in the typed attempt/task binding, not the compatibility link.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalTypedEvidenceReturnDelivery {
+    pub spike_task_id: String,
+    pub payload: String,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AllocateTypedEvidenceAttemptInput {
     pub attempt_id: String,
@@ -324,6 +331,68 @@ impl TypedEvidenceRepository {
                 is_retry: row.get("is_retry"),
             })
             .collect())
+    }
+
+    /// Return durable V1 delivery activities for closed exact typed spike tasks.
+    /// A successful submit can clear `proposals.linked_spike_task_id`, so that
+    /// compatibility field is deliberately not part of this recovery inventory.
+    pub async fn terminal_return_v1_deliveries(
+        &self,
+    ) -> Result<Vec<TerminalTypedEvidenceReturnDelivery>> {
+        let rows = sqlx::query(
+            "SELECT l.task_id, l.payload::text AS payload \
+             FROM activity_log l \
+             JOIN typed_evidence_attempts a ON a.spike_task_id=l.task_id \
+             JOIN tasks t ON t.id=a.spike_task_id \
+             WHERE l.archived=FALSE AND l.event_type='tribunal_evidence_return_v1' \
+               AND t.status='closed' ORDER BY l.created_at",
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                row.get::<Option<String>, _>("task_id")
+                    .map(|spike_task_id| TerminalTypedEvidenceReturnDelivery {
+                        spike_task_id,
+                        payload: row.get("payload"),
+                    })
+            })
+            .collect())
+    }
+
+    /// Read durable deliveries for one authenticated spike after its terminal
+    /// task event. This closes the producer-before-settlement delivery window.
+    pub async fn terminal_return_v1_deliveries_for_task(
+        &self,
+        spike_task_id: &str,
+    ) -> Result<Vec<TerminalTypedEvidenceReturnDelivery>> {
+        let rows = sqlx::query(
+            "SELECT l.task_id, l.payload::text AS payload \
+             FROM activity_log l JOIN typed_evidence_attempts a ON a.spike_task_id=l.task_id \
+             JOIN tasks t ON t.id=a.spike_task_id \
+             WHERE l.archived=FALSE AND l.event_type='tribunal_evidence_return_v1' \
+               AND l.task_id=$1 AND t.status='closed' ORDER BY l.created_at",
+        )
+        .bind(spike_task_id)
+        .fetch_all(self.db.pool())
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                row.get::<Option<String>, _>("task_id")
+                    .map(|spike_task_id| TerminalTypedEvidenceReturnDelivery {
+                        spike_task_id,
+                        payload: row.get("payload"),
+                    })
+            })
+            .collect())
+    }
+
+    /// Find the proposal owning an already-persisted validation for folding.
+    pub async fn proposal_id_for_validation(&self, validation_id: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar("SELECT f.proposal_id FROM typed_evidence_validation_results v JOIN typed_evidence_attempts a ON a.id=v.attempt_id JOIN typed_evidence_findings f ON f.id=a.finding_id WHERE v.id=$1")
+            .bind(validation_id).fetch_optional(self.db.pool()).await?)
     }
 
     pub async fn copy_planned_checks_for_latest_attempt_in_transaction(
@@ -816,53 +885,97 @@ impl TypedEvidenceRepository {
         &self,
         payload_bytes: &[u8],
     ) -> Result<TribunalEvidenceReturnResultV1> {
-        // Required fields may be missing in a malformed body while its attempt
-        // remains authoritative and must receive one failure transition.
+        self.submit_return_v1_from_task(None, payload_bytes).await
+    }
+
+    /// Submit a raw return from a `TaskRepository::log_activity` record. The
+    /// durable activity task is server-authenticated and must bind the payload.
+    pub async fn submit_return_v1_for_task(
+        &self,
+        authenticated_spike_task_id: &str,
+        payload_bytes: &[u8],
+    ) -> Result<TribunalEvidenceReturnResultV1> {
+        self.submit_return_v1_from_task(Some(authenticated_spike_task_id), payload_bytes)
+            .await
+    }
+
+    async fn submit_return_v1_from_task(
+        &self,
+        authenticated_spike_task_id: Option<&str>,
+        payload_bytes: &[u8],
+    ) -> Result<TribunalEvidenceReturnResultV1> {
+        // The durable activity task is authenticated, so an untrusted body
+        // cannot redirect malformed-return attribution to another attempt.
         let rejection_attempt_id =
             serde_json::from_slice::<TribunalEvidenceReturnEnvelopeV1>(payload_bytes)
                 .ok()
                 .and_then(|envelope| envelope.attempt_id)
                 .filter(|attempt_id| !attempt_id.trim().is_empty());
         let mut tx = self.db.pool().begin().await?;
-        match Self::submit_return_v1_in_transaction(&mut tx, payload_bytes).await {
+        match Self::submit_return_v1_in_transaction(
+            &mut tx,
+            authenticated_spike_task_id,
+            payload_bytes,
+        )
+        .await
+        {
             Ok(result) => {
                 tx.commit().await?;
                 Ok(result)
             }
             Err(error) => {
                 tx.rollback().await?;
-                if let (Some(attempt_id), Error::InvalidData(code)) =
-                    (&rejection_attempt_id, &error)
-                {
-                    self.record_rejected_return(attempt_id, code).await?;
+                if let Error::InvalidData(code) = &error {
+                    self.record_rejected_return(
+                        authenticated_spike_task_id,
+                        rejection_attempt_id.as_deref(),
+                        code,
+                    )
+                    .await?;
                 }
                 Err(error)
             }
         }
     }
 
-    async fn record_rejected_return(&self, attempt_id: &str, code: &str) -> Result<()> {
-        // The attempt is the only caller-supplied identity required to locate
-        // the authoritative finding/task pair. An incorrect claimed binding
-        // must not suppress the required failed lifecycle fact.
-        if attempt_id.trim().is_empty() {
-            return Ok(());
-        }
+    async fn record_rejected_return(
+        &self,
+        authenticated_spike_task_id: Option<&str>,
+        claimed_attempt_id: Option<&str>,
+        code: &str,
+    ) -> Result<()> {
         let mut tx = self.db.pool().begin().await?;
-        let attempt = sqlx::query(
-            "SELECT finding_id,spike_task_id FROM typed_evidence_attempts WHERE id=$1 FOR UPDATE",
-        )
-        .bind(attempt_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+        // The authenticated delivery task owns failure attribution. This covers
+        // malformed bodies and foreign attempt IDs without changing unscoped
+        // legacy submission behavior.
+        let attempt = if let Some(spike_task_id) = authenticated_spike_task_id {
+            sqlx::query(
+                "SELECT a.id,a.finding_id,a.spike_task_id FROM typed_evidence_attempts a \
+                 JOIN typed_evidence_findings f ON f.id=a.finding_id \
+                 WHERE a.spike_task_id=$1 AND f.lifecycle='spike_active' FOR UPDATE",
+            )
+            .bind(spike_task_id)
+            .fetch_optional(&mut *tx)
+            .await?
+        } else if let Some(attempt_id) = claimed_attempt_id.filter(|id| !id.trim().is_empty()) {
+            sqlx::query(
+                "SELECT id,finding_id,spike_task_id FROM typed_evidence_attempts WHERE id=$1 FOR UPDATE",
+            )
+            .bind(attempt_id)
+            .fetch_optional(&mut *tx)
+            .await?
+        } else {
+            None
+        };
         let Some(attempt) = attempt else {
             tx.commit().await?;
             return Ok(());
         };
+        let attempt_id: String = attempt.get("id");
         let already_terminal: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM typed_evidence_validation_results WHERE attempt_id=$1)",
         )
-        .bind(attempt_id)
+        .bind(&attempt_id)
         .fetch_one(&mut *tx)
         .await?;
         if already_terminal {
@@ -871,7 +984,7 @@ impl TypedEvidenceRepository {
         }
         let finding_id: String = attempt.get("finding_id");
         let spike_task_id: String = attempt.get("spike_task_id");
-        require_active_return_attempt(&mut tx, attempt_id, &finding_id, &spike_task_id).await?;
+        require_active_return_attempt(&mut tx, &attempt_id, &finding_id, &spike_task_id).await?;
         let ordinal: i32 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(ordinal),0)+1 FROM typed_evidence_transitions WHERE finding_id=$1",
         )
@@ -895,15 +1008,36 @@ impl TypedEvidenceRepository {
     /// normalized result. The unique attempt result is the replay fence.
     pub async fn submit_return_v1_in_transaction(
         tx: &mut Transaction<'_, Postgres>,
+        authenticated_spike_task_id: Option<&str>,
         payload_bytes: &[u8],
     ) -> Result<TribunalEvidenceReturnResultV1> {
         if payload_bytes.len() > 256 * 1024 {
             return Err(v1("payload_too_large"));
         }
-        let payload: TribunalEvidenceReturnV1 =
+        if let Some(spike_task_id) = authenticated_spike_task_id {
+            let closed: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=$1 AND status='closed')",
+            )
+            .bind(spike_task_id)
+            .fetch_one(&mut **tx)
+            .await?;
+            if !closed {
+                return Err(v1("activity_task_not_closed"));
+            }
+        }
+        // PostgreSQL jsonb rewrites whitespace and object ordering. Canonical
+        // serde JSON is stable across live event values and replayed jsonb text.
+        let raw_value: serde_json::Value =
             serde_json::from_slice(payload_bytes).map_err(|_| v1("invalid_json"))?;
-        let hash = format!("{:x}", Sha256::digest(payload_bytes));
+        let payload: TribunalEvidenceReturnV1 =
+            serde_json::from_value(raw_value.clone()).map_err(|_| v1("invalid_json"))?;
+        let hash = format!("{:x}", Sha256::digest(canonical_json_bytes(&raw_value)));
         validate_return_shape(&payload)?;
+        if let Some(authenticated_spike_task_id) = authenticated_spike_task_id
+            && authenticated_spike_task_id != payload.spike_task_id
+        {
+            return Err(v1("activity_task_binding_mismatch"));
+        }
         let attempt = sqlx::query(
             "SELECT finding_id,spike_task_id FROM typed_evidence_attempts WHERE id=$1 FOR UPDATE",
         )
@@ -1067,7 +1201,12 @@ impl TypedEvidenceRepository {
         .bind(&payload.finding_id)
         .fetch_one(&mut **tx)
         .await?;
-        Self::append_transition(tx,AppendTypedEvidenceTransitionInput{id:uuid::Uuid::now_v7().to_string(),finding_id:payload.finding_id,ordinal,from_lifecycle:Some(state),to_lifecycle:TribunalEvidenceLifecycle::EvidenceReceived,actor_task_id:Some(payload.spike_task_id),metadata:serde_json::json!({"validation_result_id":validation_id,"outcome":outcome(result_outcome)})}).await?;
+        let finding_id = payload.finding_id.clone();
+        let spike_task_id = payload.spike_task_id.clone();
+        Self::append_transition(tx,AppendTypedEvidenceTransitionInput{id:uuid::Uuid::now_v7().to_string(),finding_id,ordinal,from_lifecycle:Some(state),to_lifecycle:TribunalEvidenceLifecycle::EvidenceReceived,actor_task_id:Some(spike_task_id),metadata:serde_json::json!({"validation_result_id":validation_id,"outcome":outcome(result_outcome)})}).await?;
+        // Only this successful typed receipt clears its matching compatibility link.
+        sqlx::query("UPDATE proposals p SET linked_spike_task_id=NULL,needs_evidence_claim=NULL FROM typed_evidence_findings f WHERE f.id=$1 AND p.id=f.proposal_id AND p.linked_spike_task_id=$2")
+            .bind(&payload.finding_id).bind(&payload.spike_task_id).execute(&mut **tx).await?;
         Ok(TribunalEvidenceReturnResultV1 {
             validation_id,
             outcome: result_outcome,
@@ -2027,6 +2166,30 @@ pub fn normalized_demand_hash(claim: &serde_json::Value) -> String {
     hasher.update(serde_json::to_vec(&normalize(claim)).expect("JSON serialization cannot fail"));
     format!("demand:{:x}", hasher.finalize())
 }
+
+/// jsonb may render the same object with a different key order than the live
+/// event. Normalize recursively before using a delivery as an idempotency key.
+fn canonical_json_bytes(value: &serde_json::Value) -> Vec<u8> {
+    fn normalize(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.iter().map(normalize).collect())
+            }
+            serde_json::Value::Object(map) => {
+                let mut out = serde_json::Map::new();
+                let mut keys: Vec<_> = map.keys().collect();
+                keys.sort_unstable();
+                for key in keys {
+                    out.insert(key.clone(), normalize(&map[key]));
+                }
+                serde_json::Value::Object(out)
+            }
+            _ => value.clone(),
+        }
+    }
+    serde_json::to_vec(&normalize(value)).expect("JSON value serialization cannot fail")
+}
+
 fn nonempty(values: &[&str]) -> Result<()> {
     if values.iter().any(|v| v.trim().is_empty()) {
         Err(Error::InvalidData(

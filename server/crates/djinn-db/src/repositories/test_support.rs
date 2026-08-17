@@ -155,10 +155,12 @@ pub async fn seed_unknown_direct_delivery_epoch_for_test(db: &Database) {
 mod evidence_dispatch_recovery;
 mod refinement_read_only;
 mod test_support_retry;
+mod typed_evidence_ingress;
 
 pub use evidence_dispatch_recovery::*;
 pub use refinement_read_only::*;
 pub use test_support_retry::*;
+pub use typed_evidence_ingress::*;
 
 /// Counts every demand-owned relation for one proposal and its target project.
 ///
@@ -247,7 +249,7 @@ pub async fn materialize_judge_authority_for_test(
     .await
     .expect("failed to materialize Judge authority intent");
     sqlx::query(
-        "UPDATE tasks SET refinement_run_id = $1, refinement_intent_id = $2, \
+        "UPDATE tasks SET agent_type = 'judge', refinement_run_id = $1, refinement_intent_id = $2, \
          refinement_generation = $3, refinement_round = 1, \
          refinement_phase = 'judge_adjudication', refinement_role = 'judge' WHERE id = $4",
     )
@@ -1133,6 +1135,75 @@ pub async fn seed_board_health_mismatch_candidate(db: &Database, project_id: &st
     .execute(db.pool())
     .await
     .expect("failed to seed board-health mismatch candidate");
+}
+
+/// Seed the exact `dispatch_state` shape the coordinator's **breaker-open**
+/// path leaves behind, for board-health gate-escalation tests.
+///
+/// Three properties make this shape the one worth having a named helper for,
+/// and all three are easy to get subtly wrong by hand:
+///
+/// * `cooldown_until` is `cooldown_minutes_ahead` in the future **on the
+///   database clock**, not the caller's. `stranded_ready_section` compares the
+///   deadline against `now()` read from Postgres, so a timestamp computed in
+///   Rust would race the DB clock and make the fixture flaky rather than wrong
+///   in an obvious way.
+/// * `failure_streak` is `0`. When the breaker is open for EVERY candidate the
+///   task is not at fault, so that path deliberately does not advance the
+///   streak — which is precisely why the rate-limit gate never fired during the
+///   2026-08 stall and why the breaker gate had to be bounded on its own.
+/// * `inflight_model_id` and `last_dispatched_role` are populated, because the
+///   escalation evidence is asserted to name the model that was hard-disabled.
+///
+/// Upserts, so a caller can re-arm the deadline before each sample to model the
+/// coordinator re-arming it on every tick.
+///
+/// Raw fixture SQL stays behind the `djinn-db` boundary (see
+/// `scripts/check-raw-sql-boundary.sh`); callers in other crates use this.
+pub async fn seed_breaker_open_dispatch_state(
+    db: &Database,
+    task_id: &str,
+    inflight_model_id: &str,
+    cooldown_minutes_ahead: i64,
+) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "INSERT INTO dispatch_state \
+             (task_id, failure_streak, cooldown_until, last_dispatched_role, inflight_model_id) \
+         VALUES ($1, 0, now() AT TIME ZONE 'utc' + make_interval(mins => $2::int), \
+                 'worker', $3) \
+         ON CONFLICT (task_id) DO UPDATE SET \
+             failure_streak = EXCLUDED.failure_streak, \
+             cooldown_until = EXCLUDED.cooldown_until, \
+             last_dispatched_role = EXCLUDED.last_dispatched_role, \
+             inflight_model_id = EXCLUDED.inflight_model_id",
+    )
+    .bind(task_id)
+    .bind(cooldown_minutes_ahead)
+    .bind(inflight_model_id)
+    .execute(db.pool())
+    .await
+    .expect("failed to seed breaker-open dispatch_state");
+}
+
+/// Seed a sustained rate-limit backoff: a tripped ladder (`failure_streak >= 3`)
+/// with no cooldown deadline at all.
+///
+/// The absent `cooldown_until` is the point — it isolates the rate-limit gate
+/// so an escalation test can assert `overridden_gates == ["rate_limit_backoff"]`
+/// exactly rather than settling for a `contains`.
+pub async fn seed_rate_limited_dispatch_state(db: &Database, task_id: &str, failure_streak: i64) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "INSERT INTO dispatch_state (task_id, failure_streak, last_dispatched_role) \
+         VALUES ($1, $2::int, 'worker') \
+         ON CONFLICT (task_id) DO UPDATE SET failure_streak = EXCLUDED.failure_streak",
+    )
+    .bind(task_id)
+    .bind(failure_streak)
+    .execute(db.pool())
+    .await
+    .expect("failed to seed rate-limited dispatch_state");
 }
 
 /// Seed raw session rows directly into the database for integration-level

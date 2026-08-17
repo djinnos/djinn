@@ -1989,6 +1989,19 @@ impl CoordinatorActor {
     pub(super) async fn handle_event(&mut self, envelope: DjinnEventEnvelope) {
         match (envelope.entity_type, envelope.action) {
             ("activity", "logged") => {
+                if let Some((task_id, raw)) = envelope.payload.as_object().and_then(|body| {
+                    (body.get("action")?.as_str()? == "tribunal_evidence_return_v1")
+                        .then_some(())?;
+                    Some((
+                        body.get("task_id")?.as_str()?,
+                        body.get("payload")?.to_string(),
+                    ))
+                }) && let Some(result) =
+                    poll_stack::boxed(|| self.ingest_raw_tribunal_evidence_return_v1(task_id, &raw))
+                        .await
+                {
+                    tracing::debug!(task_id, validation_id=%result.validation_id, replayed=result.replayed, "typed evidence activity persisted");
+                }
                 poll_stack::boxed(|| self.handle_task_outcome_activity(&envelope)).await;
             }
             // Epic created → create a planning task for the Planner (wave 1),
@@ -2081,6 +2094,13 @@ impl CoordinatorActor {
                     poll_stack::boxed(|| self.redrive_demanded_evidence_dispatches()).await;
                 }
                 if task.status == "closed" {
+                    let evidence_results = poll_stack::boxed(|| {
+                        self.recover_terminal_linked_spike_evidence_for_task(&task.id)
+                    })
+                    .await;
+                    if !evidence_results.is_empty() {
+                        tracing::debug!(task_id=%task.id, deliveries=evidence_results.len(), "re-drove terminal typed evidence deliveries");
+                    }
                     // Terminalize the live attempt when a task closes via a
                     // force-close path. Best-effort; does not block the event.
                     poll_stack::boxed(|| self.terminalize_force_close_attempt(&task)).await;
@@ -2091,10 +2111,6 @@ impl CoordinatorActor {
                     {
                         self.record_merge_event(epic_id);
                     }
-                    poll_stack::boxed(|| {
-                        self.persist_terminal_linked_spike_evidence_from_closed_task(&task)
-                    })
-                    .await;
                     // Tripwire: a closed `human-review-hold` task means a human
                     // resolved the hold — emit `tripwire.hold.released` on each
                     // held source so the merge-boundary gate can clear for the

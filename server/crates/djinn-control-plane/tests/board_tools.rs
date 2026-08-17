@@ -803,3 +803,203 @@ async fn board_health_closed_parent_open_children_reports_populated_findings() {
     assert_eq!(o.len(), 1);
     assert_eq!(o[0], live_proposal.id);
 }
+
+/// **The MCP boundary is load-bearing and must be pinned.**
+///
+/// `board_health_impl` does `serde_json::from_value::<BoardHealthResponse>(report)`
+/// and re-serializes the parsed struct. `BoardHealthStrandedReadyFinding` has no
+/// `#[serde(flatten)]` catch-all, so any field the type does not model is
+/// **silently dropped** on the way out. The djinn-db section can be perfectly
+/// correct and the operator still gets nothing.
+///
+/// That matters specifically for `gate_escalation`. A finding carrying it is a
+/// task with a *live* dispatch gate — a cooldown deadline in the future — which
+/// this section would ordinarily exclude. Drop the escalation block and an
+/// operator sees a critical stranded finding for a task whose `dispatch_gate`
+/// says `breaker_open: true`, with nothing at all explaining why a gated task
+/// is being reported. That is the same "the alarm was silenced one layer out"
+/// failure this whole change exists to remove, moved to the last hop.
+///
+/// Reverting `BoardHealthStrandedReadyFinding::gate_escalation` (or
+/// `BoardHealthStrandedReady::gate_exclusion_bound_minutes`) leaves every
+/// djinn-db and doctor test green. This test is the only thing that fails.
+#[tokio::test]
+async fn board_health_mcp_surface_preserves_gate_escalation_evidence() {
+    let harness = McpTestHarness::new().await;
+    let project = common::create_test_project(harness.db()).await;
+    let epic = common::create_test_epic(harness.db(), &project.id).await;
+    let task = common::create_test_task(harness.db(), &project.id, &epic.id).await;
+
+    // Attribute the task to a creator with an ACTIVE credential, so the only
+    // gate suppressing this finding is the breaker cooldown. Without this the
+    // owner-credential gate would fire too and `overridden_gates` would carry
+    // two entries, which would weaken the assertion below into a `contains`.
+    let user = UserRepository::new(harness.db().clone())
+        .upsert_from_github(999_007, "board-health-escalation-test", None, None)
+        .await
+        .expect("create attributed task user");
+    TaskRepository::new(harness.db().clone(), EventBus::noop())
+        .set_created_by_user_id(&task.id, &user.id)
+        .await
+        .expect("attribute escalated task creator");
+    CredentialRepository::new(harness.db().clone(), EventBus::noop())
+        .set_with_owner(
+            "anthropic",
+            "ANTHROPIC_API_KEY",
+            "sk-board-health-escalation-test",
+            Some(&user.id),
+        )
+        .await
+        .expect("create attributed task credential");
+
+    // Four days of strand — the 2026-08-12 → 2026-08-16 window.
+    djinn_db::test_support::backdate_task_updated_at(harness.db(), &task.id, "5760 minutes").await;
+
+    // The exact `dispatch_state` shape the breaker-open path leaves behind: a
+    // cooldown deadline at the ~30-minute ladder ceiling, an inflight model,
+    // and `failure_streak = 0` — that path does not advance the streak. The
+    // fixture SQL lives behind the djinn-db boundary; see
+    // `scripts/check-raw-sql-boundary.sh`.
+    djinn_db::test_support::seed_breaker_open_dispatch_state(
+        harness.db(),
+        &task.id,
+        "openai/gpt-5.6-terra",
+        30,
+    )
+    .await;
+
+    // Call the REAL MCP tool — this is the round trip under test.
+    let response = harness
+        .call_tool("board_health", json!({ "project": project.slug() }))
+        .await
+        .expect("board_health should dispatch");
+
+    let stranded_ready = response
+        .get("stranded_ready")
+        .expect("stranded_ready section must be present");
+
+    // The section-level bound must survive the round trip, or a client cannot
+    // interpret an escalation without hard-coding the number.
+    assert_eq!(
+        stranded_ready
+            .get("gate_exclusion_bound_minutes")
+            .and_then(|v| v.as_i64()),
+        Some(180),
+        "the MCP surface must echo the gate-exclusion bound it applied; \
+         stranded_ready was {stranded_ready}"
+    );
+
+    let finding = stranded_ready
+        .get("findings")
+        .and_then(|v| v.as_array())
+        .expect("findings must be an array")
+        .iter()
+        .find(|f| f.get("id").and_then(|v| v.as_str()) == Some(&task.id))
+        .unwrap_or_else(|| {
+            panic!(
+                "a task suppressed by a breaker cooldown for 5760 minutes must reach the MCP \
+                 surface; stranded_ready was {stranded_ready}"
+            )
+        });
+
+    // The gate is live. That is precisely why the escalation has to be here:
+    // without it this finding is inexplicable.
+    assert_eq!(
+        finding
+            .pointer("/dispatch_gate/breaker_open")
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "the finding is reported despite a live breaker cooldown"
+    );
+
+    let escalation = finding.get("gate_escalation").unwrap_or_else(|| {
+        panic!("gate_escalation must survive the MCP round trip; finding was {finding}")
+    });
+    assert!(
+        !escalation.is_null(),
+        "gate_escalation must not be nulled out by the MCP round trip; finding was {finding}"
+    );
+
+    // Contents, not mere presence.
+    assert_eq!(
+        escalation.get("escalated").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        escalation.get("overridden_gates"),
+        Some(&json!(["breaker_cooldown"])),
+        "the overridden gate identity must survive intact, not be flattened away"
+    );
+    assert_eq!(
+        escalation.get("bound_minutes").and_then(|v| v.as_i64()),
+        Some(180)
+    );
+    assert_eq!(
+        escalation.get("bound_multiple").and_then(|v| v.as_i64()),
+        Some(6)
+    );
+
+    let suppressed = escalation
+        .get("suppressed_minutes")
+        .and_then(|v| v.as_i64())
+        .expect("suppressed_minutes must survive the round trip");
+    assert!(
+        suppressed >= 5_760,
+        "suppressed_minutes must carry the real strand duration, got {suppressed}"
+    );
+    assert_eq!(
+        Some(suppressed),
+        finding.get("elapsed_minutes").and_then(|v| v.as_i64()),
+        "suppressed_minutes and elapsed_minutes are the SAME clock and must stay equal \
+         across the round trip"
+    );
+
+    // The row evidence an operator needs to act: which model, and which deadline.
+    assert_eq!(
+        escalation
+            .pointer("/evidence/inflight_model_id")
+            .and_then(|v| v.as_str()),
+        Some("openai/gpt-5.6-terra"),
+        "the evidence block must survive with the model that was hard-disabled"
+    );
+    assert_eq!(
+        escalation
+            .pointer("/evidence/failure_streak")
+            .and_then(|v| v.as_i64()),
+        Some(0),
+        "the breaker-open path does not advance the streak; the evidence must say so"
+    );
+    assert_eq!(
+        escalation
+            .pointer("/evidence/last_dispatched_role")
+            .and_then(|v| v.as_str()),
+        Some("worker")
+    );
+    assert!(
+        escalation
+            .pointer("/evidence/cooldown_until")
+            .and_then(|v| v.as_str())
+            .is_some_and(|cd| cd.ends_with('Z')),
+        "the deadline that was suppressing the finding must survive: {escalation}"
+    );
+
+    let summary = escalation
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        summary.contains("breaker cooldown") && summary.contains("openai/gpt-5.6-terra"),
+        "an operator must read the gate and the model in one line from the MCP payload: \
+         {summary}"
+    );
+
+    // The machine-readable reason must survive alongside the human-readable one.
+    assert!(
+        finding
+            .pointer("/dispatch_gate/reasons")
+            .and_then(|v| v.as_array())
+            .is_some_and(|r| r.contains(&json!("breaker_cooldown_sustained_past_bound"))),
+        "dispatch_gate.reasons must carry the escalation reason across the round trip: \
+         {finding}"
+    );
+}
