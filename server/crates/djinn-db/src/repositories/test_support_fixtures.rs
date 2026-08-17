@@ -7,11 +7,13 @@
 
 use std::path::PathBuf;
 
-use djinn_core::models::Project;
+use djinn_core::events::EventBus;
+use djinn_core::models::{Project, SessionRecord};
 use tokio::sync::broadcast;
 
 use crate::database::Database;
 use crate::repositories::note::NoteRepository;
+use crate::repositories::session::{CreateSessionParams, SessionRepository};
 use crate::repositories::test_support::{event_bus_for, make_project, seed_test_user};
 use djinn_memory::Note;
 
@@ -669,6 +671,34 @@ pub async fn ensure_doctor_findings_schema(db: &Database) {
         .execute(db.pool())
         .await
         .expect("create doctor_findings_deduplication_key_unique");
+}
+
+/// Persist a running session whose `task_run_id` has no matching ledger row.
+///
+/// This narrowly scoped fixture reproduces durable identities written before
+/// the task-run foreign-key invariant existed. Trigger manipulation stays
+/// behind the `djinn-db` test-support boundary and is restored before this
+/// helper reports a session-creation failure.
+pub async fn seed_legacy_session_without_task_run_ledger_for_test(
+    db: &Database,
+    events: EventBus,
+    params: CreateSessionParams<'_>,
+) -> SessionRecord {
+    sqlx::query("ALTER TABLE sessions DISABLE TRIGGER ALL")
+        .execute(db.pool())
+        .await
+        .expect("disable session FK triggers for legacy fixture");
+
+    let created = SessionRepository::new(db.clone(), events)
+        .create(params)
+        .await;
+
+    sqlx::query("ALTER TABLE sessions ENABLE TRIGGER ALL")
+        .execute(db.pool())
+        .await
+        .expect("restore session FK triggers after legacy fixture");
+
+    created.expect("create legacy session without task-run ledger")
 }
 
 /// Overwrite the `encrypted_value` column of a credential row with arbitrary

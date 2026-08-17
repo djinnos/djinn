@@ -16,7 +16,10 @@ use crate::events::EventBus;
 use crate::server::AppState;
 use djinn_coordinator::startup_census::{GoneProvenance, StartupCensus, TaskRunWitness};
 use djinn_db::repositories::session::CreateSessionParams;
-use djinn_db::test_support::{backdate_task_attempt_created_at, capture_queries};
+use djinn_db::test_support::{
+    backdate_task_attempt_created_at, capture_queries,
+    seed_legacy_session_without_task_run_ledger_for_test,
+};
 use djinn_db::{
     CreateTaskAttemptParams, Database, SessionRepository, TaskAttemptRepository, TaskRepository,
     TaskRunRepository,
@@ -1354,12 +1357,10 @@ async fn seed_session_without_ledger(
     // census must nevertheless fail closed for durable historical rows from
     // before that invariant, so construct that persisted legacy shape only in
     // this isolated test database.
-    sqlx::query("ALTER TABLE sessions DISABLE TRIGGER ALL")
-        .execute(db.pool())
-        .await
-        .expect("disable session FK triggers for legacy matrix fixture");
-    let created = SessionRepository::new(db.clone(), events.clone())
-        .create(CreateSessionParams {
+    seed_legacy_session_without_task_run_ledger_for_test(
+        db,
+        events.clone(),
+        CreateSessionParams {
             project_id,
             task_id: Some(task_id),
             model: "openai/gpt-5.5",
@@ -1368,15 +1369,10 @@ async fn seed_session_without_ledger(
             task_run_id: Some(task_run_id),
             pricing: None,
             cost_basis: None,
-        })
-        .await;
-    sqlx::query("ALTER TABLE sessions ENABLE TRIGGER ALL")
-        .execute(db.pool())
-        .await
-        .expect("restore session FK triggers after legacy matrix fixture");
-    created
-        .expect("create matrix session without task-run ledger")
-        .id
+        },
+    )
+    .await
+    .id
 }
 
 async fn seed_attempt_for_task(db: &Database, task_id: &str, attempt_id: &str, key: &str) {
