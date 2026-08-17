@@ -13,6 +13,25 @@ use djinn_core::models::task::{PRIORITY_CRITICAL, PROPOSAL_REVIEW_TITLE_PREFIX};
 use djinn_core::models::{IssueType, TribunalEvidenceLifecycle};
 use djinn_db::{EffectiveCreatorProvenance, EpicRepository, ProposalRepository};
 
+// The typed repository owns the atomic receipt/compatibility-link transaction.
+// This test seam models process death in the tiny gap after that transaction
+// commits but before this actor can re-drive the Advocate. The armed actor/task
+// pair scopes it to one ingress, so concurrent test actors cannot steal the
+// fault even when they process the same task.
+// It is deliberately compiled out of production: normal ingress always
+// proceeds to resume.
+#[cfg(test)]
+static INTERRUPT_AFTER_EVIDENCE_COMMIT_BEFORE_RESUME_INGRESSES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<(String, String)>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn interrupt_after_evidence_commit_before_resume_ingresses()
+-> &'static std::sync::Mutex<std::collections::HashSet<(String, String)>> {
+    INTERRUPT_AFTER_EVIDENCE_COMMIT_BEFORE_RESUME_INGRESSES
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// Rolling window for throughput tracking.
@@ -26,6 +45,22 @@ pub(super) const PROPOSAL_RECONCILE_TITLE_PREFIX: &str = "Reconcile proposal";
 // ── Epic completion rules ─────────────────────────────────────────────────────
 
 impl CoordinatorActor {
+    /// Arm the one-shot commit-before-resume interruption for this actor's exact
+    /// spike-task ingress. Production builds do not contain this seam.
+    #[cfg(test)]
+    pub(crate) fn interrupt_after_evidence_commit_before_resume_for_test(
+        &self,
+        spike_task_id: &str,
+    ) {
+        interrupt_after_evidence_commit_before_resume_ingresses()
+            .lock()
+            .expect("test seam mutex is not poisoned")
+            .insert((
+                self.coordinator_incarnation_id.clone(),
+                spike_task_id.to_owned(),
+            ));
+    }
+
     /// Called when any task transitions to `closed`.
     ///
     /// Checks the two epic-level completion rules:
@@ -206,6 +241,23 @@ impl CoordinatorActor {
                 return None;
             }
         };
+        // Fault injection is intentionally *after* the repository's atomic
+        // validation, lifecycle transition, and compatibility-link cleanup,
+        // but before any in-memory Advocate continuation. Consuming the
+        // actor/task-targeted arm makes that one live ingress resemble a process
+        // that dies at this boundary; the test then drops this actor and
+        // exercises cold recovery.
+        #[cfg(test)]
+        let interrupt_after_commit = {
+            let mut armed_ingresses = interrupt_after_evidence_commit_before_resume_ingresses()
+                .lock()
+                .expect("test seam mutex is not poisoned");
+            armed_ingresses.remove(&(self.coordinator_incarnation_id.clone(), task.id.clone()))
+        };
+        #[cfg(test)]
+        if interrupt_after_commit {
+            return Some(result);
+        }
         // A duplicate returns the finding's current lifecycle. Only an
         // evidence-received finding may re-drive folding after a
         // commit-before-resume interruption; historical terminal returns must
