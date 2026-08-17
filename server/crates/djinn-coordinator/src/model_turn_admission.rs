@@ -7,8 +7,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use djinn_db::{
-    ModelTurnAdmissionRepository, ModelTurnCapabilityHeartbeatInput, ModelTurnPhaseCEvidenceInput,
-    ModelTurnPhaseCEvidenceOutcome, ModelTurnPhaseCEvidenceStage, ModelTurnPool,
+    ModelTurnAdmissionRepository, ModelTurnCapabilityHeartbeatInput,
+    ModelTurnControllerWindowDiagnostic, ModelTurnControllerWindowInput,
+    ModelTurnControllerWindowSummary, ModelTurnPhaseCEvidenceInput, ModelTurnPhaseCEvidenceOutcome,
+    ModelTurnPhaseCEvidenceStage, ModelTurnPool,
 };
 use djinn_k8s::{WorkloadObjectKind, WorkloadRecord};
 use djinn_provider::{ProviderAttemptPlanV1, ProviderOutcomeV1, catalog::CatalogService};
@@ -94,6 +96,110 @@ impl CoordinatorActor {
         let repository = ModelTurnAdmissionRepository::new(self.db.clone());
         project_from_inventory(&repository, &self.catalog, records, plans, reports).await
     }
+}
+
+/// Diagnostic-free output of the sole catalog-qualified learner seam.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhaseCLearnerWindowV1 {
+    pub pool_id: i64,
+    pub window_sequence: i64,
+    pub started_at: String,
+    pub ended_at: String,
+    pub admitted_turns: i64,
+    pub completed_turns: i64,
+}
+
+/// Aligned 60-second half-open window accounting handed to the persistence seam.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhaseCWindowAccountingV1 {
+    pub window_sequence: i64,
+    pub started_at: String,
+    pub ended_at: String,
+    pub admitted_turns: i64,
+    pub completed_turns: i64,
+}
+
+/// Resolve through the active catalog immediately before writing the typed DB row.
+pub async fn persist_catalog_qualified_phase_c_window_v1(
+    repository: &ModelTurnAdmissionRepository,
+    catalog: &CatalogService,
+    path: &ExpectedAttemptPathV1,
+    accounting: PhaseCWindowAccountingV1,
+    qualification: &PhaseCWindowQualificationV1,
+) -> djinn_db::Result<()> {
+    let Some(model) = catalog.find_model(&format!("{}/{}", path.provider, path.model_scope)) else {
+        return Err(djinn_db::Error::InvalidData(
+            "unknown Phase-C catalog route".into(),
+        ));
+    };
+    let diagnostics = qualification
+        .diagnostics
+        .iter()
+        .filter(|d| d.pool_id == 0 || d.pool_id == path.pool_id)
+        .map(|d| {
+            Ok(ModelTurnControllerWindowDiagnostic {
+                pool_id: d.pool_id,
+                code: serde_json::from_value(
+                    serde_json::to_value(d.code)
+                        .map_err(|e| djinn_db::Error::InvalidData(e.to_string()))?,
+                )
+                .map_err(|e| djinn_db::Error::InvalidData(e.to_string()))?,
+            })
+        })
+        .collect::<djinn_db::Result<Vec<_>>>()?;
+    repository
+        .upsert_controller_window(ModelTurnControllerWindowInput {
+            pool_id: path.pool_id,
+            window_sequence: accounting.window_sequence,
+            started_at: accounting.started_at,
+            ended_at: accounting.ended_at,
+            admitted_turns: accounting.admitted_turns,
+            completed_turns: accounting.completed_turns,
+            summary: ModelTurnControllerWindowSummary {
+                // `find_model` accepts alternate and bare IDs. Persist the
+                // canonical active-catalog labels, never caller path spelling.
+                provider_id: model.provider_id,
+                model_id: model.id,
+                trainable: qualification.admitted,
+                diagnostics,
+            },
+        })
+        .await
+}
+
+/// Exact DB bounds and current active-catalog revalidation before learning.
+pub async fn learner_catalog_qualified_phase_c_window_v1(
+    repository: &ModelTurnAdmissionRepository,
+    catalog: &CatalogService,
+    pool_id: i64,
+    window_sequence: i64,
+    started_at: &str,
+    ended_at: &str,
+) -> djinn_db::Result<Option<PhaseCLearnerWindowV1>> {
+    let Some(window) = repository
+        .learner_window(pool_id, window_sequence, started_at, ended_at)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let Some(model) = catalog.find_model(&format!("{}/{}", window.provider_id, window.model_id))
+    else {
+        return Ok(None);
+    };
+    // `find_model` intentionally accepts bare aliases. Durable labels are
+    // trusted only when they exactly equal the active catalog's canonical
+    // result; correlated corruption of both pool and summary must fail closed.
+    if model.provider_id != window.provider_id || model.id != window.model_id {
+        return Ok(None);
+    }
+    Ok(Some(PhaseCLearnerWindowV1 {
+        pool_id: window.pool_id,
+        window_sequence: window.window_sequence,
+        started_at: window.started_at,
+        ended_at: window.ended_at,
+        admitted_turns: window.admitted_turns,
+        completed_turns: window.completed_turns,
+    }))
 }
 
 /// Persist B2 evidence only if it exact-joined the coordinator-owned expected
@@ -577,6 +683,7 @@ async fn resolve_planned_routes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use djinn_core::models::{Model, Pricing, Provider};
     use djinn_db::{
         Database, ModelTurnBucketDebit, ModelTurnBucketKind,
         repositories::test_support::seed_scoped_model_turn_admission_fixture,
@@ -586,7 +693,10 @@ mod tests {
         ProviderAttemptRouteCoverageV1, ProviderAttemptScopeV1, ProviderAttemptTerminalV1,
         ProviderCredentialRecordScopeV1, ProviderOutputReservationSourceV1,
     };
-    use std::collections::BTreeMap;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        path::{Path, PathBuf},
+    };
 
     fn record(
         uid: Option<&str>,
@@ -1122,5 +1232,607 @@ mod tests {
             assert!(has(&r, code), "{code:?}");
         }
         assert!(!r.admitted);
+    }
+
+    /// Window 2 of the epoch: the aligned half-open `[00:02:00, 00:03:00)`.
+    const WINDOW_START: &str = "1970-01-01T00:02:00Z";
+    const WINDOW_END: &str = "1970-01-01T00:03:00Z";
+
+    fn accounting(
+        window_sequence: i64,
+        admitted_turns: i64,
+        completed_turns: i64,
+    ) -> PhaseCWindowAccountingV1 {
+        PhaseCWindowAccountingV1 {
+            window_sequence,
+            started_at: WINDOW_START.into(),
+            ended_at: WINDOW_END.into(),
+            admitted_turns,
+            completed_turns,
+        }
+    }
+
+    fn custom_catalog(provider_id: &str, model_id: &str) -> CatalogService {
+        let catalog = CatalogService::new();
+        catalog.add_custom_provider(
+            Provider {
+                id: provider_id.into(),
+                name: "Canonical Provider".into(),
+                npm: String::new(),
+                env_vars: vec!["CANONICAL_API_KEY".into()],
+                base_url: "https://example.invalid/v1".into(),
+                docs_url: String::new(),
+                is_openai_compatible: true,
+            },
+            vec![Model {
+                id: model_id.into(),
+                provider_id: provider_id.into(),
+                name: "Canonical Foo".into(),
+                tool_call: false,
+                reasoning: false,
+                attachment: false,
+                context_window: 1,
+                output_limit: 1,
+                pricing: Pricing::default(),
+            }],
+        );
+        catalog
+    }
+
+    #[tokio::test]
+    async fn catalog_qualified_persistence_keeps_diagnostics_pool_local() {
+        let db = Database::ephemeral().await.expect("db");
+        let first = seed(&db, "window-a", "zai", "glm-5").await;
+        let second = seed(&db, "window-b", "zai", "glm-5").await;
+        let repository = ModelTurnAdmissionRepository::new(db);
+        let qualification = PhaseCWindowQualificationV1 {
+            admitted: false,
+            diagnostics: vec![
+                PhaseCWindowDiagnosticV1 {
+                    pool_id: 0,
+                    code: PhaseCWindowDiagnosticCodeV1::MissingCapability,
+                },
+                PhaseCWindowDiagnosticV1 {
+                    pool_id: first,
+                    code: PhaseCWindowDiagnosticCodeV1::MissingUsage,
+                },
+                PhaseCWindowDiagnosticV1 {
+                    pool_id: second,
+                    code: PhaseCWindowDiagnosticCodeV1::OpenBreaker,
+                },
+            ],
+        };
+        let catalog = CatalogService::new();
+        for pool_id in [first, second] {
+            persist_catalog_qualified_phase_c_window_v1(
+                &repository,
+                &catalog,
+                &ExpectedAttemptPathV1 {
+                    slot_pod_uid: "slot".into(),
+                    deployment_revision: "revision".into(),
+                    provider: "zai".into(),
+                    model_scope: "glm-5".into(),
+                    pool_id,
+                },
+                accounting(2, 0, 0),
+                &qualification,
+            )
+            .await
+            .expect("catalog-qualified write");
+        }
+        for (pool_id, own_code, other_code) in [
+            (first, "missing_usage", "open_breaker"),
+            (second, "open_breaker", "missing_usage"),
+        ] {
+            let summary = repository
+                .controller_window_summary_for_test(pool_id, 2)
+                .await
+                .expect("persisted summary read")
+                .expect("persisted summary");
+            let diagnostics = serde_json::to_value(summary.diagnostics).expect("diagnostics");
+            let diagnostics = diagnostics.as_array().expect("diagnostics array");
+            assert!(diagnostics.iter().any(|d| d["pool_id"] == 0));
+            assert!(diagnostics.iter().any(|d| d["code"] == own_code));
+            assert!(!diagnostics.iter().any(|d| d["code"] == other_code));
+        }
+    }
+
+    /// The production learner seam admits exactly one thing: the durable window
+    /// whose bounds, counts, closed summary, and both durable label copies still
+    /// agree with the active catalog. Every other durable state is invisible.
+    #[tokio::test]
+    async fn learner_seam_admits_only_the_exact_active_catalog_qualified_window() {
+        let db = Database::ephemeral().await.expect("db");
+        let pool_id = seed(
+            &db,
+            "window-canonical",
+            "canonical-provider",
+            "namespace/foo",
+        )
+        .await;
+        let repository = ModelTurnAdmissionRepository::new(db);
+        let catalog = custom_catalog("canonical-provider", "namespace/foo");
+        let path = ExpectedAttemptPathV1 {
+            slot_pod_uid: "slot".into(),
+            deployment_revision: "revision".into(),
+            provider: "canonical-provider".into(),
+            // A bare alias the active catalog resolves to `namespace/foo`.
+            model_scope: "foo".into(),
+            pool_id,
+        };
+        let read = async |sequence: i64, started_at: &str, ended_at: &str| {
+            learner_catalog_qualified_phase_c_window_v1(
+                &repository,
+                &catalog,
+                pool_id,
+                sequence,
+                started_at,
+                ended_at,
+            )
+            .await
+            .expect("learner read")
+        };
+
+        // Absent: nothing is persisted yet.
+        assert!(read(2, WINDOW_START, WINDOW_END).await.is_none());
+
+        persist_catalog_qualified_phase_c_window_v1(
+            &repository,
+            &catalog,
+            &path,
+            accounting(2, 5, 4),
+            &PhaseCWindowQualificationV1 {
+                admitted: true,
+                diagnostics: Vec::new(),
+            },
+        )
+        .await
+        .expect("canonical write");
+        let summary = repository
+            .controller_window_summary_for_test(pool_id, 2)
+            .await
+            .expect("summary read")
+            .expect("summary");
+        assert_eq!(
+            (summary.provider_id.as_str(), summary.model_id.as_str()),
+            ("canonical-provider", "namespace/foo"),
+            "persistence must store the canonical catalog labels, not the caller's alias"
+        );
+        assert_eq!(
+            read(2, WINDOW_START, WINDOW_END).await,
+            Some(PhaseCLearnerWindowV1 {
+                pool_id,
+                window_sequence: 2,
+                started_at: WINDOW_START.into(),
+                ended_at: WINDOW_END.into(),
+                admitted_turns: 5,
+                completed_turns: 4,
+            })
+        );
+
+        // Absent (wrong sequence) and boundary-mismatched reads of a window that
+        // does exist: exact bounds only, no shifted, unaligned, or wider span.
+        for (label, sequence, started_at, ended_at) in [
+            ("wrong sequence", 3, WINDOW_START, WINDOW_END),
+            (
+                "shifted bounds",
+                2,
+                "1970-01-01T00:03:00Z",
+                "1970-01-01T00:04:00Z",
+            ),
+            (
+                "unaligned bounds",
+                2,
+                "1970-01-01T00:02:30Z",
+                "1970-01-01T00:03:30Z",
+            ),
+            (
+                "ninety second span",
+                2,
+                WINDOW_START,
+                "1970-01-01T00:03:30Z",
+            ),
+            (
+                "thirty second span",
+                2,
+                WINDOW_START,
+                "1970-01-01T00:02:30Z",
+            ),
+            ("reversed bounds", 2, WINDOW_END, WINDOW_START),
+            ("unparsable bounds", 2, "not-a-time", WINDOW_END),
+        ] {
+            assert!(
+                read(sequence, started_at, ended_at).await.is_none(),
+                "{label} must yield no learner window"
+            );
+        }
+
+        // A diagnostic window over the very same bounds is never trainable.
+        persist_catalog_qualified_phase_c_window_v1(
+            &repository,
+            &catalog,
+            &path,
+            accounting(2, 5, 4),
+            &PhaseCWindowQualificationV1 {
+                admitted: false,
+                diagnostics: vec![PhaseCWindowDiagnosticV1 {
+                    pool_id,
+                    code: PhaseCWindowDiagnosticCodeV1::MissingUsage,
+                }],
+            },
+        )
+        .await
+        .expect("diagnostic write");
+        assert!(
+            read(2, WINDOW_START, WINDOW_END).await.is_none(),
+            "a persisted diagnostic window must never train"
+        );
+
+        // Restore the trainable row and then damage it one dimension at a time.
+        let restore = async || {
+            persist_catalog_qualified_phase_c_window_v1(
+                &repository,
+                &catalog,
+                &path,
+                accounting(2, 5, 4),
+                &PhaseCWindowQualificationV1 {
+                    admitted: true,
+                    diagnostics: Vec::new(),
+                },
+            )
+            .await
+            .expect("restore canonical write");
+            repository
+                .set_pool_labels_for_test(pool_id, "canonical-provider", "namespace/foo")
+                .await
+                .expect("restore pool labels");
+        };
+
+        // Malformed durable summary.
+        for malformed in [
+            "{",
+            "null",
+            r#"{"provider_id":"canonical-provider","model_id":"namespace/foo","trainable":true,"diagnostics":[],"reporter_text":"leak"}"#,
+            r#"{"provider_id":"canonical-provider","model_id":"namespace/foo","trainable":true,"diagnostics":[{"pool_id":9,"code":"free_text"}]}"#,
+        ] {
+            restore().await;
+            repository
+                .upsert_raw_controller_window_for_test(
+                    pool_id,
+                    2,
+                    WINDOW_START,
+                    WINDOW_END,
+                    5,
+                    4,
+                    malformed,
+                )
+                .await
+                .expect("raw malformed write");
+            assert!(
+                read(2, WINDOW_START, WINDOW_END).await.is_none(),
+                "malformed durable summary {malformed} must yield no learner window"
+            );
+        }
+
+        // Durable second-precision bounds that disagree with the sequence, and
+        // an aligned pair that is not the exact 60-second half-open window.
+        for (label, started_at, ended_at) in [
+            (
+                "sequence disagrees with durable start",
+                "1970-01-01T00:03:00Z",
+                "1970-01-01T00:04:00Z",
+            ),
+            (
+                "sub-minute durable span",
+                "1970-01-01T00:02:00Z",
+                "1970-01-01T00:02:30Z",
+            ),
+        ] {
+            restore().await;
+            repository
+                .upsert_raw_controller_window_for_test(
+                    pool_id,
+                    2,
+                    started_at,
+                    ended_at,
+                    5,
+                    4,
+                    &serde_json::to_string(&summary).expect("summary json"),
+                )
+                .await
+                .expect("raw boundary write");
+            assert!(
+                read(2, started_at, ended_at).await.is_none(),
+                "{label} must yield no learner window"
+            );
+        }
+
+        // Count-invalid: the durable ledger physically refuses negative counts,
+        // so a negative count can only ever reach the projection through a
+        // corrupted store — where `project_learner_window` rejects it (proved by
+        // the djinn-db projection regression).
+        restore().await;
+        assert!(
+            repository
+                .upsert_raw_controller_window_for_test(
+                    pool_id,
+                    2,
+                    WINDOW_START,
+                    WINDOW_END,
+                    -1,
+                    4,
+                    &serde_json::to_string(&summary).expect("summary json"),
+                )
+                .await
+                .is_err(),
+            "the durable ledger must reject a negative turn count outright"
+        );
+
+        // Pool-label mismatch: the summary copy still resolves, but the pool's
+        // own durable labels no longer agree with it.
+        restore().await;
+        repository
+            .set_pool_labels_for_test(pool_id, "canonical-provider", "namespace/bar")
+            .await
+            .expect("diverge pool labels");
+        assert!(
+            read(2, WINDOW_START, WINDOW_END).await.is_none(),
+            "a pool/summary label mismatch must yield no learner window"
+        );
+
+        // Unknown route: both durable label copies agree but name a route the
+        // active catalog does not resolve at all.
+        restore().await;
+        repository
+            .set_pool_labels_for_test(pool_id, "canonical-provider", "namespace/unknown")
+            .await
+            .expect("unknown pool labels");
+        repository
+            .upsert_raw_controller_window_for_test(
+                pool_id,
+                2,
+                WINDOW_START,
+                WINDOW_END,
+                5,
+                4,
+                r#"{"provider_id":"canonical-provider","model_id":"namespace/unknown","trainable":true,"diagnostics":[]}"#,
+            )
+            .await
+            .expect("unknown-route write");
+        assert!(
+            read(2, WINDOW_START, WINDOW_END).await.is_none(),
+            "an unknown catalog route must yield no learner window"
+        );
+
+        // A resolving bare alias is still durable label corruption: `find_model`
+        // accepts `canonical-provider/foo`, but that is not the canonical id.
+        restore().await;
+        repository
+            .set_pool_labels_for_test(pool_id, "canonical-provider", "foo")
+            .await
+            .expect("alias pool labels");
+        repository
+            .upsert_raw_controller_window_for_test(
+                pool_id,
+                2,
+                WINDOW_START,
+                WINDOW_END,
+                5,
+                4,
+                r#"{"provider_id":"canonical-provider","model_id":"foo","trainable":true,"diagnostics":[]}"#,
+            )
+            .await
+            .expect("alias write");
+        assert!(
+            catalog.find_model("canonical-provider/foo").is_some(),
+            "the alias still resolves, so the rejection is about canonical equality"
+        );
+        assert!(
+            read(2, WINDOW_START, WINDOW_END).await.is_none(),
+            "a resolving bare alias is still durable label corruption"
+        );
+
+        // Catalog-removed: the untouched trainable row stops training the moment
+        // the active catalog drops its provider, and trains again on re-add.
+        restore().await;
+        assert!(read(2, WINDOW_START, WINDOW_END).await.is_some());
+        catalog.remove_custom_provider("canonical-provider");
+        assert!(
+            read(2, WINDOW_START, WINDOW_END).await.is_none(),
+            "a catalog-removed route must yield no learner window"
+        );
+    }
+
+    /// Persistence is refused outright for a route the active catalog does not
+    /// admit, so no unqualified row can ever reach the ledger.
+    #[tokio::test]
+    async fn catalog_qualified_persistence_rejects_unknown_routes() {
+        let db = Database::ephemeral().await.expect("db");
+        let pool_id = seed(&db, "window-unknown", "canonical-provider", "namespace/foo").await;
+        let repository = ModelTurnAdmissionRepository::new(db);
+        let catalog = custom_catalog("canonical-provider", "namespace/foo");
+        for (provider, model_scope) in [
+            ("canonical-provider", "namespace/nope"),
+            ("no-such-provider", "namespace/foo"),
+            ("canonical-provider", ""),
+        ] {
+            let error = persist_catalog_qualified_phase_c_window_v1(
+                &repository,
+                &catalog,
+                &ExpectedAttemptPathV1 {
+                    slot_pod_uid: "slot".into(),
+                    deployment_revision: "revision".into(),
+                    provider: provider.into(),
+                    model_scope: model_scope.into(),
+                    pool_id,
+                },
+                accounting(2, 1, 1),
+                &PhaseCWindowQualificationV1 {
+                    admitted: true,
+                    diagnostics: Vec::new(),
+                },
+            )
+            .await;
+            assert!(
+                error.is_err(),
+                "{provider}/{model_scope} must not be persistable"
+            );
+        }
+        assert!(
+            repository
+                .controller_window_summary_for_test(pool_id, 2)
+                .await
+                .expect("summary read")
+                .is_none(),
+            "a rejected route must leave no durable row behind"
+        );
+    }
+
+    /// Production source inventory for the Phase-C boundary audit. This walks
+    /// both server source roots so a new caller in another crate cannot hide
+    /// behind this module's local source assertions.
+    fn production_sources(directory: &Path, result: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(directory).expect("production source tree readable") {
+            let path = entry.expect("production source entry readable").path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name == "tests") {
+                    continue;
+                }
+                production_sources(&path, result);
+            } else if path.extension().is_some_and(|extension| extension == "rs")
+                && path.file_name().is_none_or(|name| {
+                    let name = name.to_string_lossy();
+                    name != "tests.rs" && !name.ends_with("_tests.rs")
+                })
+            {
+                result.push(path);
+            }
+        }
+    }
+
+    /// Test modules live at the end of the affected production files. Their
+    /// fixture SQL and assertion text are not production callers or queries.
+    fn production_part(source: &str) -> &str {
+        source.split("\n#[cfg(test)]").next().unwrap_or(source)
+    }
+
+    fn repository_production_sources() -> Vec<(String, String)> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let mut files = Vec::new();
+        for directory in [root.join("server/crates"), root.join("server/src")] {
+            production_sources(&directory, &mut files);
+        }
+        files
+            .into_iter()
+            .map(|path| {
+                let relative = path
+                    .strip_prefix(&root)
+                    .expect("production source is under repository root")
+                    .display()
+                    .to_string();
+                let source = std::fs::read_to_string(path).expect("production source readable");
+                (relative, production_part(&source).to_owned())
+            })
+            .collect()
+    }
+
+    fn source_paths_containing(sources: &[(String, String)], needle: &str) -> BTreeSet<String> {
+        sources
+            .iter()
+            .filter(|(_, source)| source.contains(needle))
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
+    #[test]
+    fn repository_source_locks_catalog_qualified_production_window_topology() {
+        let sources = repository_production_sources();
+        let coordinator = "server/crates/djinn-coordinator/src/model_turn_admission.rs";
+        // Keep these literals split so this audit does not nominate its own
+        // assertions as production callsites.
+        let storage_write = concat!(".upsert_", "controller_window(");
+        let storage_read = concat!(".learner_", "window(");
+        assert_eq!(
+            source_paths_containing(&sources, storage_write),
+            BTreeSet::from([coordinator.to_owned()]),
+            "only the coordinator catalog-qualified persistence wrapper may write controller windows"
+        );
+        assert_eq!(
+            source_paths_containing(&sources, storage_read),
+            BTreeSet::from([coordinator.to_owned()]),
+            "only the coordinator catalog-qualified learner wrapper may read learner windows"
+        );
+
+        let coordinator_source = sources
+            .iter()
+            .find_map(|(path, source)| (path == coordinator).then_some(source.as_str()))
+            .expect("coordinator Phase-C boundary source is inventoried");
+        assert_eq!(coordinator_source.matches(storage_write).count(), 1);
+        assert_eq!(coordinator_source.matches(storage_read).count(), 1);
+        assert!(coordinator_source.contains("let Some(model) = catalog.find_model"));
+        assert!(coordinator_source.contains("provider_id: model.provider_id"));
+        assert!(coordinator_source.contains("model_id: model.id"));
+        assert!(coordinator_source.contains("model.provider_id != window.provider_id"));
+        assert!(coordinator_source.contains("model.id != window.model_id"));
+
+        // Both learner-facing types are structurally diagnostic-free: a window
+        // that reaches a learner cannot carry a reason code at all.
+        let struct_body = |source: &str, name: &str| {
+            let start = source
+                .find(&format!("pub struct {name} {{"))
+                .unwrap_or_else(|| panic!("{name} is declared"));
+            let rest = &source[start..];
+            rest[..rest.find("\n}").expect("struct terminates")].to_owned()
+        };
+        for (source, name) in [
+            (coordinator_source, "PhaseCLearnerWindowV1"),
+            (
+                sources
+                    .iter()
+                    .find_map(|(path, source)| {
+                        (path == "server/crates/djinn-db/src/repositories/model_turn_admission.rs")
+                            .then_some(source.as_str())
+                    })
+                    .expect("DB Phase-C storage boundary source is inventoried"),
+                "ModelTurnLearnerWindow",
+            ),
+        ] {
+            assert!(
+                !struct_body(source, name).contains("diagnostic"),
+                "{name} must expose no diagnostics to a learner"
+            );
+        }
+
+        // The database is structural storage, not another catalog, and the
+        // only raw controller-window table access remains in that repository.
+        let controller_table = concat!("model_turn_", "controller_windows");
+        assert_eq!(
+            source_paths_containing(&sources, controller_table),
+            BTreeSet::from([
+                "server/crates/djinn-db/src/repositories/model_turn_admission.rs".to_owned(),
+            ]),
+            "no alternate production learner or raw controller-window query may bypass the coordinator"
+        );
+        for (path, source) in &sources {
+            if path.starts_with("server/crates/djinn-coordinator/")
+                || path.starts_with("server/crates/djinn-db/")
+            {
+                assert!(
+                    !source.contains(concat!("snapshot", ".json")),
+                    "{path} must not embed snapshot catalog authority"
+                );
+            }
+        }
+        let db_boundary = sources
+            .iter()
+            .find_map(|(path, source)| {
+                (path == "server/crates/djinn-db/src/repositories/model_turn_admission.rs")
+                    .then_some(source.as_str())
+            })
+            .expect("DB Phase-C storage boundary source is inventoried");
+        assert!(
+            !db_boundary.contains("CatalogService"),
+            "pool/evidence label correlation must not become DB catalog authority"
+        );
     }
 }
