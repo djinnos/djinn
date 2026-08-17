@@ -3302,4 +3302,265 @@ mod ready_dispatch_repository_liveness_tests {
             "Conflict must not mutate immutable delivery state"
         );
     }
+
+    /// Independent, purpose-specific effect counters for one ready-dispatch
+    /// call. Nothing here is an aggregate: each field is observed at its own
+    /// production boundary, so a replay that skipped one effect but repeated
+    /// another cannot hide inside a single total.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct ReadyDispatchEffectCounts {
+        spawn_continuations: usize,
+        reconciliations: usize,
+        task_pr_operations: usize,
+        direct_appends: usize,
+        remote_ref_pushes: usize,
+        integrations: usize,
+        dependent_releases: usize,
+    }
+
+    fn task_pr_operation(operation: &BoundaryOperation) -> bool {
+        matches!(
+            operation,
+            BoundaryOperation::SupervisorPrOpen
+                | BoundaryOperation::TaskPrLookup
+                | BoundaryOperation::TaskPrAdopt
+                | BoundaryOperation::TaskPrStatusPoll
+                | BoundaryOperation::TaskPrReviewPoll
+                | BoundaryOperation::TaskPrMergedPoll
+                | BoundaryOperation::TaskPrInlineCleanup
+                | BoundaryOperation::TaskPrStaleCleanup
+                | BoundaryOperation::TaskPrCreate
+                | BoundaryOperation::TaskPrMerge
+                | BoundaryOperation::TaskPrAutoMerge
+                | BoundaryOperation::TaskPrApproval
+                | BoundaryOperation::TaskPrSignoff
+                | BoundaryOperation::TaskPrCustomEnqueue
+                | BoundaryOperation::AttemptPrCreateOrAdoptRequest
+        )
+    }
+
+    /// A repository fixture that is already settled when ready dispatch first
+    /// sees it.
+    ///
+    /// This is deliberately not the Applying scenario: there, the very first
+    /// `continue_ready_dispatch` call performs the reconciliation that produces
+    /// Applied, so "no second effect" is only ever observed on call two. Here
+    /// the engine runs to `TaskIntegrated` *before* the frame is entered, so
+    /// both invocations start from exact Applied plus closed and every effect
+    /// count below must stay at zero from the first call onward.
+    #[tokio::test]
+    async fn exact_applied_closed_ready_dispatch_replays_without_any_production_effect() {
+        use djinn_core::events::EventBus;
+        use djinn_db::test_support::{
+            direct_delivery_candidate_cardinality_for_test, direct_delivery_generations_for_test,
+            direct_delivery_matrix_counts_for_test, seed_direct_delivery_liveness_fixture_for_test,
+        };
+        use djinn_db::{Database, EpicRepository, ProposalBuildAttemptRepository, TaskRepository};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let boundary_operations = boundary_operations_scope().await;
+        let db = Database::open_in_memory().unwrap();
+        let epic = EpicRepository::new(db.clone(), EventBus::noop())
+            .create("applied-replay", "", "", "", "", None)
+            .await
+            .unwrap();
+
+        let source_updates = Arc::new(Mutex::new(0usize));
+        let dependent_updates = Arc::new(Mutex::new(0usize));
+        let observed_source = source_updates.clone();
+        let observed_dependent = dependent_updates.clone();
+        // Keep the two counters independent: an integration that released
+        // nothing and a release that integrated nothing are different failures,
+        // and one combined "task updated" total cannot tell them apart.
+        let source_task_id = Arc::new(Mutex::new(String::new()));
+        let dependent_task_id = Arc::new(Mutex::new(String::new()));
+        let source_id_for_events = source_task_id.clone();
+        let dependent_id_for_events = dependent_task_id.clone();
+        let observing_events = EventBus::new(move |event| {
+            if event.entity_type != "task" || event.action != "updated" {
+                return;
+            }
+            let id = event.payload["task"]["id"].as_str().unwrap_or_default();
+            if id == source_id_for_events.lock().unwrap().as_str() {
+                *observed_source.lock().unwrap() += 1;
+            } else if id == dependent_id_for_events.lock().unwrap().as_str() {
+                *observed_dependent.lock().unwrap() += 1;
+            }
+        });
+
+        let tasks = TaskRepository::new(db.clone(), observing_events.clone());
+        let task = tasks
+            .create(&epic.id, "applied", "", "", "task", 0, "", Some("approved"))
+            .await
+            .unwrap();
+        let dependent = tasks
+            .create(&epic.id, "dependent", "", "", "task", 0, "", Some("open"))
+            .await
+            .unwrap();
+        tasks.add_blocker(&dependent.id, &task.id).await.unwrap();
+        *source_task_id.lock().unwrap() = task.id.clone();
+        *dependent_task_id.lock().unwrap() = dependent.id.clone();
+
+        let fixture = seed_direct_delivery_liveness_fixture_for_test(
+            &db,
+            &epic.id,
+            &task.id,
+            Some("applying"),
+        )
+        .await;
+        assert_eq!(fixture.delivery_generation, Some(1));
+        assert!(task.pr_url.is_none());
+
+        let remote = Arc::new(Mutex::new(("fixture-base".to_owned(), 0usize)));
+        let engine = DirectDeliveryEngine::new(
+            RepositoryDeliveryLedger::new(
+                db.clone(),
+                ProposalBuildAttemptRepository::new(db.clone()),
+                TaskRepository::new(db.clone(), observing_events),
+            ),
+            FixtureRemote(remote.clone()),
+            FixtureBuilder,
+        );
+
+        // Reach exact Applied + closed through the real engine and the real
+        // `TaskIntegrated` repository transition, OUTSIDE the ready-dispatch
+        // frame. Everything after this point is replay.
+        let settle = crate::dispatch::wave_dispatch::run_direct_completion(|| {
+            engine.deliver(DeliverySource {
+                task_id: task.id.clone(),
+                delivery_generation: 1,
+                transition_id: "fixture-prepare".into(),
+                source_sha: "fixture-source".into(),
+                normalized_patch: "fixture-patch".into(),
+            })
+        })
+        .await
+        .expect("engine must settle the fixture generation");
+        assert!(
+            matches!(settle, DeliveryOutcome::Integrated { .. }),
+            "fixture must reach integration before the first ready-dispatch call, got {settle:?}"
+        );
+
+        let settled_task = tasks.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            (
+                settled_task.status.as_str(),
+                settled_task.merge_commit_sha.as_deref()
+            ),
+            ("closed", Some("fixture-candidate")),
+            "initial state must be exact Applied plus closed, reached via TaskIntegrated"
+        );
+        let generations_before = direct_delivery_generations_for_test(&db, &task.id).await;
+        assert_eq!(generations_before.len(), 1);
+        assert_eq!(generations_before[0].state, "applied");
+        assert_eq!(generations_before[0].delivery_generation, 1);
+        assert_eq!(generations_before[0].candidate_sha, "fixture-candidate");
+        assert!(generations_before[0].applied);
+        let cardinality_before =
+            direct_delivery_candidate_cardinality_for_test(&db, &task.id).await;
+        assert_eq!(
+            (
+                cardinality_before.generations,
+                cardinality_before.distinct_candidates,
+                cardinality_before.distinct_build_attempts
+            ),
+            (1, 1, 1)
+        );
+        let matrix_before = direct_delivery_matrix_counts_for_test(&db).await;
+        assert_eq!(
+            *dependent_updates.lock().unwrap(),
+            1,
+            "the pre-frame integration must have released the dependent exactly once"
+        );
+
+        // Baseline every independent counter at zero for the replay window.
+        let spawn_continuations = Arc::new(AtomicUsize::new(0));
+        let reconciliations = Arc::new(AtomicUsize::new(0));
+        *source_updates.lock().unwrap() = 0;
+        *dependent_updates.lock().unwrap() = 0;
+        let pushes_before = remote.lock().unwrap().1;
+
+        for call in 1..=2 {
+            let checkpoint = boundary_operations.checkpoint();
+            let spawn_continuations_for_call = spawn_continuations.clone();
+            let reconciliations_for_call = reconciliations.clone();
+            let decision = crate::dispatch::task_dispatch::continue_ready_dispatch(
+                db.clone(),
+                &tasks,
+                &task.id,
+                || async move {
+                    reconciliations_for_call.fetch_add(1, Ordering::SeqCst);
+                    panic!("exact Applied must never re-enter the delivery engine")
+                },
+                || async move {
+                    spawn_continuations_for_call.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                decision,
+                crate::dispatch::task_dispatch::ReadyDispatchContinuation::Settled,
+                "call {call}: exact Applied plus closed must settle"
+            );
+
+            let operations = boundary_operations.operations_since(checkpoint);
+            let counts = ReadyDispatchEffectCounts {
+                spawn_continuations: spawn_continuations.load(Ordering::SeqCst),
+                reconciliations: reconciliations.load(Ordering::SeqCst),
+                task_pr_operations: operations.iter().filter(|op| task_pr_operation(op)).count(),
+                direct_appends: operations
+                    .iter()
+                    .filter(|op| matches!(op, BoundaryOperation::DirectAppend))
+                    .count(),
+                remote_ref_pushes: remote.lock().unwrap().1 - pushes_before,
+                integrations: *source_updates.lock().unwrap(),
+                dependent_releases: *dependent_updates.lock().unwrap(),
+            };
+            assert_eq!(
+                counts,
+                ReadyDispatchEffectCounts {
+                    spawn_continuations: 0,
+                    reconciliations: 0,
+                    task_pr_operations: 0,
+                    direct_appends: 0,
+                    remote_ref_pushes: 0,
+                    integrations: 0,
+                    dependent_releases: 0,
+                },
+                "call {call}: an already-settled generation must produce no production effect"
+            );
+            assert_eq!(
+                operations,
+                vec![
+                    BoundaryOperation::CapabilityProbe,
+                    BoundaryOperation::ResolveTaskActiveAttempt,
+                ],
+                "call {call}: settlement must be decided by the canonical probe and \
+                 attempt resolution alone"
+            );
+
+            assert_eq!(
+                tasks.get(&task.id).await.unwrap().unwrap().status,
+                "closed",
+                "call {call}: closed status must survive replay"
+            );
+            assert_eq!(
+                direct_delivery_generations_for_test(&db, &task.id).await,
+                generations_before,
+                "call {call}: the immutable delivery generation must be unchanged"
+            );
+            assert_eq!(
+                direct_delivery_candidate_cardinality_for_test(&db, &task.id).await,
+                cardinality_before,
+                "call {call}: candidate cardinality must not grow"
+            );
+            assert_eq!(
+                direct_delivery_matrix_counts_for_test(&db).await,
+                matrix_before,
+                "call {call}: attempt/ledger cardinality must not grow"
+            );
+        }
+    }
 }
