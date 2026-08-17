@@ -75,6 +75,19 @@ pub async fn typed_evidence_validation_snapshot_for_finding_for_test(
     typed_evidence_validation_snapshot_for_test(db, &validation_id).await
 }
 
+/// Count validations for one immutable attempt without selecting a later retry.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn typed_evidence_validation_count_for_attempt_for_test(
+    db: &Database,
+    attempt_id: &str,
+) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM typed_evidence_validation_results WHERE attempt_id=$1")
+        .bind(attempt_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
+
 /// Read lifecycle state even when rejection created no validation result.
 /// **Not for production use.** Panics on SQL errors.
 pub async fn typed_evidence_finding_snapshot_for_test(
