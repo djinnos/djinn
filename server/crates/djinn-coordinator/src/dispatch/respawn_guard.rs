@@ -202,6 +202,44 @@ pub enum RespawnGuardDecision {
 ///
 /// Best-effort: DB errors are logged and return `Allow` (fail-open) so a
 /// transient lookup failure cannot permanently block dispatch.
+/// Consume an `Applying` generation through the caller-owned engine, then
+/// re-read canonical liveness so the guard decides on what the delivery
+/// actually converged to rather than on the stale pre-reconcile classification.
+///
+/// `reconcile_ready_dispatch_liveness` deliberately returns the pre-reconcile
+/// value — ready dispatch only needs to know it reconciled. The guard needs the
+/// post-state, because "still Applying" and "now Applied" call for different
+/// decisions, and reporting the stale value would make its own log line false.
+async fn consume_applying_then_readmit<F, Fut>(
+    db: &djinn_db::Database,
+    tasks: &TaskRepository,
+    task_id: &str,
+    reconcile: F,
+) -> anyhow::Result<crate::direct_delivery::DirectDeliveryLiveness>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<crate::direct_delivery::DeliveryOutcome>>,
+{
+    let liveness = admit_respawn_guard_liveness(db.clone(), tasks, task_id).await?;
+    if liveness != crate::direct_delivery::DirectDeliveryLiveness::Reconcile {
+        return Ok(liveness);
+    }
+    reconcile().await?;
+    admit_respawn_guard_liveness(db.clone(), tasks, task_id).await
+}
+
+/// Guard entry for callers holding no direct-delivery engine.
+///
+/// Production always supplies one now (see the ready-dispatch call site in
+/// `task_dispatch.rs`), so this form survives only for the pre-existing guard
+/// tests that assert the PR-adoption and attempt-dedup steps and have nothing
+/// to do with direct delivery. Those steps live in the shared seam body below,
+/// so those tests still exercise production code; the only thing this adapter
+/// fixes is the reconciler argument.
+///
+/// It is `cfg(test)` precisely so it cannot quietly become a production path
+/// that fails closed on every Applying generation forever.
+#[cfg(test)]
 pub async fn run_respawn_guard(
     db: &djinn_db::Database,
     task_id: &str,
@@ -209,16 +247,53 @@ pub async fn run_respawn_guard(
     pr_url: Option<&str>,
     rework_signal: Option<PrReworkSignal>,
 ) -> RespawnGuardDecision {
+    // A reconciler that declines: the "no engine" case is a value, so there is
+    // exactly one guard body rather than a second code path.
+    run_respawn_guard_with_reconciler(db, task_id, role, pr_url, rework_signal, || async {
+        Err(anyhow::anyhow!(
+            "respawn guard invoked without a direct-delivery reconciler"
+        ))
+    })
+    .await
+}
+
+/// The respawn guard, parameterized by the direct-delivery reconciler.
+///
+/// This is the seam production and repository-backed tests share. Production's
+/// ready-dispatch call site passes the coordinator's real
+/// `reconcile_direct_delivery_task`; tests pass a real `DirectDeliveryEngine`
+/// over repository fixtures. Neither gets a bespoke wrapper, so what the tests
+/// exercise is the composition production runs.
+///
+/// An `Applying` generation is **consumed** here rather than merely classified:
+/// the engine runs, and the guard then re-reads the canonical liveness to see
+/// what it converged to. Only after that does any adoption, defer, or spawn
+/// decision below become reachable.
+pub async fn run_respawn_guard_with_reconciler<F, Fut>(
+    db: &djinn_db::Database,
+    task_id: &str,
+    role: &str,
+    pr_url: Option<&str>,
+    rework_signal: Option<PrReworkSignal>,
+    reconcile: F,
+) -> RespawnGuardDecision
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<crate::direct_delivery::DeliveryOutcome>>,
+{
     // Direct ownership and liveness are canonical ledger facts, not nullable
     // task-PR facts. This guard is also invoked outside ready dispatch, so it
     // must not let a settled, applying, or unknown direct contract fall through
     // to the legacy PR/admission decisions below.
     let tasks = TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-    match admit_respawn_guard_liveness(db.clone(), &tasks, task_id).await {
+    match consume_applying_then_readmit(db, &tasks, task_id, reconcile).await {
         Ok(crate::direct_delivery::DirectDeliveryLiveness::Legacy)
         | Ok(crate::direct_delivery::DirectDeliveryLiveness::Dispatch) => {}
         Ok(crate::direct_delivery::DirectDeliveryLiveness::Reconcile) => {
-            tracing::info!(task_id = %task_id, "respawn_guard: applying direct delivery requires reconciliation — deferring");
+            // The engine ran and the generation is *still* Applying on re-read,
+            // so the delivery has not converged. Defer rather than let a spawn
+            // or adoption land on top of an unsettled generation.
+            tracing::info!(task_id = %task_id, "respawn_guard: applying direct delivery did not converge — deferring");
             return RespawnGuardDecision::Defer(GuardReason::RespawnGuard);
         }
         Ok(crate::direct_delivery::DirectDeliveryLiveness::Settled)
@@ -228,9 +303,10 @@ pub async fn run_respawn_guard(
         }
         Err(error) => {
             // This is a lifecycle-mutation fence, unlike the best-effort
-            // attempt-history lookup below: unavailable/unknown contracts must
-            // fail closed before a spawn or PR adoption effect.
-            tracing::error!(task_id = %task_id, %error, "respawn_guard: direct-delivery admission unavailable — deferring");
+            // attempt-history lookup below: unavailable/unknown contracts, and a
+            // reconciler that could not run, must fail closed before a spawn or
+            // PR adoption effect.
+            tracing::error!(task_id = %task_id, %error, "respawn_guard: direct-delivery admission or reconciliation unavailable — deferring");
             return RespawnGuardDecision::Defer(GuardReason::RespawnGuard);
         }
     }
@@ -671,3 +747,7 @@ mod mergequeue_tests;
 #[cfg(test)]
 #[path = "respawn_guard_completion_tests.rs"]
 mod completion_tests;
+
+#[cfg(test)]
+#[path = "respawn_guard_direct_delivery_tests.rs"]
+mod direct_delivery_tests;
