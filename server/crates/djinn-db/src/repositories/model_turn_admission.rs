@@ -675,6 +675,33 @@ impl ModelTurnAdmissionRepository {
         }
         Ok(())
     }
+
+    /// Read one persisted typed summary for cross-crate storage regressions.
+    ///
+    /// This test-support seam keeps raw SQL inside `djinn-db`; production
+    /// learners must continue through the exact-bound fail-closed projection.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn controller_window_summary_for_test(
+        &self,
+        pool_id: i64,
+        window_sequence: i64,
+    ) -> Result<Option<ModelTurnControllerWindowSummary>> {
+        self.db.ensure_initialized().await?;
+        let summary: Option<String> = sqlx::query_scalar(
+            "SELECT summary FROM model_turn_controller_windows WHERE pool_id = $1 AND window_sequence = $2",
+        )
+        .bind(pool_id)
+        .bind(window_sequence)
+        .fetch_optional(self.db.pool())
+        .await?;
+        summary
+            .map(|summary| {
+                serde_json::from_str(&summary)
+                    .map_err(|error| crate::Error::InvalidData(error.to_string()))
+            })
+            .transpose()
+    }
+
     /// Exact-bound fail-closed projection; the coordinator revalidates catalog membership.
     pub async fn learner_window(
         &self,

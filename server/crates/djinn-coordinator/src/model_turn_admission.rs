@@ -8,9 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use djinn_db::{
     ModelTurnAdmissionRepository, ModelTurnCapabilityHeartbeatInput,
-    ModelTurnControllerWindowDiagnostic, ModelTurnControllerWindowDiagnosticCode,
-    ModelTurnControllerWindowInput, ModelTurnControllerWindowSummary, ModelTurnPhaseCEvidenceInput,
-    ModelTurnPhaseCEvidenceOutcome, ModelTurnPhaseCEvidenceStage, ModelTurnPool,
+    ModelTurnControllerWindowDiagnostic, ModelTurnControllerWindowInput,
+    ModelTurnControllerWindowSummary, ModelTurnPhaseCEvidenceInput, ModelTurnPhaseCEvidenceOutcome,
+    ModelTurnPhaseCEvidenceStage, ModelTurnPool,
 };
 use djinn_k8s::{WorkloadObjectKind, WorkloadRecord};
 use djinn_provider::{ProviderAttemptPlanV1, ProviderOutcomeV1, catalog::CatalogService};
@@ -130,13 +130,15 @@ pub async fn persist_catalog_qualified_phase_c_window_v1(
         .diagnostics
         .iter()
         .filter(|d| d.pool_id == 0 || d.pool_id == path.pool_id)
-        .map(|d| ModelTurnControllerWindowDiagnostic {
-            pool_id: d.pool_id,
-            code: serde_json::from_value(
-                serde_json::to_value(d.code)
-                    .map_err(|e| djinn_db::Error::InvalidData(e.to_string()))?,
-            )
-            .map_err(|e| djinn_db::Error::InvalidData(e.to_string()))?,
+        .map(|d| {
+            Ok(ModelTurnControllerWindowDiagnostic {
+                pool_id: d.pool_id,
+                code: serde_json::from_value(
+                    serde_json::to_value(d.code)
+                        .map_err(|e| djinn_db::Error::InvalidData(e.to_string()))?,
+                )
+                .map_err(|e| djinn_db::Error::InvalidData(e.to_string()))?,
+            })
         })
         .collect::<djinn_db::Result<Vec<_>>>()?;
     repository
@@ -1270,14 +1272,13 @@ mod tests {
             (first, "missing_usage", "open_breaker"),
             (second, "open_breaker", "missing_usage"),
         ] {
-            let summary: serde_json::Value = sqlx::query_scalar(
-                "SELECT summary FROM model_turn_controller_windows WHERE pool_id = $1",
-            )
-            .bind(pool_id)
-            .fetch_one(repository.db.pool())
-            .await
-            .expect("persisted summary");
-            let diagnostics = summary["diagnostics"].as_array().expect("diagnostics");
+            let summary = repository
+                .controller_window_summary_for_test(pool_id, 2)
+                .await
+                .expect("persisted summary read")
+                .expect("persisted summary");
+            let diagnostics = serde_json::to_value(summary.diagnostics).expect("diagnostics");
+            let diagnostics = diagnostics.as_array().expect("diagnostics array");
             assert!(diagnostics.iter().any(|d| d["pool_id"] == 0));
             assert!(diagnostics.iter().any(|d| d["code"] == own_code));
             assert!(!diagnostics.iter().any(|d| d["code"] == other_code));
