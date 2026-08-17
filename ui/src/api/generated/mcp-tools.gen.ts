@@ -5520,9 +5520,35 @@ export namespace ModelHealthOutputSchema {
    */
   disable_ttl_trips: number
   /**
-   * Hard-disabled by the trip-rate ceiling: held unavailable with no
-   * auto-expiry until a human re-enables it via `model_health(action=enable)`.
-   * When true, `cooldown_seconds_remaining` is null (there is no auto-expiry).
+   * The quarantine was released by a successful probe, but the bucket has not
+   * yet produced enough clean sessions to have its history forgiven: it is
+   * dispatchable at full throughput, and a single further breaker trip
+   * re-quarantines it at the next (longer) tier.
+   */
+  hard_disable_on_probation: boolean
+  /**
+   * Seconds until the next half-open probe dispatch is admitted; `0` means a
+   * probe is admissible right now, and `null` means the bucket is not
+   * quarantined. Read this before reaching for `enable`: a `hard_disabled`
+   * bucket recovers on its own if its next probe succeeds. Its absence is
+   * what made the 2026-08-12 → 08-16 outage unreadable — `hard_disabled:
+   * true, trips_in_window: 0, cooldown: null` gave an operator no way to tell
+   * a permanent state from a wait.
+   */
+  hard_disable_probe_seconds_remaining?: number
+  /**
+   * Escalation tier of the quarantine ladder: `0` = 6h, doubling per failed
+   * probe to a 7-day ceiling. Survives restarts.
+   */
+  hard_disable_probe_tier: number
+  /**
+   * Hard-disabled (quarantined) by the trip-rate ceiling: held unavailable
+   * except for a single half-open probe dispatch admitted once per
+   * quarantine period. When true, `cooldown_seconds_remaining` is null (the
+   * ordinary cooldown ladder does not own this bucket) and
+   * `hard_disable_probe_seconds_remaining` says when the next probe is due.
+   * A human can still release it immediately with
+   * `model_health(action=enable)`.
    */
   hard_disabled: boolean
   model_id: string
@@ -5536,7 +5562,8 @@ export namespace ModelHealthOutputSchema {
   total_successes: number
   /**
    * Number of breaker trips inside the rolling trip-rate window (6h). When it
-   * reaches the ceiling (8) the bucket hard-disables.
+   * reaches the ceiling (8) the bucket hard-disables — or `1` while
+   * `hard_disable_on_probation` is set.
    */
   trips_in_window: number
   [k: string]: any

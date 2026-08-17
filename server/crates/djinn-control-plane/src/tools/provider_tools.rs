@@ -184,12 +184,35 @@ pub struct ModelHealthOutput {
     pub disable_ttl_trips: u32,
     #[schemars(with = "Option<i64>")]
     pub cooldown_seconds_remaining: Option<u64>,
-    /// Hard-disabled by the trip-rate ceiling: held unavailable with no
-    /// auto-expiry until a human re-enables it via `model_health(action=enable)`.
-    /// When true, `cooldown_seconds_remaining` is null (there is no auto-expiry).
+    /// Hard-disabled (quarantined) by the trip-rate ceiling: held unavailable
+    /// except for a single half-open probe dispatch admitted once per
+    /// quarantine period. When true, `cooldown_seconds_remaining` is null (the
+    /// ordinary cooldown ladder does not own this bucket) and
+    /// `hard_disable_probe_seconds_remaining` says when the next probe is due.
+    /// A human can still release it immediately with
+    /// `model_health(action=enable)`.
     pub hard_disabled: bool,
+    /// Seconds until the next half-open probe dispatch is admitted; `0` means a
+    /// probe is admissible right now, and `null` means the bucket is not
+    /// quarantined. Read this before reaching for `enable`: a `hard_disabled`
+    /// bucket recovers on its own if its next probe succeeds. Its absence is
+    /// what made the 2026-08-12 → 08-16 outage unreadable — `hard_disabled:
+    /// true, trips_in_window: 0, cooldown: null` gave an operator no way to tell
+    /// a permanent state from a wait.
+    #[schemars(with = "Option<i64>")]
+    pub hard_disable_probe_seconds_remaining: Option<u64>,
+    /// The quarantine was released by a successful probe, but the bucket has not
+    /// yet produced enough clean sessions to have its history forgiven: it is
+    /// dispatchable at full throughput, and a single further breaker trip
+    /// re-quarantines it at the next (longer) tier.
+    pub hard_disable_on_probation: bool,
+    /// Escalation tier of the quarantine ladder: `0` = 6h, doubling per failed
+    /// probe to a 7-day ceiling. Survives restarts.
+    #[schemars(with = "i64")]
+    pub hard_disable_probe_tier: u32,
     /// Number of breaker trips inside the rolling trip-rate window (6h). When it
-    /// reaches the ceiling (8) the bucket hard-disables.
+    /// reaches the ceiling (8) the bucket hard-disables — or `1` while
+    /// `hard_disable_on_probation` is set.
     #[schemars(with = "i64")]
     pub trips_in_window: u32,
 }
@@ -206,6 +229,9 @@ impl From<ModelHealth> for ModelHealthOutput {
             disable_ttl_trips: value.disable_ttl_trips,
             cooldown_seconds_remaining: value.cooldown_seconds_remaining,
             hard_disabled: value.hard_disabled,
+            hard_disable_probe_seconds_remaining: value.hard_disable_probe_seconds_remaining,
+            hard_disable_on_probation: value.hard_disable_on_probation,
+            hard_disable_probe_tier: value.hard_disable_probe_tier,
             trips_in_window: value.trips_in_window,
         }
     }

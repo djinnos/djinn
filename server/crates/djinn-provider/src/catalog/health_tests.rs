@@ -709,6 +709,8 @@ fn restore_all_rehydrates_disabled_state_without_new_trip() {
         cooldown_seconds_remaining: Some(4),
         hard_disabled: false,
         hard_disable_probe_tier: 0,
+        hard_disable_probe_seconds_remaining: None,
+        hard_disable_on_probation: false,
         trips_in_window: 1,
     }]);
 
@@ -777,6 +779,8 @@ fn restore_all_rehydrates_disabled_state_without_new_trip() {
         cooldown_seconds_remaining: Some(2),
         hard_disabled: false,
         hard_disable_probe_tier: 0,
+        hard_disable_probe_seconds_remaining: None,
+        hard_disable_on_probation: false,
         trips_in_window: 1,
     }]);
     assert!(!ht.is_available(scope, "a/model"));
@@ -1357,7 +1361,8 @@ fn quarantine_admits_exactly_one_probe_and_a_clean_probe_recovers_the_model() {
         "the probe is consumed at dispatch acceptance; the lane does not re-open"
     );
 
-    // The probe succeeds → latch released, window reset, model fully healthy.
+    // The probe succeeds → the lane reopens at full throughput, but onto
+    // PROBATION, not a clean slate.
     ht.record_success(S, TEST_MODEL);
     let health = ht.model_health(S, TEST_MODEL);
     assert!(
@@ -1365,9 +1370,33 @@ fn quarantine_admits_exactly_one_probe_and_a_clean_probe_recovers_the_model() {
         "a clean probe releases the quarantine"
     );
     assert!(!health.auto_disabled);
-    assert_eq!(health.hard_disable_probe_tier, 0);
+    assert!(
+        health.hard_disable_on_probation,
+        "one session is enough to reopen the lane, not enough to forgive eight trips"
+    );
     assert_eq!(health.trips_in_window, 0);
     assert_eq!(health.disable_ttl_trips, 0);
+    assert!(ht.is_available(S, TEST_MODEL));
+    assert_eq!(
+        health.hard_disable_probe_seconds_remaining, None,
+        "not quarantined → no next-probe deadline is reported"
+    );
+
+    // Four more clean sessions (five in total) forgive the history.
+    for _ in 1..HARD_DISABLE_PROBATION_SUCCESSES {
+        assert!(
+            ht.model_health(S, TEST_MODEL).hard_disable_on_probation,
+            "probation is not cleared early"
+        );
+        ht.record_success(S, TEST_MODEL);
+    }
+    let health = ht.model_health(S, TEST_MODEL);
+    assert!(
+        !health.hard_disable_on_probation,
+        "a model that goes {HARD_DISABLE_PROBATION_SUCCESSES}-for-\
+         {HARD_DISABLE_PROBATION_SUCCESSES} has re-proven itself"
+    );
+    assert_eq!(health.hard_disable_probe_tier, 0);
     assert!(ht.is_available(S, TEST_MODEL));
 }
 
@@ -1441,6 +1470,341 @@ fn a_failing_probe_relatches_and_dispatch_exposure_stays_bounded_for_thirty_days
         "a model that fails every probe stays latched"
     );
     assert!(!ht.is_available(S, TEST_MODEL));
+}
+
+/// Simulate a dispatch loop polling the breaker every minute for `days` against
+/// a model that succeeds one session in `success_every` and fails the rest.
+/// Returns the elapsed-minute stamp of each admitted dispatch.
+///
+/// This is the input class both production incidents actually belong to. A model
+/// that fails 100% of the time reaches the quarantine ladder trivially; the
+/// dangerous one is the model that wins occasionally, because every win is an
+/// opportunity to launder its history.
+fn simulate_intermittent_model_dispatch_loop(
+    ht: &HealthTracker,
+    clock: &TestClock,
+    days: u64,
+    success_every: u64,
+) -> Vec<u64> {
+    let mut admitted = Vec::new();
+    let mut session: u64 = 0;
+    for minute in 0..(days * 24 * 60) {
+        if ht.is_available(S, TEST_MODEL) {
+            admitted.push(minute);
+            ht.note_dispatch_accepted(S, TEST_MODEL);
+            if session.is_multiple_of(success_every) {
+                ht.record_success(S, TEST_MODEL);
+            } else {
+                ht.record_failure(S, TEST_MODEL);
+            }
+            session += 1;
+        }
+        clock.advance_mono(Duration::from_secs(60));
+    }
+    admitted
+}
+
+#[test]
+fn an_intermittently_succeeding_model_cannot_launder_its_quarantine_history() {
+    // D1 — THE REGRESSION THAT MATTERS MOST. A probe success releases the
+    // quarantine, and the first version of this change also cleared the trip
+    // window, the escalating-cooldown tier and the quarantine tier along with
+    // it, leaving the bucket byte-identical to a never-tripped model. Measured
+    // against the `xiaomi-token-plan-sgp/mimo-v2.5-pro` profile (78 failures /
+    // 16 successes ≈ one success in six) that produced ONE lucky probe followed
+    // by 4712 exposed sessions in 30 days and no re-latch — strictly worse than
+    // the permanent latch it replaced.
+    //
+    // The fix is probation: the release preserves the tier, and a single trip
+    // re-quarantines one rung higher until the model produces
+    // `HARD_DISABLE_PROBATION_SUCCESSES` clean sessions in a row.
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    hard_disable_via_trip_rate(&ht, &clock);
+
+    let admitted = simulate_intermittent_model_dispatch_loop(&ht, &clock, 30, 6);
+
+    // Measured: 17 sessions, at minutes
+    // [360,361,362,363, 1083, 2523, 5403,5404,5405,5406, 11166, 21246,
+    //  31326,31327,31328,31329, 41409].
+    // The shape is the design working: a probe that wins reopens the lane onto
+    // probation, three more failures re-trip it, and it goes straight back in
+    // one rung higher (6h → 12h → 24h → 48h → 96h → 7d). Before the probation
+    // gate the same input produced 4712 sessions and never re-latched; on
+    // `origin/main` it produces 0 and never recovers.
+    assert!(
+        admitted.len() <= 24,
+        "30 days against a one-success-in-six model exposed {} sessions (17 when \
+         this was written). Each released quarantine costs one probe plus the \
+         CIRCUIT_BREAKER_THRESHOLD failures it takes to re-trip, across at most \
+         8 quarantine cycles — far above that means a lucky probe is laundering \
+         the bucket's history: {admitted:?}",
+        admitted.len()
+    );
+    assert!(
+        !admitted.is_empty(),
+        "…and it still probes: this must not become a fuse again"
+    );
+
+    let health = ht.model_health(S, TEST_MODEL);
+    assert!(
+        health.hard_disabled,
+        "after 30 days a one-success-in-six model must end up quarantined, not \
+         running free ({health:?})"
+    );
+    assert!(
+        health.hard_disable_probe_tier >= 1,
+        "each re-quarantine resumes the ladder one rung higher rather than \
+         restarting at the 6h base; tier is {}",
+        health.hard_disable_probe_tier
+    );
+
+    // The probation gate is what does this. Prove it directly: a released
+    // bucket that never manages a clean streak stays one trip from quarantine.
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    hard_disable_via_trip_rate(&ht, &clock);
+    clock.advance_mono(HARD_DISABLE_QUARANTINE_BASE);
+    ht.note_dispatch_accepted(S, TEST_MODEL);
+    ht.record_success(S, TEST_MODEL);
+    assert!(ht.model_health(S, TEST_MODEL).hard_disable_on_probation);
+    // One trip — CIRCUIT_BREAKER_THRESHOLD failures — and it is back in.
+    for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
+        ht.record_failure(S, TEST_MODEL);
+    }
+    let health = ht.model_health(S, TEST_MODEL);
+    assert!(
+        health.hard_disabled,
+        "ONE trip re-quarantines a bucket on probation; it does not get eight"
+    );
+    assert_eq!(
+        health.hard_disable_probe_tier, 1,
+        "and it resumes the ladder one rung higher than the quarantine it left"
+    );
+    assert!(!health.hard_disable_on_probation);
+    // …at the longer quarantine, measured.
+    clock.advance_mono(quarantine_for_tier(1) - Duration::from_secs(1));
+    assert!(!ht.is_available(S, TEST_MODEL));
+    clock.advance_mono(Duration::from_secs(1));
+    assert!(ht.is_available(S, TEST_MODEL));
+}
+
+#[test]
+fn a_success_without_an_admitted_probe_cannot_release_a_quarantine() {
+    // D2. A session already in flight when the latch was set completes
+    // successfully afterwards. That says nothing about whether the quarantine
+    // was right — for a flapping model such successes are routine — so it must
+    // not release the latch, and must not wipe the history that justified it.
+    // Precondition in production is simply `max_sessions > 1` on the same
+    // `(scope, model)`.
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    hard_disable_via_trip_rate(&ht, &clock);
+    let latched = ht.model_health(S, TEST_MODEL);
+
+    clock.advance_mono(Duration::from_secs(60));
+    ht.record_success(S, TEST_MODEL);
+
+    let health = ht.model_health(S, TEST_MODEL);
+    assert!(
+        health.hard_disabled,
+        "only an ADMITTED PROBE's success may release a quarantine"
+    );
+    assert!(!health.hard_disable_on_probation);
+    assert!(!ht.is_available(S, TEST_MODEL));
+    assert_eq!(
+        health.trips_in_window, latched.trips_in_window,
+        "a stray success must not wipe the rolling trip window"
+    );
+    assert_eq!(
+        health.disable_ttl_trips, latched.disable_ttl_trips,
+        "…nor the escalating-cooldown ladder"
+    );
+    assert_eq!(health.hard_disable_probe_tier, 0);
+    assert_eq!(
+        health.total_successes, 1,
+        "the success is still counted for diagnostics"
+    );
+
+    // The quarantine is neither shortened nor extended by it: the probe still
+    // arrives exactly one base quarantine after the latching trip.
+    clock.advance_mono(HARD_DISABLE_QUARANTINE_BASE - Duration::from_secs(61));
+    assert!(!ht.is_available(S, TEST_MODEL));
+    clock.advance_mono(Duration::from_secs(1));
+    assert!(ht.is_available(S, TEST_MODEL));
+}
+
+#[test]
+fn health_blind_failures_cannot_postpone_the_probe_forever() {
+    // D3. Not every dispatch path consults the breaker — evidence-dispatch
+    // recovery reaches the pool through `resolve_dispatch_models_for_role`,
+    // which never reads the HealthTracker. If any failure record re-anchored the
+    // quarantine, such a path failing every few hours would postpone the probe
+    // indefinitely: a silent permanent outage, with the tier pinned at 0 so
+    // nothing in the health output would show it. Measured before the fix: one
+    // failure record every 5h ⇒ ZERO probes in 30 simulated days.
+    //
+    // The assertion is a comparison, not a threshold: the noisy run must admit
+    // exactly the same probes as a quiet one.
+    let quiet_clock = test_clock();
+    let quiet = tracker_on(&quiet_clock);
+    hard_disable_via_trip_rate(&quiet, &quiet_clock);
+    let baseline = simulate_dead_model_dispatch_loop(&quiet, &quiet_clock, 30);
+
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    hard_disable_via_trip_rate(&ht, &clock);
+    let mut admitted = Vec::new();
+    let noise_period_minutes = 5 * 60;
+    for minute in 0..(30 * 24 * 60u64) {
+        if ht.is_available(S, TEST_MODEL) {
+            admitted.push(minute);
+            ht.note_dispatch_accepted(S, TEST_MODEL);
+            ht.record_stall(S, TEST_MODEL, true);
+        }
+        if minute.is_multiple_of(noise_period_minutes) {
+            // A health-blind dispatch path failing against the quarantined
+            // bucket, with no probe outstanding.
+            ht.record_failure(S, TEST_MODEL);
+        }
+        clock.advance_mono(Duration::from_secs(60));
+    }
+
+    assert!(
+        !baseline.is_empty(),
+        "fixture precondition: the quiet run must admit probes at all"
+    );
+    assert_eq!(
+        admitted,
+        baseline,
+        "a failure with no probe outstanding must not move the quarantine \
+         deadline; noisy run admitted {} probes vs {} for the quiet run",
+        admitted.len(),
+        baseline.len()
+    );
+}
+
+#[test]
+fn a_transient_upstream_fault_re_quarantines_without_escalating() {
+    // D4. This crate's position is that a transient 5xx is a LOAD signal, not a
+    // model-health signal — it trips at TRANSIENT_BREAKER_THRESHOLD (20) rather
+    // than CIRCUIT_BREAKER_THRESHOLD (3) for exactly that reason, and the
+    // 4-day outage's latch was itself minted during a transient provider
+    // incident. So a probe that dies on a 5xx serves another quarantine period,
+    // not a longer one.
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    hard_disable_via_trip_rate(&ht, &clock);
+    clock.advance_mono(HARD_DISABLE_QUARANTINE_BASE);
+    assert!(ht.is_available(S, TEST_MODEL));
+
+    ht.note_dispatch_accepted(S, TEST_MODEL);
+    ht.record_transient_failure(S, TEST_MODEL);
+    let health = ht.model_health(S, TEST_MODEL);
+    assert!(
+        health.hard_disabled,
+        "the probe still failed: stay quarantined"
+    );
+    assert_eq!(
+        health.hard_disable_probe_tier, 0,
+        "a transient upstream fault must not double the quarantine"
+    );
+
+    // Same tier ⇒ the next probe is one BASE away, not two.
+    clock.advance_mono(HARD_DISABLE_QUARANTINE_BASE - Duration::from_secs(1));
+    assert!(
+        !ht.is_available(S, TEST_MODEL),
+        "boundary: one second early"
+    );
+    clock.advance_mono(Duration::from_secs(1));
+    assert!(ht.is_available(S, TEST_MODEL));
+
+    // A genuine failure on the next probe DOES escalate, so the ladder is not
+    // simply disabled.
+    ht.note_dispatch_accepted(S, TEST_MODEL);
+    ht.record_failure(S, TEST_MODEL);
+    assert_eq!(ht.model_health(S, TEST_MODEL).hard_disable_probe_tier, 1);
+}
+
+#[test]
+fn model_health_reports_the_next_probe_deadline_to_operators() {
+    // D5. `model_health` is the surface that was actually used to diagnose the
+    // outage, and `hard_disabled: true, trips_in_window: 0, cooldown: null` gave
+    // an operator no way to distinguish a permanent state from a wait.
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    hard_disable_via_trip_rate(&ht, &clock);
+
+    let health = ht.model_health(S, TEST_MODEL);
+    assert_eq!(
+        health.hard_disable_probe_seconds_remaining,
+        Some(HARD_DISABLE_QUARANTINE_BASE.as_secs()),
+        "a quarantined bucket must say when it will next re-examine itself"
+    );
+    assert!(health.cooldown_seconds_remaining.is_none());
+
+    clock.advance_mono(HARD_DISABLE_QUARANTINE_BASE - Duration::from_secs(90));
+    assert_eq!(
+        ht.model_health(S, TEST_MODEL)
+            .hard_disable_probe_seconds_remaining,
+        Some(90)
+    );
+
+    clock.advance_mono(Duration::from_secs(90));
+    assert_eq!(
+        ht.model_health(S, TEST_MODEL)
+            .hard_disable_probe_seconds_remaining,
+        Some(0),
+        "0 means a probe is admissible right now"
+    );
+    assert!(ht.is_available(S, TEST_MODEL));
+
+    // A healthy bucket reports no deadline at all.
+    ht.reset(S, TEST_MODEL);
+    assert_eq!(
+        ht.model_health(S, TEST_MODEL)
+            .hard_disable_probe_seconds_remaining,
+        None
+    );
+}
+
+#[test]
+fn probation_survives_a_restart_so_it_cannot_be_laundered_through_a_deploy() {
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    hard_disable_via_trip_rate(&ht, &clock);
+    clock.advance_mono(quarantine_for_tier(0));
+    ht.note_dispatch_accepted(S, TEST_MODEL);
+    ht.record_failure(S, TEST_MODEL);
+    clock.advance_mono(quarantine_for_tier(1));
+    ht.note_dispatch_accepted(S, TEST_MODEL);
+    ht.record_success(S, TEST_MODEL);
+
+    let snapshot = ht.all_health();
+    assert!(snapshot[0].hard_disable_on_probation);
+    assert_eq!(snapshot[0].hard_disable_probe_tier, 1);
+
+    let boot_clock = test_clock();
+    let booted = tracker_on(&boot_clock);
+    booted.restore_all(snapshot);
+    let health = booted.model_health(S, TEST_MODEL);
+    assert!(
+        health.hard_disable_on_probation,
+        "a restart must not forgive an unproven bucket"
+    );
+    assert_eq!(health.hard_disable_probe_tier, 1);
+    assert!(
+        booted.is_available(S, TEST_MODEL),
+        "probation is still fully dispatchable"
+    );
+
+    // …and one trip still re-quarantines it, at tier 2.
+    for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
+        booted.record_failure(S, TEST_MODEL);
+    }
+    let health = booted.model_health(S, TEST_MODEL);
+    assert!(health.hard_disabled);
+    assert_eq!(health.hard_disable_probe_tier, 2);
 }
 
 #[test]

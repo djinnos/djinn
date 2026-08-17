@@ -12118,11 +12118,28 @@
               "format": "int64"
             },
             "hard_disabled": {
-              "description": "Hard-disabled by the trip-rate ceiling: held unavailable with no\nauto-expiry until a human re-enables it via `model_health(action=enable)`.\nWhen true, `cooldown_seconds_remaining` is null (there is no auto-expiry).",
+              "description": "Hard-disabled (quarantined) by the trip-rate ceiling: held unavailable\nexcept for a single half-open probe dispatch admitted once per\nquarantine period. When true, `cooldown_seconds_remaining` is null (the\nordinary cooldown ladder does not own this bucket) and\n`hard_disable_probe_seconds_remaining` says when the next probe is due.\nA human can still release it immediately with\n`model_health(action=enable)`.",
               "type": "boolean"
             },
+            "hard_disable_probe_seconds_remaining": {
+              "description": "Seconds until the next half-open probe dispatch is admitted; `0` means a\nprobe is admissible right now, and `null` means the bucket is not\nquarantined. Read this before reaching for `enable`: a `hard_disabled`\nbucket recovers on its own if its next probe succeeds. Its absence is\nwhat made the 2026-08-12 → 08-16 outage unreadable — `hard_disabled:\ntrue, trips_in_window: 0, cooldown: null` gave an operator no way to tell\na permanent state from a wait.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "hard_disable_on_probation": {
+              "description": "The quarantine was released by a successful probe, but the bucket has not\nyet produced enough clean sessions to have its history forgiven: it is\ndispatchable at full throughput, and a single further breaker trip\nre-quarantines it at the next (longer) tier.",
+              "type": "boolean"
+            },
+            "hard_disable_probe_tier": {
+              "description": "Escalation tier of the quarantine ladder: `0` = 6h, doubling per failed\nprobe to a 7-day ceiling. Survives restarts.",
+              "type": "integer",
+              "format": "int64"
+            },
             "trips_in_window": {
-              "description": "Number of breaker trips inside the rolling trip-rate window (6h). When it\nreaches the ceiling (8) the bucket hard-disables.",
+              "description": "Number of breaker trips inside the rolling trip-rate window (6h). When it\nreaches the ceiling (8) the bucket hard-disables — or `1` while\n`hard_disable_on_probation` is set.",
               "type": "integer",
               "format": "int64"
             }
@@ -12135,6 +12152,8 @@
             "total_successes",
             "disable_ttl_trips",
             "hard_disabled",
+            "hard_disable_on_probation",
+            "hard_disable_probe_tier",
             "trips_in_window"
           ]
         },
