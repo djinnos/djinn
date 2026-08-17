@@ -23,13 +23,43 @@ use crate::CoordinatorActor;
 /// One trusted expected Phase-C route at one Ready live slot.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ExpectedAttemptPathV1 {
-    pub slot_pod_uid: String,
-    pub deployment_revision: String,
-    pub provider: String,
-    pub model_scope: String,
+    slot_pod_uid: String,
+    deployment_revision: String,
+    provider: String,
+    model_scope: String,
     /// The exact existing admitted route selected through the B1 credential
     /// record scope. It is retained for every bounded persistence operation.
-    pub pool_id: i64,
+    pool_id: i64,
+}
+
+impl ExpectedAttemptPathV1 {
+    /// Build a path only from a coordinator-resolved pool route. Private route
+    /// fields prevent reports and qualifier callers from inventing arbitrary
+    /// provider/model labels in the authoritative denominator.
+    fn from_resolved_route(
+        slot_pod_uid: String,
+        deployment_revision: String,
+        pool: &ModelTurnPool,
+    ) -> Self {
+        Self {
+            slot_pod_uid,
+            deployment_revision,
+            provider: pool.provider_id.clone(),
+            model_scope: pool.model_id.clone(),
+            pool_id: pool.id,
+        }
+    }
+
+    #[cfg(test)]
+    fn test_resolved_route(pool_id: i64) -> Self {
+        Self {
+            slot_pod_uid: "slot-catalog-bound".into(),
+            deployment_revision: "revision-catalog-bound".into(),
+            provider: "provider-catalog-bound".into(),
+            model_scope: "model-catalog-bound".into(),
+            pool_id,
+        }
+    }
 }
 
 /// A capability report that exact-joined an already expected route.
@@ -194,13 +224,11 @@ async fn project_from_inventory(
             continue;
         };
         for pool in &routes {
-            expected_paths.insert(ExpectedAttemptPathV1 {
-                slot_pod_uid: uid.to_owned(),
-                deployment_revision: revision.to_owned(),
-                provider: pool.provider_id.clone(),
-                model_scope: pool.model_id.clone(),
-                pool_id: pool.id,
-            });
+            expected_paths.insert(ExpectedAttemptPathV1::from_resolved_route(
+                uid.to_owned(),
+                revision.to_owned(),
+                pool,
+            ));
         }
     }
     let expected_paths: Vec<_> = expected_paths.into_iter().collect();
@@ -247,6 +275,7 @@ pub struct AlignedPhaseCWindowV1 {
 pub enum AlignedPhaseCWindowErrorV1 {
     NegativeStart,
     UnalignedStart,
+    EndOverflow,
 }
 
 impl AlignedPhaseCWindowV1 {
@@ -258,9 +287,12 @@ impl AlignedPhaseCWindowV1 {
         if start_second % Self::SECONDS != 0 {
             return Err(AlignedPhaseCWindowErrorV1::UnalignedStart);
         }
+        let end_second = start_second
+            .checked_add(Self::SECONDS)
+            .ok_or(AlignedPhaseCWindowErrorV1::EndOverflow)?;
         Ok(Self {
             start_second,
-            end_second: start_second + Self::SECONDS,
+            end_second,
         })
     }
     #[must_use]
@@ -345,6 +377,7 @@ pub enum PhaseCWindowDiagnosticCodeV1 {
     MissingStageOutcome,
     StageOutsideWindow,
     ReversedStages,
+    InvalidStageOutcome,
 }
 
 /// Bounded redaction-safe diagnostic. Pool 0 is the fixed sentinel for evidence
@@ -474,6 +507,12 @@ fn validate_attempt_chain(
             [] => Some(PhaseCWindowDiagnosticCodeV1::MissingStage),
             [item] if matches!(item.outcome, PhaseCAttemptEvidenceOutcomeV1::Missing) => {
                 Some(PhaseCWindowDiagnosticCodeV1::MissingStageOutcome)
+            }
+            [item]
+                if matches!(stage, PhaseCAttemptStageV1::ProviderOutcome)
+                    != matches!(item.outcome, PhaseCAttemptEvidenceOutcomeV1::Provider(_)) =>
+            {
+                Some(PhaseCWindowDiagnosticCodeV1::InvalidStageOutcome)
             }
             [item] if !window.contains(item.timestamp_second) => {
                 Some(PhaseCWindowDiagnosticCodeV1::StageOutsideWindow)
@@ -800,5 +839,154 @@ mod tests {
             assert_eq!(evidence[0].stage, "heartbeat");
             assert_eq!(evidence[0].outcome, "recorded");
         }
+    }
+
+    fn window() -> AlignedPhaseCWindowV1 {
+        AlignedPhaseCWindowV1::new(120).expect("window")
+    }
+    fn capability(path: ExpectedAttemptPathV1) -> PhaseCCapabilityEvidenceV1 {
+        PhaseCCapabilityEvidenceV1 {
+            path,
+            coverage_start_second: 100,
+            coverage_end_second: 200,
+            observed_at_second: 150,
+            covered: true,
+        }
+    }
+    fn attempt(path: ExpectedAttemptPathV1) -> PhaseCAdmittedAttemptV1 {
+        let provider = ProviderOutcomeV1 {
+            terminal: ProviderAttemptTerminalV1::Completed,
+            authoritative_usage: None,
+            observation: None,
+            abort: ProviderAttemptAbortResultV1::NotRequested,
+            token_emission: Default::default(),
+        };
+        let stages = [
+            (PhaseCAttemptStageV1::Decision, 121),
+            (PhaseCAttemptStageV1::Dispatch, 122),
+            (PhaseCAttemptStageV1::Heartbeat, 123),
+            (PhaseCAttemptStageV1::ProviderOutcome, 124),
+            (PhaseCAttemptStageV1::Reconcile, 125),
+        ]
+        .into_iter()
+        .map(|(stage, timestamp_second)| PhaseCAttemptStageEvidenceV1 {
+            stage,
+            timestamp_second,
+            outcome: if stage == PhaseCAttemptStageV1::ProviderOutcome {
+                PhaseCAttemptEvidenceOutcomeV1::Provider(provider.clone())
+            } else {
+                PhaseCAttemptEvidenceOutcomeV1::Recorded
+            },
+        })
+        .collect();
+        PhaseCAdmittedAttemptV1 {
+            path,
+            admitted_at_second: 120,
+            has_authoritative_usage: true,
+            lease_expired: false,
+            breaker_open: false,
+            stages,
+        }
+    }
+    fn has(r: &PhaseCWindowQualificationV1, c: PhaseCWindowDiagnosticCodeV1) -> bool {
+        r.diagnostics.iter().any(|d| d.code == c)
+    }
+
+    #[test]
+    fn qualifier_accepts_crossing_evidence_and_exact_half_open_boundaries() {
+        let path = ExpectedAttemptPathV1::test_resolved_route(7);
+        let mut a = attempt(path.clone());
+        a.stages[0].timestamp_second = 120;
+        a.stages[4].timestamp_second = 179;
+        assert!(
+            qualify_aligned_phase_c_window_v1(window(), &[path.clone()], &[capability(path)], &[a])
+                .admitted
+        );
+        assert_eq!(window().end_second(), 180);
+        assert_eq!(
+            AlignedPhaseCWindowV1::new(121),
+            Err(AlignedPhaseCWindowErrorV1::UnalignedStart)
+        );
+        assert_eq!(
+            AlignedPhaseCWindowV1::new(9_223_372_036_854_775_800),
+            Err(AlignedPhaseCWindowErrorV1::EndOverflow)
+        );
+    }
+    #[test]
+    fn qualifier_rejects_silent_stale_replaced_and_partial_capability() {
+        let path = ExpectedAttemptPathV1::test_resolved_route(7);
+        assert!(has(
+            &qualify_aligned_phase_c_window_v1(window(), &[path.clone()], &[], &[]),
+            PhaseCWindowDiagnosticCodeV1::MissingCapability
+        ));
+        let stale = PhaseCCapabilityEvidenceV1 {
+            observed_at_second: 119,
+            ..capability(path.clone())
+        };
+        assert!(has(
+            &qualify_aligned_phase_c_window_v1(window(), &[path.clone()], &[stale], &[]),
+            PhaseCWindowDiagnosticCodeV1::StaleHeartbeat
+        ));
+        let partial = PhaseCCapabilityEvidenceV1 {
+            coverage_end_second: 179,
+            ..capability(path.clone())
+        };
+        assert!(has(
+            &qualify_aligned_phase_c_window_v1(window(), &[path.clone()], &[partial], &[]),
+            PhaseCWindowDiagnosticCodeV1::PartialCapabilityCoverage
+        ));
+        assert!(has(
+            &qualify_aligned_phase_c_window_v1(
+                window(),
+                &[path],
+                &[capability(ExpectedAttemptPathV1::test_resolved_route(8))],
+                &[]
+            ),
+            PhaseCWindowDiagnosticCodeV1::UnexpectedCapability
+        ));
+    }
+    #[test]
+    fn qualifier_rejects_chain_and_operational_failures_and_redacts_diagnostics() {
+        let path = ExpectedAttemptPathV1::test_resolved_route(7);
+        let mut a = attempt(path.clone());
+        a.has_authoritative_usage = false;
+        a.lease_expired = true;
+        a.breaker_open = true;
+        a.stages[3].outcome = PhaseCAttemptEvidenceOutcomeV1::Recorded;
+        a.stages.push(a.stages[0].clone());
+        let r =
+            qualify_aligned_phase_c_window_v1(window(), &[path.clone()], &[capability(path)], &[a]);
+        for c in [
+            PhaseCWindowDiagnosticCodeV1::MissingUsage,
+            PhaseCWindowDiagnosticCodeV1::ExpiredLease,
+            PhaseCWindowDiagnosticCodeV1::OpenBreaker,
+            PhaseCWindowDiagnosticCodeV1::DuplicateStage,
+            PhaseCWindowDiagnosticCodeV1::InvalidStageOutcome,
+        ] {
+            assert!(has(&r, c), "{c:?}");
+        }
+        let json = serde_json::to_string(&r).expect("serialize");
+        for value in [
+            "slot-catalog-bound",
+            "revision-catalog-bound",
+            "attempt-fingerprint",
+            "credential",
+            "request-id",
+            "lease-id",
+            "arbitrary-label",
+        ] {
+            assert!(!json.contains(value), "leaked {value}");
+        }
+    }
+    #[test]
+    fn qualifier_rejects_missing_stage_outcome_and_partial_chain() {
+        let path = ExpectedAttemptPathV1::test_resolved_route(7);
+        let mut a = attempt(path.clone());
+        a.stages[0].outcome = PhaseCAttemptEvidenceOutcomeV1::Missing;
+        a.stages.pop();
+        let r =
+            qualify_aligned_phase_c_window_v1(window(), &[path.clone()], &[capability(path)], &[a]);
+        assert!(has(&r, PhaseCWindowDiagnosticCodeV1::MissingStageOutcome));
+        assert!(has(&r, PhaseCWindowDiagnosticCodeV1::MissingStage));
     }
 }
