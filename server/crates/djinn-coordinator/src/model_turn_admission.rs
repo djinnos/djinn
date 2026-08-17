@@ -1488,85 +1488,85 @@ mod tests {
                 .expect("restore pool labels");
         };
 
-        // Malformed durable summary.
-        for malformed in [
-            "{",
-            "null",
-            r#"{"provider_id":"canonical-provider","model_id":"namespace/foo","trainable":true,"diagnostics":[],"reporter_text":"leak"}"#,
-            r#"{"provider_id":"canonical-provider","model_id":"namespace/foo","trainable":true,"diagnostics":[{"pool_id":9,"code":"free_text"}]}"#,
-        ] {
-            restore().await;
-            repository
-                .upsert_raw_controller_window_for_test(
-                    pool_id,
-                    2,
-                    WINDOW_START,
-                    WINDOW_END,
-                    5,
-                    4,
-                    malformed,
-                )
-                .await
-                .expect("raw malformed write");
-            assert!(
-                read(2, WINDOW_START, WINDOW_END).await.is_none(),
-                "malformed durable summary {malformed} must yield no learner window"
-            );
-        }
-
-        // Durable second-precision bounds that disagree with the sequence, and
-        // an aligned pair that is not the exact 60-second half-open window.
-        for (label, started_at, ended_at) in [
+        // Malformed summaries, sequence/boundary-mismatched bounds, and invalid
+        // counts cannot reach the learner because migration 210's hardened
+        // ledger will not store them at all — proved here against the real
+        // schema, with `project_learner_window`'s pure regression in `djinn-db`
+        // covering the same shapes should a corrupted store ever produce one.
+        let json = serde_json::to_string(&summary).expect("summary json");
+        let unstorable: Vec<(&str, i64, &str, &str, i64, i64, &str)> = vec![
+            ("truncated summary", 2, WINDOW_START, WINDOW_END, 5, 4, "{"),
+            ("null summary", 2, WINDOW_START, WINDOW_END, 5, 4, "null"),
+            (
+                "summary with an extra key",
+                2,
+                WINDOW_START,
+                WINDOW_END,
+                5,
+                4,
+                r#"{"provider_id":"canonical-provider","model_id":"namespace/foo","trainable":true,"diagnostics":[],"reporter_text":"leak"}"#,
+            ),
+            (
+                "summary with an unknown reason code",
+                2,
+                WINDOW_START,
+                WINDOW_END,
+                5,
+                4,
+                r#"{"provider_id":"canonical-provider","model_id":"namespace/foo","trainable":false,"diagnostics":[{"pool_id":0,"code":"free_text"}]}"#,
+            ),
             (
                 "sequence disagrees with durable start",
+                2,
                 "1970-01-01T00:03:00Z",
                 "1970-01-01T00:04:00Z",
+                5,
+                4,
+                &json,
             ),
             (
                 "sub-minute durable span",
+                2,
                 "1970-01-01T00:02:00Z",
                 "1970-01-01T00:02:30Z",
+                5,
+                4,
+                &json,
             ),
-        ] {
+            (
+                "negative admitted count",
+                2,
+                WINDOW_START,
+                WINDOW_END,
+                -1,
+                4,
+                &json,
+            ),
+        ];
+        for (label, sequence, started_at, ended_at, admitted, completed, body) in unstorable {
             restore().await;
-            repository
-                .upsert_raw_controller_window_for_test(
-                    pool_id,
-                    2,
-                    started_at,
-                    ended_at,
-                    5,
-                    4,
-                    &serde_json::to_string(&summary).expect("summary json"),
-                )
-                .await
-                .expect("raw boundary write");
             assert!(
-                read(2, started_at, ended_at).await.is_none(),
-                "{label} must yield no learner window"
+                repository
+                    .upsert_raw_controller_window_for_test(
+                        pool_id, sequence, started_at, ended_at, admitted, completed, body,
+                    )
+                    .await
+                    .is_err(),
+                "the durable ledger must refuse {label} outright"
+            );
+            assert_eq!(
+                read(2, WINDOW_START, WINDOW_END).await,
+                Some(PhaseCLearnerWindowV1 {
+                    pool_id,
+                    window_sequence: 2,
+                    started_at: WINDOW_START.into(),
+                    ended_at: WINDOW_END.into(),
+                    admitted_turns: 5,
+                    completed_turns: 4,
+                }),
+                "a refused write must not disturb the window already stored"
             );
         }
-
-        // Count-invalid: the durable ledger physically refuses negative counts,
-        // so a negative count can only ever reach the projection through a
-        // corrupted store — where `project_learner_window` rejects it (proved by
-        // the djinn-db projection regression).
-        restore().await;
-        assert!(
-            repository
-                .upsert_raw_controller_window_for_test(
-                    pool_id,
-                    2,
-                    WINDOW_START,
-                    WINDOW_END,
-                    -1,
-                    4,
-                    &serde_json::to_string(&summary).expect("summary json"),
-                )
-                .await
-                .is_err(),
-            "the durable ledger must reject a negative turn count outright"
-        );
 
         // Pool-label mismatch: the summary copy still resolves, but the pool's
         // own durable labels no longer agree with it.
@@ -1836,3 +1836,10 @@ mod tests {
         );
     }
 }
+
+/// Migration-backed Phase-C conformance (task hb3s). Kept as a child module
+/// so it can build `ExpectedAttemptPathV1` values the way production does,
+/// through this module's deliberately private route fields.
+#[cfg(test)]
+#[path = "model_turn_admission_phase_c_postgres_tests.rs"]
+mod phase_c_postgres_tests;
