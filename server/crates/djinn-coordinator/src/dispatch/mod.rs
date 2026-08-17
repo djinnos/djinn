@@ -23,7 +23,7 @@ pub(crate) mod respawn_guard;
 pub mod resume_source;
 mod retry;
 pub(crate) mod session_recovery;
-mod task_dispatch;
+pub(crate) mod task_dispatch;
 /// Pre-pod-allocation warm build-cache freshness gate (ri23 Part 2). Reads warm
 /// freshness facts, bounds the wait, and labels the dispatch decision without
 /// owning any warm state.
