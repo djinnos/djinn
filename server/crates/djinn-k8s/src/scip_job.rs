@@ -216,22 +216,43 @@ pub fn build_scip_index_job(
     let mirror_path = format!("{MIRROR_MOUNT_DIR}/{project_id}.git");
 
     // Deliberately the same clone preamble as the warm Job (umask, the
-    // GIT_CONFIG_SYSTEM safe.directory file, --depth 1000 --single-branch,
+    // GIT_CONFIG_SYSTEM safe.directory file, the `--local --shared` clone of
+    // the mounted mirror followed by an explicit detached checkout, the
     // lockfile-gated JS install). The two Pods index the same tree; a
-    // divergence here is a divergence in what gets indexed.
+    // divergence here is a divergence in what gets indexed — and the two
+    // coordinate through `WARM_SCIP_CLAIM_WAIT_ENV` on exactly that
+    // assumption, with the SCIP artifacts landing in a cache keyed by
+    // revision.
+    //
+    // The mirror clone is what makes "the same tree" true rather than
+    // hopeful. This used to resolve `remote.origin.url` and clone from GitHub,
+    // so the two Pods raced the *remote's* head independently; now both borrow
+    // the same on-PVC object db and both check out a SHA that was read out of
+    // `refs/heads/main` of that same mirror. `revision` here is the SHA this
+    // Job was dispatched for (`MirrorHead::revision`, and the value stamped
+    // into `ANNOTATION_SCIP_REVISION` that the scheduler reads back), so the
+    // tree indexed is by construction the tree the cache entry is named after.
+    //
+    // The explicit `checkout --detach` is not decoration: a bare mirror's HEAD
+    // symref is written once at `git clone --bare` time and never refreshed,
+    // so after an upstream default-branch rename `git clone --local` warns,
+    // EXITS 0, and leaves a directory containing only `.git`. See the long
+    // note in `warm_job::build_warm_job` for the full mechanism, including why
+    // `--shared`'s borrowed objects outlive the Pod.
     let cmd = format!(
         r#"set -euo pipefail
 umask 0002
 export GIT_CONFIG_SYSTEM={WORKSPACE_MOUNT_DIR}/.djinn-gitconfig
 unset GIT_CONFIG_NOSYSTEM
 printf '[safe]\n\tdirectory = *\n' > "$GIT_CONFIG_SYSTEM"
-UPSTREAM_URL="$(git -C "{mirror_path}" config remote.origin.url)"
-git clone --depth 1000 --single-branch "$UPSTREAM_URL" "{project_root}"
+git clone --local --shared "{mirror_path}" "{project_root}"
+git -C "{project_root}" checkout --detach {revision} --
 cd "{project_root}"{js_install}
 exec {bin} scip-index "{project_id}"
 "#,
         mirror_path = mirror_path,
         project_root = project_root,
+        revision = revision,
         bin = WARM_COMMAND_BIN,
         project_id = project_id,
         js_install = crate::js_install::js_install_preamble(&project_root, js_workspace_roots),
@@ -570,7 +591,38 @@ mod tests {
             !cmd.contains("warm-graph"),
             "the SCIP Job must not invoke the combined warm pipeline: {cmd}"
         );
-        assert!(cmd.contains(" --depth 1000"), "{cmd}");
+        // The SCIP Pod clones the mounted mirror, not GitHub, and pins the
+        // checkout to the revision it was dispatched for. Both halves matter:
+        // a URL clone puts this Pod on the remote's head while the warm Pod is
+        // on the mirror's, and a bare mirror's frozen HEAD symref can make
+        // `git clone --local` exit 0 with an empty working tree.
+        assert!(
+            cmd.contains(
+                r#"git clone --local --shared "/mirror/proj-xyz.git" "/workspace/proj-xyz""#
+            ),
+            "scip clone must borrow the mounted mirror's object db: {cmd}"
+        );
+        assert!(
+            cmd.contains(r#"git -C "/workspace/proj-xyz" checkout --detach deadbeef1234567890 --"#),
+            "scip Pod must check out the dispatched revision, never the mirror's \
+             HEAD symref: {cmd}"
+        );
+        for forbidden in ["UPSTREAM_URL", "remote.origin.url"] {
+            assert!(
+                !cmd.contains(forbidden),
+                "scip clone must not resolve the upstream URL — that puts this Pod \
+                 on GitHub's head while the warm Pod is on the mirror's \
+                 ({forbidden}): {cmd}"
+            );
+        }
+        let clone_line = cmd
+            .lines()
+            .find(|l| l.starts_with("git clone "))
+            .expect("clone line");
+        assert!(
+            !clone_line.contains("--depth") && !clone_line.contains("--single-branch"),
+            "an alternates clone already has the mirror's full history: {clone_line}"
+        );
         assert!(cmd.contains("pnpm-lock.yaml"), "{cmd}");
 
         let env = env_of(&job);
