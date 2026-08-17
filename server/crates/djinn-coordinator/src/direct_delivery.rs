@@ -3095,23 +3095,24 @@ mod ready_dispatch_repository_liveness_tests {
             "Applying reconciliation must not enter the legacy spawn/task-PR continuation"
         );
         assert_eq!(reconciliations.load(std::sync::atomic::Ordering::SeqCst), 1);
-        let integrated_and_released = updates.lock().unwrap();
-        assert_eq!(
-            integrated_and_released.len(),
-            2,
-            "TaskIntegrated must update the source and release its dependent once"
-        );
-        assert!(
-            integrated_and_released
-                .iter()
-                .any(|payload| payload["task"]["id"] == task.id)
-        );
-        assert!(
-            integrated_and_released
-                .iter()
-                .any(|payload| payload["task"]["id"] == dependent.id)
-        );
-        drop(integrated_and_released);
+        {
+            let integrated_and_released = updates.lock().unwrap();
+            assert_eq!(
+                integrated_and_released.len(),
+                2,
+                "TaskIntegrated must update the source and release its dependent once"
+            );
+            assert!(
+                integrated_and_released
+                    .iter()
+                    .any(|payload| payload["task"]["id"] == task.id)
+            );
+            assert!(
+                integrated_and_released
+                    .iter()
+                    .any(|payload| payload["task"]["id"] == dependent.id)
+            );
+        }
         assert_eq!(
             take_boundary_operations(),
             vec![
