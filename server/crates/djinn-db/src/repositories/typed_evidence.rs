@@ -229,6 +229,83 @@ pub struct LegacyEvidenceParityProjection {
     pub spike_task_id: Option<String>,
 }
 
+/// The single unresolved typed finding for a proposal, carrying the
+/// diagnostics a structural gate needs to explain a refusal.
+///
+/// Selection is proposal-wide and lifecycle-scoped: `demanded_revision_seq` is
+/// provenance about where the demand originated, never a filter, so later
+/// proposal revisions cannot age a finding out of the projection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnresolvedTypedEvidenceProjection {
+    pub finding_id: String,
+    pub claim: serde_json::Value,
+    pub lifecycle: TribunalEvidenceLifecycle,
+    /// The revision the demand was raised against. Provenance only.
+    pub demanded_revision_seq: i32,
+    /// Sequence of the latest allocated attempt, absent before allocation.
+    pub attempt_seq: Option<i32>,
+    /// Validated outcome of the latest attempt's durable return, if any.
+    pub evidence_outcome: Option<TribunalEvidenceOutcome>,
+    /// Folding revision of a recorded disposition. Present only for a stale
+    /// disposition that did not carry the finding to a terminal lifecycle.
+    pub folding_revision: Option<i32>,
+    /// The most specific persisted failure text: an ingress validation error
+    /// for a `failed` finding, otherwise the first normalized failure or gap.
+    pub failure_detail: Option<String>,
+}
+
+/// Why the typed and legacy evidence authorities disagree for a proposal.
+///
+/// Consumers fail closed on any variant; the code exists so a refusal names
+/// which authority was ahead rather than reporting an opaque mismatch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypedEvidenceParityMismatchReason {
+    /// Legacy compatibility authority (`linked_spike_task_id` or
+    /// `needs_evidence_claim`) is set while no typed unresolved finding exists.
+    LegacyAuthorityWithoutTypedFinding,
+    /// A typed finding that has not yet received a durable return exists while
+    /// the legacy compatibility columns are already cleared.
+    TypedFindingWithoutLegacyAuthority,
+    /// Both authorities claim a demand but the dual read rejects the binding —
+    /// claim, demand hash, attempt, or linked spike task disagree.
+    LegacyBindingDisagrees,
+    /// The proposal row does not exist, so neither authority is readable.
+    ProposalMissing,
+}
+
+impl TypedEvidenceParityMismatchReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacyAuthorityWithoutTypedFinding => "legacy_authority_without_typed_finding",
+            Self::TypedFindingWithoutLegacyAuthority => "typed_finding_without_legacy_authority",
+            Self::LegacyBindingDisagrees => "legacy_binding_disagrees",
+            Self::ProposalMissing => "proposal_missing",
+        }
+    }
+}
+
+/// Result of comparing typed and legacy evidence authority for a proposal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypedEvidenceParityProbe {
+    /// Both authorities describe the same evidence state.
+    Agreed,
+    /// The authorities disagree. Typed-mode consumers must fail closed.
+    Mismatch(TypedEvidenceParityMismatchReason),
+}
+
+impl TypedEvidenceParityProbe {
+    pub const fn mismatch_reason(self) -> Option<TypedEvidenceParityMismatchReason> {
+        match self {
+            Self::Agreed => None,
+            Self::Mismatch(reason) => Some(reason),
+        }
+    }
+
+    pub const fn is_mismatch(self) -> bool {
+        matches!(self, Self::Mismatch(_))
+    }
+}
+
 /// Coordinator-facing lifecycle authority. The repository owns the typed read
 /// and the mixed-version fence so consumers cannot recreate parity rules.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1266,6 +1343,146 @@ impl TypedEvidenceRepository {
         .bind(proposal_id)
         .fetch_one(&mut **tx)
         .await?)
+    }
+
+    /// Typed diagnostics for the proposal's single unresolved finding.
+    ///
+    /// This is the structural gate's only new input. It is deliberately the
+    /// projecting twin of [`Self::has_unresolved_in_transaction`]: same
+    /// proposal-wide, lifecycle-scoped selection, but carrying the identity a
+    /// refusal has to name.
+    pub async fn unresolved_projection(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<UnresolvedTypedEvidenceProjection>> {
+        let mut tx = self.db.pool().begin().await?;
+        let result = Self::unresolved_projection_in_transaction(&mut tx, proposal_id).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    /// Transaction-scoped twin of [`Self::unresolved_projection`].
+    pub async fn unresolved_projection_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        proposal_id: &str,
+    ) -> Result<Option<UnresolvedTypedEvidenceProjection>> {
+        nonempty(&[proposal_id])?;
+        // The lifecycle predicate lives only here. Re-filtering the row in Rust
+        // would make the terminal-exclusion rule survive its own deletion.
+        let Some(row) = sqlx::query(
+            "SELECT f.id,f.claim,f.lifecycle,f.demanded_revision_seq, \
+                    (SELECT MAX(a.sequence) FROM typed_evidence_attempts a WHERE a.finding_id=f.id) AS attempt_seq, \
+                    (SELECT v.outcome FROM typed_evidence_validation_results v \
+                       JOIN typed_evidence_attempts a ON a.id=v.attempt_id \
+                      WHERE a.finding_id=f.id ORDER BY a.sequence DESC LIMIT 1) AS evidence_outcome, \
+                    (SELECT d.folding_revision FROM typed_evidence_dispositions d \
+                      WHERE d.finding_id=f.id ORDER BY d.folding_revision DESC LIMIT 1) AS folding_revision, \
+                    COALESCE( \
+                      (SELECT t.metadata->>'validation_error' FROM typed_evidence_transitions t \
+                        WHERE t.finding_id=f.id AND t.to_lifecycle='failed' \
+                          AND t.metadata->>'validation_error' IS NOT NULL \
+                        ORDER BY t.ordinal DESC LIMIT 1), \
+                      (SELECT i.detail FROM typed_evidence_issues i \
+                         JOIN typed_evidence_validation_results v ON v.id=i.validation_result_id \
+                         JOIN typed_evidence_attempts a ON a.id=v.attempt_id \
+                        WHERE a.finding_id=f.id ORDER BY a.sequence DESC, i.kind, i.id LIMIT 1) \
+                    ) AS failure_detail \
+               FROM typed_evidence_findings f \
+              WHERE f.proposal_id=$1 \
+                AND f.lifecycle IN ('demanded','spike_active','evidence_received','failed') \
+              ORDER BY f.id LIMIT 1",
+        )
+        .bind(proposal_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        else {
+            return Ok(None);
+        };
+        let evidence_outcome = row
+            .get::<Option<String>, _>("evidence_outcome")
+            .map(|value| parse_outcome(&value))
+            .transpose()?;
+        Ok(Some(UnresolvedTypedEvidenceProjection {
+            finding_id: row.get("id"),
+            claim: row.get("claim"),
+            lifecycle: parse(&row.get::<String, _>("lifecycle"))?,
+            demanded_revision_seq: row.get("demanded_revision_seq"),
+            attempt_seq: row.get("attempt_seq"),
+            evidence_outcome,
+            folding_revision: row.get("folding_revision"),
+            failure_detail: row.get("failure_detail"),
+        }))
+    }
+
+    /// Compare typed and legacy evidence authority for a proposal.
+    ///
+    /// Typed-mode consumers call this before trusting
+    /// [`Self::unresolved_projection`]: a mismatch means one authority is
+    /// ahead of the other and neither may be used to admit a transition.
+    pub async fn legacy_parity_probe(&self, proposal_id: &str) -> Result<TypedEvidenceParityProbe> {
+        let mut tx = self.db.pool().begin().await?;
+        let result = Self::legacy_parity_probe_in_transaction(&mut tx, proposal_id).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    /// Transaction-scoped twin of [`Self::legacy_parity_probe`].
+    pub async fn legacy_parity_probe_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        proposal_id: &str,
+    ) -> Result<TypedEvidenceParityProbe> {
+        nonempty(&[proposal_id])?;
+        let Some(legacy) = sqlx::query(
+            "SELECT linked_spike_task_id,needs_evidence_claim FROM proposals WHERE id=$1 FOR SHARE",
+        )
+        .bind(proposal_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        else {
+            return Ok(TypedEvidenceParityProbe::Mismatch(
+                TypedEvidenceParityMismatchReason::ProposalMissing,
+            ));
+        };
+        // Either compatibility column standing alone still asserts a legacy
+        // demand: `demand_and_set_legacy_in_transaction` writes the claim
+        // before a spike task is allocated.
+        let legacy_asserts_demand = legacy
+            .get::<Option<String>, _>("linked_spike_task_id")
+            .is_some()
+            || legacy
+                .get::<Option<String>, _>("needs_evidence_claim")
+                .is_some();
+        let typed = Self::unresolved_projection_in_transaction(tx, proposal_id).await?;
+        match (legacy_asserts_demand, typed) {
+            (false, None) => Ok(TypedEvidenceParityProbe::Agreed),
+            (true, None) => Ok(TypedEvidenceParityProbe::Mismatch(
+                TypedEvidenceParityMismatchReason::LegacyAuthorityWithoutTypedFinding,
+            )),
+            (false, Some(projection)) => match projection.lifecycle {
+                // Receipt and ingress-failure both clear legacy authority in
+                // the same transaction as the transition, so a cleared legacy
+                // side agrees with a post-return finding.
+                TribunalEvidenceLifecycle::EvidenceReceived | TribunalEvidenceLifecycle::Failed => {
+                    Ok(TypedEvidenceParityProbe::Agreed)
+                }
+                _ => Ok(TypedEvidenceParityProbe::Mismatch(
+                    TypedEvidenceParityMismatchReason::TypedFindingWithoutLegacyAuthority,
+                )),
+            },
+            (true, Some(projection)) => match projection.lifecycle {
+                // A malformed ingress failure deliberately retains its
+                // compatibility link so the retry can re-dispatch against it.
+                TribunalEvidenceLifecycle::Failed => Ok(TypedEvidenceParityProbe::Agreed),
+                _ => match Self::dual_read_legacy_parity_in_transaction(tx, proposal_id).await? {
+                    Some(parity) if parity.finding.id == projection.finding_id => {
+                        Ok(TypedEvidenceParityProbe::Agreed)
+                    }
+                    _ => Ok(TypedEvidenceParityProbe::Mismatch(
+                        TypedEvidenceParityMismatchReason::LegacyBindingDisagrees,
+                    )),
+                },
+            },
+        }
     }
 
     pub async fn allocate_attempt_in_transaction(
