@@ -427,7 +427,10 @@ async fn seed_startup_rows_with_status(
         .unwrap()[0]
         .id
         .clone();
-    let attempt = format!("attempt-{run_id}");
+    // Durable attempt IDs are VARCHAR(36). Run IDs in these descriptive
+    // startup fixtures may be longer, so use the UUID-shaped identity that
+    // production uses instead of deriving an overlong primary key from one.
+    let attempt = uuid::Uuid::now_v7().to_string();
     let dispatch_key = format!("dispatch-{run_id}");
     TaskAttemptRepository::new(db.clone())
         .create_or_get_pending(CreateTaskAttemptParams {
@@ -652,42 +655,48 @@ async fn startup_census_precedes_every_mutation() {
 /// durable run for the same task makes Stage C consume the task projection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn startup_stage_c_task_projection() {
-    for (name, second_status, listed_second, first_presence, second_presence, expected) in [
-        (
-            "gone-live",
-            "running",
-            true,
-            ObjectPresence::Absent,
-            ObjectPresence::Uncertain,
-            "pending",
-        ),
-        (
-            "gone-creation-transit",
-            "starting",
-            false,
-            ObjectPresence::Absent,
-            ObjectPresence::Absent,
-            "pending",
-        ),
-        (
-            "gone-unknown",
-            "running",
-            false,
-            ObjectPresence::Absent,
-            ObjectPresence::Uncertain,
-            "pending",
-        ),
-        (
-            "all-gone",
-            "running",
-            false,
-            ObjectPresence::Absent,
-            ObjectPresence::Absent,
-            "interrupted",
-        ),
-    ] {
-        let primary = format!("projection-{name}-primary");
-        let secondary = format!("projection-{name}-secondary");
+    for (index, (name, second_status, listed_second, first_presence, second_presence, expected)) in
+        [
+            (
+                "gone-live",
+                "running",
+                true,
+                ObjectPresence::Absent,
+                ObjectPresence::Uncertain,
+                "pending",
+            ),
+            (
+                "gone-creation-transit",
+                "starting",
+                false,
+                ObjectPresence::Absent,
+                ObjectPresence::Absent,
+                "pending",
+            ),
+            (
+                "gone-unknown",
+                "running",
+                false,
+                ObjectPresence::Absent,
+                ObjectPresence::Uncertain,
+                "pending",
+            ),
+            (
+                "all-gone",
+                "running",
+                false,
+                ObjectPresence::Absent,
+                ObjectPresence::Absent,
+                "interrupted",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+    {
+        // Task-run IDs are VARCHAR(36); keep the descriptive case name in
+        // assertions while using compact, stable durable fixture identities.
+        let primary = format!("projection-{index}-primary");
+        let secondary = format!("projection-{index}-secondary");
         let mut presence = HashMap::from([(djinn_k8s::taskrun_job_name(&primary), first_presence)]);
         presence.insert(djinn_k8s::taskrun_job_name(&secondary), second_presence);
         let listed = listed_second
@@ -753,22 +762,34 @@ async fn startup_stage_c_task_projection() {
             "Stage A does not classify pending attempts"
         );
         let traces = TraceBuffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .without_time()
-            .with_writer(traces.clone())
-            .finish();
-        let ((), trace) = async {
-            tracing::callsite::rebuild_interest_cache();
+        let (_, trace) = if name == "gone-unknown" {
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_writer(traces.clone())
+                .finish();
+            async {
+                tracing::callsite::rebuild_interest_cache();
+                capture_queries(djinn_coordinator::complete_startup_reaper_phase(
+                    &fixture.db,
+                    "projection-census-incarnation",
+                    Some(&census),
+                ))
+                .await
+            }
+            .with_subscriber(subscriber)
+            .await
+        } else {
+            // A scoped tracing subscriber replaces the SQLx query observer.
+            // Only Unknown needs trace capture; leave the observer installed
+            // for the destructive row's no-post-Stage-B-query proof.
             capture_queries(djinn_coordinator::complete_startup_reaper_phase(
                 &fixture.db,
                 "projection-census-incarnation",
                 Some(&census),
             ))
             .await
-        }
-        .with_subscriber(subscriber)
-        .await;
+        };
         if name == "all-gone" {
             assert_stage_c_does_not_requery_liveness(&trace);
         }
