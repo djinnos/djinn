@@ -258,6 +258,65 @@ pub struct ModelTurnLease {
     pub heartbeat_at: Option<String>,
 }
 
+/// Closed, redaction-safe reason code persisted with a Phase-C window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelTurnControllerWindowDiagnosticCode {
+    EmptyExpectedDenominator,
+    MissingCapability,
+    UnexpectedCapability,
+    DuplicateCapability,
+    UncoveredCapability,
+    PartialCapabilityCoverage,
+    StaleHeartbeat,
+    UnknownAttemptPath,
+    MissingUsage,
+    ExpiredLease,
+    OpenBreaker,
+    MissingStage,
+    DuplicateStage,
+    MissingStageOutcome,
+    StageOutsideWindow,
+    ReversedStages,
+    InvalidStageOutcome,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ModelTurnControllerWindowDiagnostic {
+    pub pool_id: i64,
+    pub code: ModelTurnControllerWindowDiagnosticCode,
+}
+/// Labels are correlations only; the coordinator's live catalog owns authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelTurnControllerWindowSummary {
+    pub provider_id: String,
+    pub model_id: String,
+    pub trainable: bool,
+    pub diagnostics: Vec<ModelTurnControllerWindowDiagnostic>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelTurnControllerWindowInput {
+    pub pool_id: i64,
+    pub window_sequence: i64,
+    pub started_at: String,
+    pub ended_at: String,
+    pub admitted_turns: i64,
+    pub completed_turns: i64,
+    pub summary: ModelTurnControllerWindowSummary,
+}
+/// Exact-bound DB projection. It deliberately contains no diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelTurnLearnerWindow {
+    pub pool_id: i64,
+    pub window_sequence: i64,
+    pub started_at: String,
+    pub ended_at: String,
+    pub admitted_turns: i64,
+    pub completed_turns: i64,
+    pub provider_id: String,
+    pub model_id: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelTurnControllerWindow {
     pub pool_id: i64,
@@ -598,6 +657,80 @@ impl ModelTurnAdmissionRepository {
         }
         sqlx::query_as("SELECT slot_pod_uid, deployment_revision, provider_id, model_id, attempt_fingerprint, stage, outcome, recorded_at::text AS recorded_at FROM model_turn_phase_c_evidence WHERE pool_id = $1 AND recorded_at >= $2::timestamptz AND recorded_at < $3::timestamptz AND $2::timestamptz < $3::timestamptz ORDER BY recorded_at ASC, id ASC LIMIT $4")
             .bind(pool_id).bind(start_at).bind(end_at).bind(limit.clamp(1, 256)).fetch_all(self.db.pool()).await.map_err(Into::into)
+    }
+
+    /// Typed bounded storage; production catalog qualification belongs to coordinator.
+    pub async fn upsert_controller_window(
+        &self,
+        input: ModelTurnControllerWindowInput,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        validate_controller_window_input(&input)?;
+        let summary = serde_json::to_string(&input.summary)
+            .map_err(|e| crate::Error::InvalidData(e.to_string()))?;
+        let changed = sqlx::query("INSERT INTO model_turn_controller_windows (pool_id, window_sequence, started_at, ended_at, admitted_turns, completed_turns, summary) SELECT id, $2, $3::timestamptz, $4::timestamptz, $5, $6, $7 FROM model_turn_pools WHERE id = $1 ON CONFLICT (pool_id, window_sequence) DO UPDATE SET started_at = EXCLUDED.started_at, ended_at = EXCLUDED.ended_at, admitted_turns = EXCLUDED.admitted_turns, completed_turns = EXCLUDED.completed_turns, summary = EXCLUDED.summary")
+            .bind(input.pool_id).bind(input.window_sequence).bind(&input.started_at).bind(&input.ended_at).bind(input.admitted_turns).bind(input.completed_turns).bind(summary).execute(self.db.pool()).await?;
+        if changed.rows_affected() != 1 {
+            return invalid_phase_c();
+        }
+        Ok(())
+    }
+    /// Exact-bound fail-closed projection; the coordinator revalidates catalog membership.
+    pub async fn learner_window(
+        &self,
+        pool_id: i64,
+        window_sequence: i64,
+        started_at: &str,
+        ended_at: &str,
+    ) -> Result<Option<ModelTurnLearnerWindow>> {
+        self.db.ensure_initialized().await?;
+        if pool_id <= 0 || window_sequence < 0 || !valid_aligned_minute_bounds(started_at, ended_at)
+        {
+            return Ok(None);
+        }
+        let row: Option<(i64,i64,String,String,i64,i64,String,String,String)> = sqlx::query_as("SELECT w.pool_id,w.window_sequence,w.started_at::text,w.ended_at::text,w.admitted_turns,w.completed_turns,w.summary,p.provider_id,p.model_id FROM model_turn_controller_windows w JOIN model_turn_pools p ON p.id=w.pool_id WHERE w.pool_id=$1 AND w.window_sequence=$2 AND w.started_at=$3::timestamptz AND w.ended_at=$4::timestamptz").bind(pool_id).bind(window_sequence).bind(started_at).bind(ended_at).fetch_optional(self.db.pool()).await?;
+        let Some((
+            pool_id,
+            window_sequence,
+            actual_start,
+            actual_end,
+            admitted_turns,
+            completed_turns,
+            summary,
+            pool_provider,
+            pool_model,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        if admitted_turns < 0
+            || completed_turns < 0
+            || !valid_aligned_minute_bounds(&actual_start, &actual_end)
+            || !chrono::DateTime::parse_from_rfc3339(&actual_start)
+                .is_ok_and(|s| s.timestamp().div_euclid(60) == window_sequence)
+        {
+            return Ok(None);
+        }
+        let Ok(summary) = serde_json::from_str::<ModelTurnControllerWindowSummary>(&summary) else {
+            return Ok(None);
+        };
+        if !summary.trainable
+            || !summary.diagnostics.is_empty()
+            || summary.provider_id != pool_provider
+            || summary.model_id != pool_model
+        {
+            return Ok(None);
+        }
+        Ok(Some(ModelTurnLearnerWindow {
+            pool_id,
+            window_sequence,
+            started_at: actual_start,
+            ended_at: actual_end,
+            admitted_turns,
+            completed_turns,
+            provider_id: summary.provider_id,
+            model_id: summary.model_id,
+        }))
     }
 
     /// Commit the pre-send fence before a caller sends provider network bytes.
@@ -1107,6 +1240,44 @@ fn is_sha256_fingerprint(value: &str) -> bool {
         && value.as_bytes()[7..]
             .iter()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+fn valid_aligned_minute_bounds(started_at: &str, ended_at: &str) -> bool {
+    let Ok(start) = chrono::DateTime::parse_from_rfc3339(started_at) else {
+        return false;
+    };
+    let Ok(end) = chrono::DateTime::parse_from_rfc3339(ended_at) else {
+        return false;
+    };
+    start.timestamp_subsec_nanos() == 0
+        && end.timestamp_subsec_nanos() == 0
+        && start.timestamp().rem_euclid(60) == 0
+        && end.timestamp() == start.timestamp() + 60
+}
+fn validate_controller_window_input(input: &ModelTurnControllerWindowInput) -> Result<()> {
+    if input.pool_id <= 0
+        || input.window_sequence < 0
+        || input.admitted_turns < 0
+        || input.completed_turns < 0
+        || !valid_aligned_minute_bounds(&input.started_at, &input.ended_at)
+        || !chrono::DateTime::parse_from_rfc3339(&input.started_at)
+            .is_ok_and(|s| s.timestamp().div_euclid(60) == input.window_sequence)
+        || input.summary.provider_id.trim().is_empty()
+        || input.summary.model_id.trim().is_empty()
+        || input.summary.provider_id.len() > 191
+        || input.summary.model_id.len() > 191
+        || (input.summary.trainable && !input.summary.diagnostics.is_empty())
+        || input.summary.diagnostics.len() > 64
+        || input
+            .summary
+            .diagnostics
+            .iter()
+            .any(|d| d.pool_id != 0 && d.pool_id != input.pool_id)
+    {
+        return Err(crate::Error::InvalidData(
+            "invalid model-turn controller window".to_owned(),
+        ));
+    }
+    Ok(())
 }
 fn valid_phase_c_identity(
     pool_id: i64,

@@ -7,7 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use djinn_db::{
-    ModelTurnAdmissionRepository, ModelTurnCapabilityHeartbeatInput, ModelTurnPhaseCEvidenceInput,
+    ModelTurnAdmissionRepository, ModelTurnCapabilityHeartbeatInput,
+    ModelTurnControllerWindowDiagnostic, ModelTurnControllerWindowDiagnosticCode,
+    ModelTurnControllerWindowInput, ModelTurnControllerWindowSummary, ModelTurnPhaseCEvidenceInput,
     ModelTurnPhaseCEvidenceOutcome, ModelTurnPhaseCEvidenceStage, ModelTurnPool,
 };
 use djinn_k8s::{WorkloadObjectKind, WorkloadRecord};
@@ -94,6 +96,99 @@ impl CoordinatorActor {
         let repository = ModelTurnAdmissionRepository::new(self.db.clone());
         project_from_inventory(&repository, &self.catalog, records, plans, reports).await
     }
+}
+
+/// Diagnostic-free output of the sole catalog-qualified learner seam.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhaseCLearnerWindowV1 {
+    pub pool_id: i64,
+    pub window_sequence: i64,
+    pub started_at: String,
+    pub ended_at: String,
+    pub admitted_turns: i64,
+    pub completed_turns: i64,
+}
+
+/// Resolve through the active catalog immediately before writing the typed DB row.
+pub async fn persist_catalog_qualified_phase_c_window_v1(
+    repository: &ModelTurnAdmissionRepository,
+    catalog: &CatalogService,
+    path: &ExpectedAttemptPathV1,
+    window_sequence: i64,
+    started_at: String,
+    ended_at: String,
+    admitted_turns: i64,
+    completed_turns: i64,
+    qualification: &PhaseCWindowQualificationV1,
+) -> djinn_db::Result<()> {
+    if catalog
+        .find_model(&format!("{}/{}", path.provider, path.model_scope))
+        .is_none()
+    {
+        return Err(djinn_db::Error::InvalidData(
+            "unknown Phase-C catalog route".into(),
+        ));
+    }
+    let diagnostics = qualification
+        .diagnostics
+        .iter()
+        .filter(|d| d.pool_id == 0 || d.pool_id == path.pool_id)
+        .map(|d| ModelTurnControllerWindowDiagnostic {
+            pool_id: d.pool_id,
+            code: serde_json::from_value(
+                serde_json::to_value(d.code)
+                    .map_err(|e| djinn_db::Error::InvalidData(e.to_string()))?,
+            )
+            .map_err(|e| djinn_db::Error::InvalidData(e.to_string()))?,
+        })
+        .collect::<djinn_db::Result<Vec<_>>>()?;
+    repository
+        .upsert_controller_window(ModelTurnControllerWindowInput {
+            pool_id: path.pool_id,
+            window_sequence,
+            started_at,
+            ended_at,
+            admitted_turns,
+            completed_turns,
+            summary: ModelTurnControllerWindowSummary {
+                provider_id: path.provider.clone(),
+                model_id: path.model_scope.clone(),
+                trainable: qualification.admitted,
+                diagnostics,
+            },
+        })
+        .await
+}
+
+/// Exact DB bounds and current active-catalog revalidation before learning.
+pub async fn learner_catalog_qualified_phase_c_window_v1(
+    repository: &ModelTurnAdmissionRepository,
+    catalog: &CatalogService,
+    pool_id: i64,
+    window_sequence: i64,
+    started_at: &str,
+    ended_at: &str,
+) -> djinn_db::Result<Option<PhaseCLearnerWindowV1>> {
+    let Some(window) = repository
+        .learner_window(pool_id, window_sequence, started_at, ended_at)
+        .await?
+    else {
+        return Ok(None);
+    };
+    if catalog
+        .find_model(&format!("{}/{}", window.provider_id, window.model_id))
+        .is_none()
+    {
+        return Ok(None);
+    }
+    Ok(Some(PhaseCLearnerWindowV1 {
+        pool_id: window.pool_id,
+        window_sequence: window.window_sequence,
+        started_at: window.started_at,
+        ended_at: window.ended_at,
+        admitted_turns: window.admitted_turns,
+        completed_turns: window.completed_turns,
+    }))
 }
 
 /// Persist B2 evidence only if it exact-joined the coordinator-owned expected
