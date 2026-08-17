@@ -1019,7 +1019,22 @@ mod tests {
         ] {
             assert!(has(&r, c), "{c:?}");
         }
-        let json = serde_json::to_string(&r).expect("serialize");
+        let serialized = serde_json::to_value(&r).expect("serialize");
+        assert_eq!(
+            serialized,
+            serde_json::json!({
+                "admitted": false,
+                "diagnostics": [
+                    {"pool_id": 7, "code": "missing_usage"},
+                    {"pool_id": 7, "code": "expired_lease"},
+                    {"pool_id": 7, "code": "open_breaker"},
+                    {"pool_id": 7, "code": "duplicate_stage"},
+                    {"pool_id": 7, "code": "invalid_stage_outcome"}
+                ]
+            }),
+            "the closed diagnostic schema has no surface for reporter text or identifiers"
+        );
+        let json = serialized.to_string();
         for value in [
             "slot-catalog-bound",
             "revision-catalog-bound",
