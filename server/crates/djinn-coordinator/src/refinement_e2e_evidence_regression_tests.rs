@@ -184,7 +184,7 @@ async fn seed_typed_return_delivery(
         "e2e-check",
     )
     .await;
-    let raw = serde_json::json!({"version":"TribunalEvidenceReturnV1","finding_id":fixture.finding_id,"spike_task_id":spike_task_id,"attempt_id":fixture.attempt_id,"conclusion":"typed receipt","checks":[{"check_id":"e2e-check","method":"code","status":"passed","anchors":[]}]}).to_string();
+    let raw = fixture.return_payload;
     TaskRepository::new(db.clone(), EventBus::noop())
         .log_activity(
             Some(spike_task_id),

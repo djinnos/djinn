@@ -2476,13 +2476,7 @@ mod tests {
             "rules-check",
         )
         .await;
-        let raw = serde_json::json!({
-            "version":"TribunalEvidenceReturnV1", "finding_id":fixture.finding_id,
-            "spike_task_id":spike_task_id, "attempt_id":fixture.attempt_id,
-            "conclusion":"durable typed receipt",
-            "checks":[{"check_id":"rules-check","method":"code","status":"passed","anchors":[]}]
-        })
-        .to_string();
+        let raw = fixture.return_payload;
         task_repo
             .log_activity(
                 Some(spike_task_id),
