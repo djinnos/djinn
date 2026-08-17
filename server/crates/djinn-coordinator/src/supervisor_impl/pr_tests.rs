@@ -1535,3 +1535,236 @@ async fn retained_legacy_cleanup_reaches_inline_and_stale_provider_boundaries() 
         set_installation_client_base_url_for_test(None);
     }
 }
+
+/// END-TO-END REGRESSION for tasks `4vnt` (PR #3153) and `3kza` (PR #3155).
+///
+/// Drives the **real** `poll_pr_draft_tasks` — production entry point, real
+/// installation-token client, real CI snapshot recording, real tripwire
+/// active-hold reconciliation — against a PR that GitHub reports as merged
+/// while an active `tripwire.gate.held` finding sits on that PR's live head.
+/// Only the HTTP endpoint is redirected, via the existing
+/// `set_installation_client_base_url_for_test` seam.
+///
+/// Before the fix the loop evaluated `reconcile_tripwire_hold` first, saw an
+/// active hold, and `continue`d before ever reading `pr.merged`. Both
+/// production tasks therefore sat in `pr_draft` with `closed_at: null` — 5 days
+/// for `4vnt` — and their dependents (`296y`, `i58q`) stayed blocked until an
+/// operator closed them by hand. A merged PR is ground truth: no Djinn-side
+/// advance gate may precede observing it.
+///
+/// The fixture reproduces the force-push shape too: the stored CI-snapshot head
+/// is the pre-force-push SHA, so a merge check keyed off any stored SHA would
+/// still strand the task.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn merged_pr_under_active_tripwire_hold_still_closes_its_pr_draft_task() {
+    let _lifecycle_guard = RETAINED_LEGACY_LIFECYCLE_GUARD.lock().await;
+    use crate::pr_poller::installation::set_installation_client_base_url_for_test;
+    use crate::tripwires::{
+        TRIPWIRE_EVENT_GATE_HELD,
+        activity_payloads::{
+            TripwireEvidenceSpan, TripwireFindingSummary, TripwireGateDecisionPayload,
+            TripwireSeverity,
+        },
+    };
+    use djinn_core::events::EventBus;
+    use djinn_core::models::{CiStatus, TaskPrCiSnapshotInput};
+    use djinn_db::{Database, EpicRepository, TaskRepository};
+    use djinn_provider::github_app::installations::prime_cache_for_tests;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    const INSTALLATION: u64 = 42_425;
+    const URL: &str = "https://github.com/acme/widget/pull/3155";
+    /// The head GitHub reports and merged.
+    const MERGED_HEAD: &str = "fef4a526f115c7e5ca6b86cf76856676389f176f";
+    /// The pre-force-push head Djinn still had stored (the `3kza` divergence).
+    const STALE_STORED_HEAD: &str = "0d67ee6e892124e38221a515b466b3b7a582f4d1";
+    const MERGE_COMMIT: &str = "06253f5ab0b48f14769598a8cded90a013d90206";
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widget/pulls/3155"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "number": 3155,
+            "title": "merged while held",
+            // GitHub reports merged PRs as closed; `merged` is the ground truth.
+            "state": "closed",
+            "merged": true,
+            "merge_commit_sha": MERGE_COMMIT,
+            "html_url": URL,
+            "head": {"ref": "task/3kza", "sha": MERGED_HEAD},
+            "base": {"ref": "main", "sha": "base"},
+            "node_id": "PR_3kza"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/repos/acme/widget/commits/{MERGED_HEAD}/check-runs"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "total_count": 1,
+            "check_runs": [{
+                "id": 1, "name": "ci", "status": "completed", "conclusion": "success",
+                "html_url": "https://example.test/check/1"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let db = Database::open_in_memory().unwrap();
+    let events = EventBus::noop();
+    let epic = EpicRepository::new(db.clone(), events.clone())
+        .create("merged-under-hold", "", "", "", "", None)
+        .await
+        .unwrap();
+    let tasks = TaskRepository::new(db.clone(), events);
+    let task = tasks
+        .create(
+            &epic.id,
+            "merged while tripwire-held",
+            "",
+            "",
+            "task",
+            0,
+            "worker",
+            Some("pr_draft"),
+        )
+        .await
+        .unwrap();
+    tasks.set_pr_url(&task.id, URL).await.unwrap();
+    djinn_db::test_support::persist_project_github_installation_for_test(
+        &db,
+        &task.project_id,
+        "acme",
+        "widget",
+        INSTALLATION,
+    )
+    .await;
+    prime_cache_for_tests(INSTALLATION, "ghs_installation_fixture");
+
+    // The dependency chain that silently dropped out of the build loop.
+    let dependent = tasks
+        .create(&epic.id, "dependent", "", "", "task", 0, "worker", None)
+        .await
+        .unwrap();
+    tasks.add_blocker(&dependent.id, &task.id).await.unwrap();
+
+    // Stale stored head — the force-push shape both incidents carried.
+    tasks
+        .upsert_ci_snapshot(TaskPrCiSnapshotInput {
+            task_id: task.id.clone(),
+            pr_number: 3155,
+            head_sha: STALE_STORED_HEAD.into(),
+            ci_status: CiStatus::Passing,
+            blocking_required_check_names: vec![],
+            primary_blocking_check: None,
+            failure_annotations: None,
+            failure_fingerprint: None,
+            same_signature_count: 0,
+            last_remediation_base_sha: None,
+        })
+        .await
+        .unwrap();
+
+    // The active tripwire hold on the PR's LIVE head — the gate that used to
+    // mask merge detection for five days.
+    let finding = TripwireFindingSummary {
+        rule_id: "large_delete_or_rewrite".into(),
+        reason_code: "tripwire.large_delete_or_rewrite".into(),
+        severity: TripwireSeverity::HumanReviewRequired,
+        evidence: TripwireEvidenceSpan {
+            path: "server/crates/djinn-coordinator/src/rules.rs".into(),
+            start_line: None,
+            end_line: None,
+            evidence_redacted: false,
+        },
+        idempotency_key: "sha256:held-finding-1".into(),
+        content_fingerprint: "fp:sha256:held-finding-1".into(),
+        downgrade_reason: None,
+    };
+    let held = TripwireGateDecisionPayload {
+        event_type: TRIPWIRE_EVENT_GATE_HELD.to_owned(),
+        task_id: task.id.clone(),
+        project_id: task.project_id.clone(),
+        pr_number: Some(3155),
+        head_sha: MERGED_HEAD.into(),
+        base_sha: None,
+        policy_revision: "org-policy:default".into(),
+        allowlist_revision: None,
+        findings: vec![finding],
+        enforcement_finding_count: 1,
+        report_only_finding_count: 0,
+        idempotency_key: "sha256:held-gate-1".into(),
+        decided_at: None,
+    };
+    tasks
+        .log_activity(
+            Some(&task.id),
+            "coordinator",
+            "system",
+            TRIPWIRE_EVENT_GATE_HELD,
+            &serde_json::to_string(&held).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    unsafe { std::env::set_var("GITHUB_APP_ID", "1") };
+    set_installation_client_base_url_for_test(Some(server.uri()));
+
+    let (tx, _rx) = tokio::sync::broadcast::channel(8);
+    let (mut actor, cancel) = crate::test_helpers::make_coordinator_actor_cancellable(&db, &tx);
+    // Satisfy the production minimum-age guard without a 10s sleep: pretend the
+    // task has been in `pr_draft` for a minute. Every other gate is real.
+    actor.pr_draft_first_seen.insert(
+        task.id.clone(),
+        std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .expect("monotonic clock is at least 60s past boot"),
+    );
+
+    // Sanity: the hold really is active on the live head, so this test is
+    // exercising the masked path and not a trivially-unheld one.
+    let reloaded = tasks.get(&task.id).await.unwrap().unwrap();
+    assert!(
+        actor
+            .reconcile_tripwire_hold(&reloaded, 3155, MERGED_HEAD)
+            .await,
+        "precondition: an active tripwire hold must be present on the merged head"
+    );
+
+    actor.poll_pr_draft_tasks().await;
+
+    let closed = tasks.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        closed.status, "closed",
+        "a merged PR must close its task even while a tripwire hold is active on \
+         its head — the hold gates ADVANCING a PR, not observing one that already \
+         merged (incidents 4vnt/#3153 and 3kza/#3155)"
+    );
+    assert_eq!(closed.close_reason.as_deref(), Some("completed"));
+    assert!(closed.closed_at.is_some(), "closed_at must be populated");
+    assert_eq!(
+        closed.merge_commit_sha.as_deref(),
+        Some(MERGE_COMMIT),
+        "a task closed as merged must record which commit merged it"
+    );
+
+    let ready: Vec<String> = tasks
+        .list_ready(djinn_db::ReadyQuery::default())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
+    assert!(
+        ready.contains(&dependent.id),
+        "closing the merged task must release its blocked dependent"
+    );
+
+    set_installation_client_base_url_for_test(None);
+    cancel.cancel();
+    db.pool().close().await;
+}
