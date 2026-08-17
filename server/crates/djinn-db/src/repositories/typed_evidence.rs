@@ -1323,6 +1323,13 @@ impl TypedEvidenceRepository {
             let id: String = row.get("id");
             return Ok(TypedEvidenceAttemptAllocation { attempt_id:id.clone(), spike_task_id:row.get("spike_task_id"), sequence:row.get("sequence"), planned_checks:checks(tx,&id).await? });
         }
+        // An open attempt owns the finding's only retry slot. Check this before
+        // the failed-transition guard so a second allocation sees the
+        // repository's occupied-slot rejection rather than a stale error.
+        let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM typed_evidence_attempts a JOIN tasks t ON t.id=a.spike_task_id WHERE a.finding_id=$1 AND t.status <> 'closed')").bind(&input.finding_id).fetch_one(&mut **tx).await?;
+        if active {
+            return Err(Error::InvalidTransition("active_evidence_conflict".into()));
+        }
         if lock_state(tx, &input.finding_id).await? != TribunalEvidenceLifecycle::Failed {
             return Err(Error::InvalidTransition(
                 "retry_requires_latest_failed_transition".into(),
@@ -1348,8 +1355,20 @@ impl TypedEvidenceRepository {
                 .bind(&proposal)
                 .fetch_one(&mut **tx)
                 .await?;
-        let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM typed_evidence_attempts a JOIN tasks t ON t.id=a.spike_task_id WHERE a.finding_id=$1 AND t.status <> 'closed')").bind(&input.finding_id).fetch_one(&mut **tx).await?;
-        if legacy.is_some() || active {
+        // Failed malformed ingress retains its compatibility link. The retry
+        // transaction consumes only a link to this finding's closed attempt,
+        // then repoints it to the exact retry allocation below. An unrelated
+        // link remains an active-evidence conflict.
+        let retained_failed_link = if let Some(linked_task_id) = legacy.as_deref() {
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM typed_evidence_attempts a JOIN tasks t ON t.id=a.spike_task_id WHERE a.finding_id=$1 AND a.spike_task_id=$2 AND t.status='closed')")
+                .bind(&input.finding_id)
+                .bind(linked_task_id)
+                .fetch_one(&mut **tx)
+                .await?
+        } else {
+            false
+        };
+        if legacy.is_some() && !retained_failed_link {
             return Err(Error::InvalidTransition("active_evidence_conflict".into()));
         }
         let retry_task_labels: Option<String> = sqlx::query_scalar("SELECT t.labels::text FROM tasks t WHERE t.id=$1 AND t.status <> 'closed' AND NOT EXISTS(SELECT 1 FROM typed_evidence_attempts a WHERE a.spike_task_id=t.id)")
@@ -1375,6 +1394,14 @@ impl TypedEvidenceRepository {
         sqlx::query("INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id,evidence_plan_id) VALUES ($1,$2,$3,$4,$5)").bind(&input.retry_attempt_id).bind(&input.finding_id).bind(sequence).bind(&input.retry_spike_task_id).bind(&input.evidence_plan_id).execute(&mut **tx).await?;
         for check in &input.planned_checks {
             sqlx::query("INSERT INTO typed_evidence_planned_checks (id,attempt_id,ordinal,check_id,method,evidence_plan_id,evidence_plan_check_id) VALUES ($1,$2,$3,$4,$5,$6,$7)").bind(&check.id).bind(&input.retry_attempt_id).bind(check.ordinal).bind(&check.check_id).bind(planned_method(check.method)).bind(&check.evidence_plan_id).bind(&check.evidence_plan_check_id).execute(&mut **tx).await?;
+        }
+        if retained_failed_link {
+            sqlx::query("UPDATE proposals SET linked_spike_task_id=$1 WHERE id=$2 AND linked_spike_task_id=$3")
+                .bind(&input.retry_spike_task_id)
+                .bind(&proposal)
+                .bind(legacy.as_deref())
+                .execute(&mut **tx)
+                .await?;
         }
         sqlx::query("INSERT INTO typed_evidence_retry_idempotency (finding_id,failed_transition_id,retry_attempt_id) VALUES ($1,$2,$3)").bind(&input.finding_id).bind(&input.failed_transition_id).bind(&input.retry_attempt_id).execute(&mut **tx).await?;
         let ordinal: i32 = sqlx::query_scalar(

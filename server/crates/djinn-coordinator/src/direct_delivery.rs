@@ -57,17 +57,76 @@ pub(crate) enum BoundaryOperation {
 }
 
 #[cfg(test)]
-static BOUNDARY_OPERATIONS: std::sync::Mutex<Vec<BoundaryOperation>> =
-    std::sync::Mutex::new(Vec::new());
+static BOUNDARY_OPERATIONS: std::sync::Mutex<
+    Option<(std::thread::ThreadId, Vec<BoundaryOperation>)>,
+> = std::sync::Mutex::new(None);
+
+// The recorder follows real production calls, but observation is enabled only
+// while the owning test thread holds this lock. The owner thread ID travels
+// with the buffer so another concurrently running test cannot add effects to
+// this scope. Tokio's default test runtime is current-thread, so effects from
+// the test's production calls retain that owner identity across awaits.
+#[cfg(test)]
+static BOUNDARY_OPERATIONS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
-pub(crate) fn clear_boundary_operations() {
-    BOUNDARY_OPERATIONS.lock().unwrap().clear();
+pub(crate) struct BoundaryOperationsScope {
+    owner: std::thread::ThreadId,
+    _guard: tokio::sync::MutexGuard<'static, ()>,
 }
 
 #[cfg(test)]
-pub(crate) fn take_boundary_operations() -> Vec<BoundaryOperation> {
-    std::mem::take(&mut *BOUNDARY_OPERATIONS.lock().unwrap())
+impl BoundaryOperationsScope {
+    /// Marks a point in this scope's ordered production-effect stream.
+    pub(crate) fn checkpoint(&self) -> usize {
+        assert_eq!(
+            std::thread::current().id(),
+            self.owner,
+            "boundary recorder used outside its owner thread"
+        );
+        let operations = BOUNDARY_OPERATIONS.lock().unwrap();
+        let (owner, operations) = operations.as_ref().unwrap();
+        assert_eq!(
+            *owner, self.owner,
+            "boundary recorder used outside its owner thread"
+        );
+        operations.len()
+    }
+
+    /// Returns effects observed after `checkpoint` without consuming them.
+    pub(crate) fn operations_since(&self, checkpoint: usize) -> Vec<BoundaryOperation> {
+        assert_eq!(
+            std::thread::current().id(),
+            self.owner,
+            "boundary recorder used outside its owner thread"
+        );
+        let operations = BOUNDARY_OPERATIONS.lock().unwrap();
+        let (owner, operations) = operations.as_ref().unwrap();
+        assert_eq!(
+            *owner, self.owner,
+            "boundary recorder used outside its owner thread"
+        );
+        operations[checkpoint..].to_vec()
+    }
+}
+
+#[cfg(test)]
+impl Drop for BoundaryOperationsScope {
+    fn drop(&mut self) {
+        // A panic or early return cannot leak observations into a later scope.
+        *BOUNDARY_OPERATIONS.lock().unwrap() = None;
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn boundary_operations_scope() -> BoundaryOperationsScope {
+    let guard = BOUNDARY_OPERATIONS_TEST_LOCK.lock().await;
+    let owner = std::thread::current().id();
+    *BOUNDARY_OPERATIONS.lock().unwrap() = Some((owner, Vec::new()));
+    BoundaryOperationsScope {
+        owner,
+        _guard: guard,
+    }
 }
 
 /// A no-op outside tests, preserving production behavior and the disabled epoch.
@@ -99,7 +158,11 @@ pub(crate) fn observe_boundary_operation(operation: &'static str) {
             }
             _ => return,
         };
-        BOUNDARY_OPERATIONS.lock().unwrap().push(operation);
+        if let Some((scope_owner, operations)) = BOUNDARY_OPERATIONS.lock().unwrap().as_mut()
+            && *scope_owner == std::thread::current().id()
+        {
+            operations.push(operation);
+        }
     }
     #[cfg(not(test))]
     let _ = operation;
@@ -1496,13 +1559,31 @@ mod tests {
     async fn reconciliation_collaborator_records_the_real_direct_engine_effect() {
         use crate::dispatch::wave_dispatch::run_direct_completion;
 
-        clear_boundary_operations();
+        let boundary_operations = boundary_operations_scope().await;
+        let boundary_checkpoint = boundary_operations.checkpoint();
         let outcome = run_direct_completion(|| async { "reconciled" }).await;
 
         assert_eq!(outcome, "reconciled");
         assert_eq!(
-            take_boundary_operations(),
+            boundary_operations.operations_since(boundary_checkpoint),
             [BoundaryOperation::DirectAppend]
+        );
+    }
+
+    #[tokio::test]
+    async fn boundary_recorder_ignores_operations_from_an_unowned_test_thread() {
+        let boundary_operations = boundary_operations_scope().await;
+        let boundary_checkpoint = boundary_operations.checkpoint();
+
+        std::thread::spawn(|| observe_boundary_operation("direct_append"))
+            .join()
+            .unwrap();
+        observe_boundary_operation("simple_close");
+
+        assert_eq!(
+            boundary_operations.operations_since(boundary_checkpoint),
+            [BoundaryOperation::SimpleClose],
+            "an unscoped concurrent test thread must not write this scope's buffer"
         );
     }
 
@@ -1514,6 +1595,7 @@ mod tests {
         use djinn_core::events::EventBus;
         use djinn_db::{EpicRepository, TaskRepository};
 
+        let boundary_operations = boundary_operations_scope().await;
         let db = Database::open_in_memory().unwrap();
         let events = EventBus::noop();
         let epic = EpicRepository::new(db.clone(), events.clone())
@@ -1543,7 +1625,7 @@ mod tests {
         let task = repo.get(&task.id).await.unwrap().unwrap();
         djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
 
-        clear_boundary_operations();
+        let boundary_checkpoint = boundary_operations.checkpoint();
         let admission = admit_direct_delivery(db.clone(), &task.id).await.unwrap();
         assert_eq!(admission, DirectDeliveryAdmission::Legacy);
 
@@ -1587,7 +1669,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            take_boundary_operations(),
+            boundary_operations.operations_since(boundary_checkpoint),
             [
                 BoundaryOperation::CapabilityProbe,
                 BoundaryOperation::SupervisorPrOpen
@@ -2709,6 +2791,7 @@ mod tests {
             MissingEpoch,
             UnknownEpoch,
         }
+        let boundary_operations = boundary_operations_scope().await;
         for state in [
             State::Disabled,
             State::ExplicitLegacy,
@@ -2796,7 +2879,7 @@ mod tests {
                     _ => {}
                 }
                 let before = snapshot(&db, &tasks, &task.id).await;
-                clear_boundary_operations();
+                let boundary_checkpoint = boundary_operations.checkpoint();
                 let admission = if completion {
                     admit_approved_direct_delivery(db.clone(), &tasks, &task.id).await
                 } else {
@@ -2924,11 +3007,299 @@ mod tests {
                     ],
                 };
                 assert_eq!(
-                    take_boundary_operations(),
+                    boundary_operations.operations_since(boundary_checkpoint),
                     expected_ops,
                     "every matrix cell must assert the complete ordered production effect vector"
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod ready_dispatch_repository_liveness_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct FixtureRemote(Arc<Mutex<(String, usize)>>);
+    #[async_trait]
+    impl AttemptRef for FixtureRemote {
+        async fn observe(&self, _: &str) -> Result<Option<String>> {
+            Ok(Some(self.0.lock().unwrap().0.clone()))
+        }
+        async fn update_expected_old(&self, _: &str, old: &str, new: &str) -> Result<RemoteUpdate> {
+            let mut state = self.0.lock().unwrap();
+            state.1 += 1;
+            if state.0 == old {
+                state.0 = new.into();
+                Ok(RemoteUpdate::Updated { sha: new.into() })
+            } else {
+                Ok(RemoteUpdate::Stale {
+                    observed_sha: Some(state.0.clone()),
+                })
+            }
+        }
+    }
+    struct FixtureBuilder;
+    #[async_trait]
+    impl CandidateBuilder for FixtureBuilder {
+        async fn build(
+            &self,
+            _: &TaskDeliveryIdentity,
+            _: &DeliverySource,
+            parent: &str,
+        ) -> Result<CandidateBuild> {
+            Ok(CandidateBuild::Clean(Candidate {
+                candidate_sha: "fixture-candidate".into(),
+                patch_digest: "fixture-patch".into(),
+                selected_parent_sha: parent.into(),
+            }))
+        }
+    }
+
+    /// Repository-backed ready admission reaches the exact collaborator called
+    /// from `dispatch_ready_tasks` before it can select a role or spawn a slot.
+    /// The fixture leaves `pr_url` null: direct liveness comes from canonical
+    /// ownership and the immutable delivery generation, never nullable PR data.
+    #[tokio::test]
+    async fn ready_dispatch_collaborator_reconciles_and_replays_repository_delivery() {
+        use djinn_core::events::EventBus;
+        use djinn_db::test_support::seed_direct_delivery_liveness_fixture_for_test;
+        use djinn_db::{Database, EpicRepository, ProposalBuildAttemptRepository, TaskRepository};
+        let boundary_operations = boundary_operations_scope().await;
+        let db = Database::open_in_memory().unwrap();
+        let epic = EpicRepository::new(db.clone(), EventBus::noop())
+            .create("ready", "", "", "", "", None)
+            .await
+            .unwrap();
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let observed_updates = updates.clone();
+        let observing_events = EventBus::new(move |event| {
+            if event.entity_type == "task" && event.action == "updated" {
+                observed_updates.lock().unwrap().push(event.payload);
+            }
+        });
+        let tasks = TaskRepository::new(db.clone(), observing_events.clone());
+        let task = tasks
+            .create(&epic.id, "ready", "", "", "task", 0, "", Some("approved"))
+            .await
+            .unwrap();
+        let dependent = tasks
+            .create(&epic.id, "dependent", "", "", "task", 0, "", Some("open"))
+            .await
+            .unwrap();
+        tasks.add_blocker(&dependent.id, &task.id).await.unwrap();
+        let fixture = seed_direct_delivery_liveness_fixture_for_test(
+            &db,
+            &epic.id,
+            &task.id,
+            Some("applying"),
+        )
+        .await;
+        assert!(task.pr_url.is_none());
+        let remote = Arc::new(Mutex::new(("fixture-base".to_owned(), 0)));
+        let engine = Arc::new(DirectDeliveryEngine::new(
+            RepositoryDeliveryLedger::new(
+                db.clone(),
+                ProposalBuildAttemptRepository::new(db.clone()),
+                // The ledger owns TaskIntegrated and dependent release. Share this
+                // fixture's observer with that production ownership boundary.
+                TaskRepository::new(db.clone(), observing_events),
+            ),
+            FixtureRemote(remote.clone()),
+            FixtureBuilder,
+        ));
+        let source = DeliverySource {
+            task_id: task.id.clone(),
+            delivery_generation: 1,
+            transition_id: "fixture-prepare".into(),
+            source_sha: "fixture-source".into(),
+            normalized_patch: "fixture-patch".into(),
+        };
+        let boundary_checkpoint = boundary_operations.checkpoint();
+        updates.lock().unwrap().clear();
+        let reconciliations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reconciliations_for_engine = reconciliations.clone();
+        let continuations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let continuations_for_apply = continuations.clone();
+        let decision = crate::dispatch::task_dispatch::continue_ready_dispatch(
+            db.clone(),
+            &tasks,
+            &task.id,
+            || {
+                let engine = engine.clone();
+                async move {
+                    reconciliations_for_engine.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    crate::dispatch::wave_dispatch::run_direct_completion(|| engine.deliver(source))
+                        .await
+                }
+            },
+            || async move {
+                continuations_for_apply.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            decision,
+            crate::dispatch::task_dispatch::ReadyDispatchContinuation::Reconciled
+        );
+        let closed = tasks.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            (closed.status.as_str(), closed.merge_commit_sha.as_deref()),
+            ("closed", Some("fixture-candidate"))
+        );
+        let counts = djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await;
+        assert_eq!(
+            (counts.build_attempts, counts.deliveries),
+            (Some(1), Some(1))
+        );
+        assert_eq!(remote.lock().unwrap().1, 1);
+        assert_eq!(
+            continuations.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "Applying reconciliation must not enter the legacy spawn/task-PR continuation"
+        );
+        assert_eq!(reconciliations.load(std::sync::atomic::Ordering::SeqCst), 1);
+        {
+            let integrated_and_released = updates.lock().unwrap();
+            assert_eq!(
+                integrated_and_released.len(),
+                2,
+                "TaskIntegrated must update the source and release its dependent once"
+            );
+            assert!(
+                integrated_and_released
+                    .iter()
+                    .any(|payload| payload["task"]["id"] == task.id)
+            );
+            assert!(
+                integrated_and_released
+                    .iter()
+                    .any(|payload| payload["task"]["id"] == dependent.id)
+            );
+        }
+        assert_eq!(
+            boundary_operations.operations_since(boundary_checkpoint),
+            vec![
+                BoundaryOperation::CapabilityProbe,
+                BoundaryOperation::ResolveTaskActiveAttempt,
+                BoundaryOperation::DirectAppend,
+            ]
+        );
+        let replay = crate::dispatch::task_dispatch::continue_ready_dispatch(
+            db.clone(),
+            &tasks,
+            &task.id,
+            || {
+                let reconciliations = reconciliations.clone();
+                async move {
+                    reconciliations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    panic!("Applied must not re-enter engine")
+                }
+            },
+            || {
+                let continuations = continuations.clone();
+                async move {
+                    continuations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            replay,
+            crate::dispatch::task_dispatch::ReadyDispatchContinuation::Settled
+        );
+        assert_eq!(tasks.get(&task.id).await.unwrap().unwrap().status, "closed");
+        assert_eq!(
+            djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await,
+            counts
+        );
+        assert_eq!(remote.lock().unwrap().1, 1);
+        assert_eq!(
+            reconciliations.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "Applied replay cannot re-enter reconciliation/spawn"
+        );
+        assert_eq!(
+            updates.lock().unwrap().len(),
+            2,
+            "Applied replay cannot repeat integration or dependent release"
+        );
+        assert_eq!(
+            continuations.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "Applied replay must not enter the legacy spawn/task-PR continuation"
+        );
+        assert_eq!(fixture.delivery_generation, Some(1));
+    }
+
+    #[tokio::test]
+    async fn ready_dispatch_conflict_generation_never_spawns_or_reconciles() {
+        use djinn_core::events::EventBus;
+        use djinn_db::test_support::seed_direct_delivery_liveness_fixture_for_test;
+        use djinn_db::{Database, EpicRepository, TaskRepository};
+
+        let db = Database::open_in_memory().unwrap();
+        let epic = EpicRepository::new(db.clone(), EventBus::noop())
+            .create("conflict", "", "", "", "", None)
+            .await
+            .unwrap();
+        let tasks = TaskRepository::new(db.clone(), EventBus::noop());
+        let task = tasks
+            .create(
+                &epic.id,
+                "conflict",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                Some("approved"),
+            )
+            .await
+            .unwrap();
+        seed_direct_delivery_liveness_fixture_for_test(&db, &epic.id, &task.id, Some("conflict"))
+            .await;
+        let counts_before =
+            djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await;
+        let continuations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let conflict_continuations = continuations.clone();
+
+        let decision = crate::dispatch::task_dispatch::continue_ready_dispatch(
+            db.clone(),
+            &tasks,
+            &task.id,
+            || async { panic!("immutable Conflict must not spawn or reconcile") },
+            || async move {
+                conflict_continuations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            decision,
+            crate::dispatch::task_dispatch::ReadyDispatchContinuation::Settled
+        );
+        assert_eq!(
+            tasks.get(&task.id).await.unwrap().unwrap().status,
+            "approved"
+        );
+        assert_eq!(
+            continuations.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "Conflict must not enter the legacy spawn/task-PR continuation"
+        );
+        assert_eq!(
+            djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await,
+            counts_before,
+            "Conflict must not mutate immutable delivery state"
+        );
     }
 }

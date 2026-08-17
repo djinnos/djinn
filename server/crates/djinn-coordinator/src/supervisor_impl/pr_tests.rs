@@ -641,8 +641,7 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
     use std::collections::HashMap;
 
     use crate::direct_delivery::{
-        BoundaryOperation, LEGACY_DELIVERY_LABEL, clear_boundary_operations,
-        take_boundary_operations,
+        BoundaryOperation, LEGACY_DELIVERY_LABEL, boundary_operations_scope,
     };
     use crate::supervisor_impl::{SupervisorCallbackContext, supervisor_pr_open};
     use djinn_core::events::EventBus;
@@ -825,9 +824,10 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
             .probe()
             .await
             .map_err(|error| error.to_string());
-        clear_boundary_operations();
+        let boundary_operations = boundary_operations_scope().await;
+        let boundary_checkpoint = boundary_operations.checkpoint();
         let outcome = supervisor_pr_open(&spec, &task, &callbacks).await;
-        let operations = take_boundary_operations();
+        let operations = boundary_operations.operations_since(boundary_checkpoint);
         for forbidden in [
             BoundaryOperation::TaskPrLookup,
             BoundaryOperation::TaskPrAdopt,
@@ -1009,7 +1009,7 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
 async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
     let _lifecycle_guard = RETAINED_LEGACY_LIFECYCLE_GUARD.lock().await;
     use crate::{
-        direct_delivery::{BoundaryOperation, clear_boundary_operations, take_boundary_operations},
+        direct_delivery::{BoundaryOperation, boundary_operations_scope},
         pr_poller::installation::set_installation_client_base_url_for_test,
         supervisor_impl::{SupervisorCallbackContext, supervisor_pr_open},
     };
@@ -1216,7 +1216,8 @@ async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
         .probe()
         .await
         .unwrap();
-    clear_boundary_operations();
+    let boundary_operations = boundary_operations_scope().await;
+    let boundary_checkpoint = boundary_operations.checkpoint();
     assert!(
         matches!(supervisor_pr_open(&spec, &tasks.get(&task.id).await.unwrap().unwrap(), &callbacks).await, TaskRunOutcome::PrOpened { ref url, .. } if url == URL)
     );
@@ -1310,7 +1311,7 @@ async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
             .as_deref(),
         Some(URL)
     );
-    let operations = take_boundary_operations();
+    let operations = boundary_operations.operations_since(boundary_checkpoint);
     for expected in [
         BoundaryOperation::SupervisorPrOpen,
         BoundaryOperation::TaskPrLookup,
@@ -1344,10 +1345,7 @@ async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
 async fn supported_active_explicit_legacy_adopts_through_every_poller() {
     let _lifecycle_guard = RETAINED_LEGACY_LIFECYCLE_GUARD.lock().await;
     use crate::{
-        direct_delivery::{
-            BoundaryOperation, LEGACY_DELIVERY_LABEL, clear_boundary_operations,
-            take_boundary_operations,
-        },
+        direct_delivery::{BoundaryOperation, LEGACY_DELIVERY_LABEL, boundary_operations_scope},
         pr_poller::installation::set_installation_client_base_url_for_test,
         supervisor_impl::{SupervisorCallbackContext, supervisor_pr_open},
     };
@@ -1565,7 +1563,8 @@ async fn supported_active_explicit_legacy_adopts_through_every_poller() {
         .probe()
         .await
         .unwrap();
-    clear_boundary_operations();
+    let boundary_operations = boundary_operations_scope().await;
+    let boundary_checkpoint = boundary_operations.checkpoint();
     assert!(
         matches!(supervisor_pr_open(&spec, &tasks.get(&task.id).await.unwrap().unwrap(), &callbacks).await, TaskRunOutcome::PrOpened { ref url, .. } if url == URL)
     );
@@ -1659,7 +1658,7 @@ async fn supported_active_explicit_legacy_adopts_through_every_poller() {
             .as_deref(),
         Some(URL)
     );
-    let operations = take_boundary_operations();
+    let operations = boundary_operations.operations_since(boundary_checkpoint);
     for expected in [
         BoundaryOperation::SupervisorPrOpen,
         BoundaryOperation::TaskPrLookup,
@@ -1694,10 +1693,7 @@ async fn supported_active_explicit_legacy_adopts_through_every_poller() {
 async fn retained_legacy_cleanup_reaches_inline_and_stale_provider_boundaries() {
     let _lifecycle_guard = RETAINED_LEGACY_LIFECYCLE_GUARD.lock().await;
     use crate::{
-        direct_delivery::{
-            BoundaryOperation, LEGACY_DELIVERY_LABEL, clear_boundary_operations,
-            take_boundary_operations,
-        },
+        direct_delivery::{BoundaryOperation, LEGACY_DELIVERY_LABEL, boundary_operations_scope},
         health,
         pr_poller::{
             installation::set_installation_client_base_url_for_test, pr_cleanup::CloseKind,
@@ -1846,7 +1842,8 @@ async fn retained_legacy_cleanup_reaches_inline_and_stale_provider_boundaries() 
         prime_cache_for_tests(INSTALLATION, "ghs_installation_fixture");
         unsafe { std::env::set_var("GITHUB_APP_ID", "1") };
         set_installation_client_base_url_for_test(Some(server.uri()));
-        clear_boundary_operations();
+        let boundary_operations = boundary_operations_scope().await;
+        let boundary_checkpoint = boundary_operations.checkpoint();
 
         if stale {
             let mut context = crate::test_helpers::coordinator_context_from_db(
@@ -1877,7 +1874,7 @@ async fn retained_legacy_cleanup_reaches_inline_and_stale_provider_boundaries() 
             Some(URL),
             "cleanup must retain the exact adopted URL"
         );
-        let operations = take_boundary_operations();
+        let operations = boundary_operations.operations_since(boundary_checkpoint);
         let expected = if stale {
             BoundaryOperation::TaskPrStaleCleanup
         } else {
@@ -1901,7 +1898,7 @@ async fn retained_legacy_cleanup_reaches_inline_and_stale_provider_boundaries() 
 async fn task_pr_maintenance_surfaces_independently_preserve_attempt_ownership() {
     let _guard = RETAINED_LEGACY_LIFECYCLE_GUARD.lock().await;
     use crate::{
-        direct_delivery::{BoundaryOperation, clear_boundary_operations, take_boundary_operations},
+        direct_delivery::{BoundaryOperation, boundary_operations_scope},
         health,
         pr_poller::{
             installation::set_installation_client_base_url_for_test, pr_cleanup::CloseKind,
@@ -2116,7 +2113,8 @@ async fn task_pr_maintenance_surfaces_independently_preserve_attempt_ownership()
             prime_cache_for_tests(INSTALLATION, "ghs_independent_ownership_fixture");
             unsafe { std::env::set_var("GITHUB_APP_ID", "1") };
             set_installation_client_base_url_for_test(Some(server.uri()));
-            clear_boundary_operations();
+            let boundary_operations = boundary_operations_scope().await;
+            let boundary_checkpoint = boundary_operations.checkpoint();
             match surface {
                 Surface::Status => {
                     let (tx, _) = tokio::sync::broadcast::channel(8);
@@ -2159,7 +2157,7 @@ async fn task_pr_maintenance_surfaces_independently_preserve_attempt_ownership()
                     health::sweep_stale_resources(&db, &ctx).await;
                 }
             }
-            let operations = take_boundary_operations();
+            let operations = boundary_operations.operations_since(boundary_checkpoint);
             let after_task = tasks.get(&task.id).await.unwrap().unwrap();
             assert_eq!(
                 DirectDeliveryCapabilityRepository::new(db.clone())

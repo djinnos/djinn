@@ -161,25 +161,101 @@ pub fn build_warm_job(
     let project_root = format!("{WORKSPACE_MOUNT_DIR}/{sanitized_project}");
     let mirror_path = format!("{MIRROR_MOUNT_DIR}/{project_id}.git");
 
-    // Shell wrapper: the bare mirror on the PVC is `--filter=blob:none`,
-    // so cloning it with `--local --shared` gives a partial clone where
-    // `git checkout` fails on every missing blob (`unable to read sha1
-    // file of <path>`). We avoid the filter entirely by pulling the
-    // upstream URL (with fresh installation token, rotated every 60s by
-    // the mirror fetcher) out of the mirror config and doing a clone
-    // straight from GitHub. Same pattern the per-project build Job uses.
+    // Shell wrapper: clone the bare mirror straight off the PVC with
+    // `--local --shared`, so the workspace borrows the mirror's object db
+    // through `.git/objects/info/alternates` and nothing is fetched over the
+    // network. The same pattern `MirrorManager::clone_ephemeral` already uses
+    // for the task-run path.
     //
-    // `--depth 1000 --single-branch`: SCIP only needs HEAD source, but
-    // the coupling-index phase walks `cursor..HEAD` and needs the saved
-    // cursor's history to be reachable. `--depth 1000` gives ~1000
-    // commits of recent history for free (the typical warm cadence is
-    // <100 new commits, so the saved cursor almost always lands inside
-    // this window) and only adds a few MB over `--depth 1` for typical
-    // repos thanks to git's pack deduplication. Cursors older than 1000
-    // commits are handled by `coupling_index::try_fetch_cursor` falling
-    // back to `git fetch --unshallow`. See
+    // This used to read `remote.origin.url` out of the mirror config and clone
+    // from GitHub instead, because mirrors were created with
+    // `--filter=blob:none` and checking out a partial clone fails on every
+    // missing blob (`unable to read sha1 file of <path>`). That constraint is
+    // gone: `MirrorManager::create_mirror` no longer passes the filter, and
+    // `ensure_full_mirror` promotes pre-existing blobless mirrors on server
+    // boot. The old command was `--depth 1000 --single-branch`, i.e. a bounded
+    // partial fetch rather than a full-history download — but a thousand
+    // commits' worth of one branch's trees and blobs is still a real transfer
+    // from GitHub on *every* warm run, and it is pure waste when a complete
+    // mirror is already mounted at `{MIRROR_MOUNT_DIR}`.
+    //
+    // Borrowing the object db also makes the shallow-history question moot.
+    // SCIP only needs HEAD source, but the coupling-index phase walks
+    // `cursor..HEAD` and needs the saved cursor reachable; the old
+    // `--depth 1000` was a heuristic for that (with
+    // `coupling_index::try_fetch_cursor` falling back to
+    // `git fetch --unshallow` for older cursors). An alternates clone has the
+    // mirror's *complete* history available, so no cursor falls outside the
+    // window and the unshallow fallback stops being reachable from here. See
     // `cases/plan-a-warm-cargo-base-reuse-validated-working-v0-6-11-0-6-12`
     // for the broader warm-cost discussion.
+    //
+    // The mirror stays mounted read-only: `--shared` only ever reads it. The
+    // workspace does depend on those borrowed objects surviving for the life of
+    // the Pod — and that is NOT because the mirror is append-only. It isn't:
+    // `MirrorManager::fetch_mirror` fetches with `--prune`, `delete_branch`
+    // removes task refs outright, and `git_maintenance` runs a daily
+    // leader-only `git gc --prune=2.weeks.ago` against this very PVC (the
+    // server mounts it at `/var/lib/djinn/mirrors`, this Pod at
+    // `{MIRROR_MOUNT_DIR}`). Objects really can become unreachable underneath
+    // a live borrower.
+    //
+    // What actually holds is the prune expiry, and it holds for a subtle
+    // reason: `git gc` freshens the pack's mtime even when the repack is a
+    // no-op, and `--prune=<date>` is measured from pack mtime. So on a daily gc
+    // cadence a newly-unreachable object gets a real ~2-week grace before any
+    // gc can drop it, which is orders of magnitude longer than a warm Pod lives
+    // (`warm_job_timeout_seconds`). Verified empirically: backdating a pack 60
+    // days and running gc with no ref change moved its mtime back to now; a
+    // force-push plus gc DID corrupt a `--shared` borrower once the pack was
+    // already 60 days stale, and did not with a fresh pack. The margin is the
+    // gc cadence, not an append-only mirror — anyone widening this (a
+    // longer-lived borrower, a rarer gc, a shorter prune expiry) is spending
+    // that margin.
+    //
+    // THE CHECKOUT IS EXPLICIT, AND THAT IS NOT DECORATION.
+    //
+    // `git clone --local` takes its checkout from the source repo's HEAD
+    // symref, and a bare mirror's HEAD is written exactly once — by the
+    // `git clone --bare` in `MirrorManager::ensure_mirror` — and never
+    // refreshed after that. There is no `remote set-head` or `symbolic-ref`
+    // write anywhere in this codebase. Meanwhile `fetch_mirror` fetches
+    // `+refs/heads/*:refs/heads/*` with `--prune`. So one upstream
+    // default-branch rename (master -> main) prunes the old ref and leaves the
+    // mirror's HEAD dangling forever. Cloning that mirror prints
+    //
+    //     warning: remote HEAD refers to nonexistent ref, unable to checkout
+    //
+    // and EXITS 0, leaving a directory whose entire contents are `.git`.
+    // `set -euo pipefail` does not help — git really does succeed. The Pod
+    // would then `cd` into the empty tree, skip the lockfile-gated JS install
+    // because no lockfile exists, and `exec warm-graph` on nothing: every warm
+    // for that project, forever, with no error to grep for. The old URL clone
+    // was immune only because `--single-branch` resolves the *remote's*
+    // current HEAD over the wire.
+    //
+    // Pinning also closes a second, quieter gap: `discover_mirror_main_tip`
+    // resolves `refs/heads/main` specifically, and that SHA (`warm_generation`)
+    // is what the Job name, the admission request and the published graph
+    // revision are all keyed on. Trusting the frozen symref could index one
+    // branch and publish the result under another branch's revision.
+    //
+    // Every other `--local --shared` caller in the codebase already pins its
+    // checkout: `MirrorManager::clone_ephemeral` and
+    // `WorkspaceStore::ensure_workspace` pass `--branch`,
+    // `clone_ephemeral_at_ref` follows the clone with `checkout --detach`.
+    //
+    // One deliberate consequence: `K8sGraphWarmer` falls back to the literal
+    // generation `"unknown"` when `discover_mirror_main_tip` cannot resolve
+    // `refs/heads/main`, and `git checkout --detach unknown` fails. That is the
+    // wanted behaviour — a project in that state already has a bogus ledger
+    // key, a bogus lease `graph_revision`, and a SCIP schedule that fails
+    // closed on the same unresolvable head, so a failed Job someone can see
+    // beats a green warm published under a meaningless revision.
+    //
+    // The checkout is detached on purpose: nothing downstream reads a branch
+    // name. `coupling_index` walks `<cursor>..HEAD` and `warm_cargo_target_base`
+    // normalizes mtimes from commit times; both work on a detached HEAD.
     let cmd = format!(
         r#"set -euo pipefail
 # Everything this Pod creates on the shared volumes must stay group-writable for
@@ -199,8 +275,15 @@ umask 0002
 export GIT_CONFIG_SYSTEM={WORKSPACE_MOUNT_DIR}/.djinn-gitconfig
 unset GIT_CONFIG_NOSYSTEM
 printf '[safe]\n\tdirectory = *\n' > "$GIT_CONFIG_SYSTEM"
-UPSTREAM_URL="$(git -C "{mirror_path}" config remote.origin.url)"
-git clone --depth 1000 --single-branch "$UPSTREAM_URL" "{project_root}"
+git clone --local --shared "{mirror_path}" "{project_root}"
+# The clone leaves NO working tree when the mirror's frozen HEAD symref names a
+# pruned ref, and it exits 0 doing so. Pin the checkout to the revision this
+# warm was dispatched for; under `set -e` that turns the silent-empty case into
+# a failure. The trailing `--` forces the argument to be read as a revision, so
+# an unresolvable one fails with "fatal: invalid reference: <rev>" instead of
+# git's misleading "--detach does not take a path argument". See the note above
+# `let cmd` for the mechanism.
+git -C "{project_root}" checkout --detach {warm_generation} --
 # Install JS deps before indexing so scip-typescript can resolve
 # tsconfig `extends` that point at workspace packages (e.g. a shared
 # `tsconfig` package in a pnpm/turbo monorepo) — those live under
@@ -220,6 +303,7 @@ exec {bin} warm-graph "{project_id}"
 "#,
         mirror_path = mirror_path,
         project_root = project_root,
+        warm_generation = warm_generation,
         bin = WARM_COMMAND_BIN,
         project_id = project_id,
         js_install = crate::js_install::js_install_preamble(&project_root, js_workspace_roots),

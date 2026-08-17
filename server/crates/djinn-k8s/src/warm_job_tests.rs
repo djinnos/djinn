@@ -149,26 +149,64 @@ fn builds_warm_job_manifest_with_expected_shape() {
         "safe.directory must be inherited instead of persisted into $HOME/.gitconfig: {}",
         cmd[2]
     );
-    // Warm clone must give the coupling index enough history to walk
-    // `cursor..HEAD` without a forced unshallow on every warm. Depth
-    // 1000 covers the typical case (warm cadence is <100 new commits,
-    // so the saved cursor almost always lands in this window). See
-    // `cases/plan-a-warm-cargo-base-reuse-validated-working-v0-6-11-0-6-12`
-    // and `coupling_index::try_fetch_cursor` for the fallback path
-    // when the cursor is older than the clone depth. The substring
-    // match has to look for the leading space — bare `--depth 1`
-    // would otherwise match the first three chars of `--depth 1000`.
+    // The warm clone must come off the locally-mounted mirror, never over the
+    // network. Cloning the upstream URL made every warm Pod re-download the
+    // whole repo, which dominated cluster egress; the mirror is already mounted
+    // and already full, so `--local --shared` borrows its object db instead.
     assert!(
-        cmd[2].contains(" --depth 1000"),
-        "warm clone must use --depth 1000 so the saved coupling cursor is \
-         reachable on a fresh clone: {}",
+        cmd[2].contains(r#"git clone --local --shared "/mirror/proj-xyz.git""#),
+        "warm clone must be a --local --shared clone of the mounted mirror: {}",
         cmd[2]
     );
+    for forbidden in ["UPSTREAM_URL", "remote.origin.url"] {
+        assert!(
+            !cmd[2].contains(forbidden),
+            "warm clone must not resolve the upstream URL — that reintroduces a \
+             full network clone on every warm ({forbidden}): {}",
+            cmd[2]
+        );
+    }
+    // A `git clone --local` of a mirror whose frozen HEAD symref names a ref
+    // that upstream renamed away prints a warning, EXITS 0, and leaves a
+    // directory containing only `.git` — so the checkout must be explicit and
+    // must name the revision this warm was dispatched for. `warm_generation`
+    // is "deadbeef" above; assert that exact SHA, because a bare
+    // `contains("checkout")` would still pass if the builder pinned the wrong
+    // value (or a hardcoded branch name).
+    //
+    // What this can and cannot prove: this is a manifest-shape test on a pure
+    // builder, so it proves only that the rendered script asks git for that
+    // revision. It cannot prove the clone succeeds, that the revision exists
+    // in the mirror, or that the resulting working tree is non-empty — that
+    // needs a real repo, which lives in the mirror/workspace crates.
     assert!(
-        !cmd[2].contains(" --depth 1 "),
-        "warm clone must NOT use --depth 1 (forces an unshallow on every \
-         warm): {}",
+        cmd[2].contains(r#"git -C "/workspace/proj-xyz" checkout --detach deadbeef --"#),
+        "warm Pod must check out the dispatched warm_generation, never the \
+         mirror's HEAD symref: {}",
         cmd[2]
+    );
+    // Borrowing the mirror's object db gives the coupling index the mirror's
+    // complete history, so it can always walk `cursor..HEAD` without the
+    // `coupling_index::try_fetch_cursor` -> `git fetch --unshallow` fallback.
+    // A depth limit here would put that fallback back in play. See
+    // `cases/plan-a-warm-cargo-base-reuse-validated-working-v0-6-11-0-6-12`.
+    //
+    // Anchored to the clone line: an unanchored `!contains("--depth")` over the
+    // whole script would also fire on any future comment or unrelated command
+    // that merely mentions the flag.
+    let clone_line = cmd[2]
+        .lines()
+        .find(|l| l.starts_with("git clone "))
+        .expect("rendered script must have a `git clone` line");
+    assert!(
+        !clone_line.contains("--depth"),
+        "an alternates clone already has full history — a depth limit would \
+         reintroduce the unshallow fallback: {clone_line}"
+    );
+    assert!(
+        !clone_line.contains("--single-branch"),
+        "a local clone of the mirror is cheap; restricting refs only risks \
+         hiding the coupling cursor's branch: {clone_line}"
     );
     assert!(cmd[2].contains(WARM_COMMAND_BIN));
     assert!(cmd[2].contains("warm-graph \"proj-xyz\""));

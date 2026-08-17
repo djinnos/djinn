@@ -2,27 +2,125 @@
 //! Typed-evidence ingress coverage deliberately crosses the production Slot
 //! activity boundary before exercising the coordinator's live and cold paths.
 
+use crate::refinement::RefinementPhase;
 use crate::refinement_dispatch::refinement_cap_tests::{
     build_refinement_actor, seed_refinement_fixture, spawn_test_pool,
 };
-use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_core::models::NeedsEvidenceClaim;
+use djinn_core::models::{DispatchPause, NeedsEvidenceClaim};
+use djinn_core::{
+    events::{DjinnEventEnvelope, EventBus},
+    refinement_liveness::RefinementParkKind,
+};
 use djinn_db::test_support::{
     CanonicalTypedEvidenceReturnOutcomeForTest, TypedEvidenceFindingSnapshotForTest,
     TypedEvidenceIngressFixtureForTest, TypedEvidenceValidationSnapshotForTest,
 };
 use djinn_db::{
-    EffectiveCreatorProvenance, ProposalRepository, TaskRepository, TypedEvidenceRepository,
+    AdmitRefinementRunRequest, AtomicEvidenceRetryInput, DispatchPauseRepository,
+    DispatchPauseTarget, EffectiveCreatorProvenance, ParkRefinementRunRequest, ProposalRepository,
+    RefinementAdmissionOutcome, RefinementAdmissionSource, TaskRepository, TypedEvidenceRepository,
 };
 use djinn_slot::finalize_handlers::handle_submit_work;
 use tokio_util::sync::CancellationToken;
 
 struct Fixture {
     db: djinn_db::Database,
+    project_id: String,
+    user_id: String,
     proposal_id: String,
     spike_task_id: String,
     finding_id: String,
     delivery: TypedEvidenceIngressFixtureForTest,
+}
+
+/// Establish the durable Judge tuple required by the production atomic retry
+/// API. Authorization itself remains inside the repository mutation.
+async fn retry_authority(f: &Fixture, idempotency_key: &str) -> String {
+    let proposals = ProposalRepository::new(f.db.clone(), EventBus::noop());
+    let (run_id, generation) = match proposals
+        .admit_refinement_run(AdmitRefinementRunRequest {
+            proposal_id: f.proposal_id.clone(),
+            idempotency_key: idempotency_key.to_owned(),
+            source: RefinementAdmissionSource::ExplicitStart {
+                actor: "typed-evidence-failed-retry-conformance".to_owned(),
+            },
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .expect("admit retry authority run")
+    {
+        RefinementAdmissionOutcome::Admitted {
+            run_id, generation, ..
+        }
+        | RefinementAdmissionOutcome::Existing {
+            run_id, generation, ..
+        } => (run_id, generation),
+    };
+    let task = TaskRepository::new(f.db.clone(), EventBus::noop())
+        .create_in_project_with_provenance(
+            &f.project_id,
+            None,
+            EffectiveCreatorProvenance {
+                explicit_user_id: Some(&f.user_id),
+                source_task_id: None,
+                proposal_id: Some(&f.proposal_id),
+            },
+            "Retry authority",
+            "Authorize the failed typed-evidence retry",
+            "",
+            "task",
+            0,
+            "worker",
+            Some("open"),
+            Some("[]"),
+        )
+        .await
+        .expect("create retry authority task");
+    djinn_db::test_support::materialize_judge_authority_for_test(
+        &f.db,
+        &task.id,
+        &run_id,
+        generation.into(),
+    )
+    .await;
+    task.id
+}
+
+/// Persist the park that a cold coordinator must rehydrate before its typed
+/// evidence replay can advance the exact awaiting run into Advocate folding.
+async fn park_awaiting_evidence(f: &Fixture, idempotency_key: &str) -> String {
+    let proposals = ProposalRepository::new(f.db.clone(), EventBus::noop());
+    let (run_id, generation) = match proposals
+        .admit_refinement_run(AdmitRefinementRunRequest {
+            proposal_id: f.proposal_id.clone(),
+            idempotency_key: idempotency_key.to_owned(),
+            source: RefinementAdmissionSource::ExplicitStart {
+                actor: "commit-before-resume-test".to_owned(),
+            },
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .expect("admit durable awaiting-evidence run")
+    {
+        RefinementAdmissionOutcome::Admitted {
+            run_id, generation, ..
+        }
+        | RefinementAdmissionOutcome::Existing {
+            run_id, generation, ..
+        } => (run_id, generation),
+    };
+    assert!(
+        proposals
+            .park_refinement_run(ParkRefinementRunRequest {
+                run_id: run_id.clone(),
+                generation,
+                kind: RefinementParkKind::AwaitingEvidence,
+            })
+            .await
+            .expect("park exact durable run"),
+        "fixture must durably await evidence"
+    );
+    run_id
 }
 
 async fn fixture(outcome: CanonicalTypedEvidenceReturnOutcomeForTest) -> Fixture {
@@ -79,6 +177,8 @@ async fn fixture(outcome: CanonicalTypedEvidenceReturnOutcomeForTest) -> Fixture
         .expect("terminal producer task");
     Fixture {
         db,
+        project_id: refinement.project_id,
+        user_id: refinement.user_id,
         proposal_id: refinement.proposal_id,
         spike_task_id,
         finding_id: delivery.finding_id.clone(),
@@ -88,13 +188,23 @@ async fn fixture(outcome: CanonicalTypedEvidenceReturnOutcomeForTest) -> Fixture
 
 /// Real Slot submission followed by capture of its committed durable payload.
 async fn submitted_envelope(f: &Fixture, payload: serde_json::Value) -> DjinnEventEnvelope {
+    submitted_envelope_for_task(&f.db, &f.spike_task_id, payload).await
+}
+
+/// Production submit boundary for either the original terminal spike or its
+/// repository-allocated retry task.
+async fn submitted_envelope_for_task(
+    db: &djinn_db::Database,
+    spike_task_id: &str,
+    payload: serde_json::Value,
+) -> DjinnEventEnvelope {
     let context =
-        djinn_slot::test_helpers::agent_context_from_db(f.db.clone(), CancellationToken::new());
+        djinn_slot::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
     // Capture the producer's committed activity even when its independent
     // legacy structured-handoff branch declines this terminal submission.
-    let _ = handle_submit_work(&serde_json::json!({ "task_id": f.spike_task_id, "commit_title": "deliver typed evidence", "summary": "ordinary production summary", "files_changed": [], "remaining_concerns": [], "tribunal_evidence_return_v1": payload }), &f.spike_task_id, "fixture-session", &context).await;
-    let activity = TaskRepository::new(f.db.clone(), EventBus::noop())
-        .list_activity(&f.spike_task_id)
+    let _ = handle_submit_work(&serde_json::json!({ "task_id": spike_task_id, "commit_title": "deliver typed evidence", "summary": "ordinary production summary", "files_changed": [], "remaining_concerns": [], "tribunal_evidence_return_v1": payload }), spike_task_id, "fixture-session", &context).await;
+    let activity = TaskRepository::new(db.clone(), EventBus::noop())
+        .list_activity(spike_task_id)
         .await
         .unwrap()
         .into_iter()
@@ -218,7 +328,6 @@ fn assert_parity(
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_submit_live_and_cold_replay_have_complete_parity() {
     for (outcome, expected) in [
         (
@@ -295,6 +404,172 @@ async fn production_submit_live_and_cold_replay_have_complete_parity() {
     }
 }
 
+/// Stable conformance name for the complete independently persisted live/cold
+/// terminal-return snapshot parity matrix above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_evidence_terminal_replay() {
+    production_submit_live_and_cold_replay_have_complete_parity().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commit_before_resume_fault_cold_recovery_reuses_receipt_and_folds_advocate_once() {
+    let f = fixture(CanonicalTypedEvidenceReturnOutcomeForTest::Resolved).await;
+    let run_id = park_awaiting_evidence(&f, "commit-before-resume-ungated").await;
+    let envelope = submitted_envelope(
+        &f,
+        serde_json::from_str(&f.delivery.return_payload).expect("canonical return payload"),
+    )
+    .await;
+    let raw = envelope.payload["payload"].to_string();
+    let (events, _) = tokio::sync::broadcast::channel(16);
+    let mut interrupted = build_refinement_actor(&f.db, &events, spawn_test_pool(&f.db, 2));
+
+    interrupted.interrupt_after_evidence_commit_before_resume_for_test(&f.spike_task_id);
+    let committed = interrupted
+        .ingest_raw_tribunal_evidence_return_v1(&f.spike_task_id, &raw)
+        .await
+        .expect("the fault occurs only after the durable receipt commits");
+    let committed_snapshot =
+        djinn_db::test_support::typed_evidence_validation_snapshot_for_finding_for_test(
+            &f.db,
+            &f.finding_id,
+        )
+        .await;
+    let raw_finding =
+        djinn_db::test_support::typed_evidence_finding_snapshot_for_test(&f.db, &f.finding_id)
+            .await;
+    assert!(!committed.replayed);
+    assert_eq!(raw_finding.lifecycle, "evidence_received");
+    assert_eq!(committed_snapshot.transition_count, 1);
+    let proposal = ProposalRepository::new(f.db.clone(), EventBus::noop())
+        .get(&f.proposal_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(proposal.linked_spike_task_id.is_none() && proposal.needs_evidence_claim.is_none());
+
+    // Drop the interrupted actor; only a fresh actor may perform this replay.
+    drop(interrupted);
+    let (cold_events, _) = tokio::sync::broadcast::channel(16);
+    let mut cold = build_refinement_actor(&f.db, &cold_events, spawn_test_pool(&f.db, 2));
+    cold.recover_interrupted_refinements().await;
+    assert_eq!(
+        cold.active_refinements[&run_id].phase,
+        RefinementPhase::AwaitingEvidence
+    );
+    let replay = cold.recover_terminal_linked_spike_evidence().await;
+    assert_eq!(replay.len(), 1);
+    assert!(replay[0].replayed);
+    assert_eq!(replay[0].validation_id, committed.validation_id);
+    assert_eq!(
+        cold.active_refinements[&run_id].phase,
+        RefinementPhase::AdvocateRevision
+    );
+    assert_eq!(
+        djinn_db::test_support::typed_evidence_validation_snapshot_for_finding_for_test(
+            &f.db,
+            &f.finding_id,
+        )
+        .await,
+        committed_snapshot
+    );
+    let duplicate = cold
+        .ingest_raw_tribunal_evidence_return_v1(&f.spike_task_id, &raw)
+        .await
+        .unwrap();
+    assert!(duplicate.replayed);
+    assert_eq!(duplicate.validation_id, committed.validation_id);
+    assert_eq!(
+        djinn_db::test_support::typed_evidence_validation_snapshot_for_finding_for_test(
+            &f.db,
+            &f.finding_id,
+        )
+        .await,
+        committed_snapshot,
+        "duplicate live delivery preserves the complete receipt snapshot"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commit_before_resume_recovery_honors_dispatch_pause_and_proposal_freeze() {
+    for gate in ["global_dispatch_pause", "proposal_freeze"] {
+        let f = fixture(CanonicalTypedEvidenceReturnOutcomeForTest::Resolved).await;
+        let run_id = park_awaiting_evidence(&f, gate).await;
+        let envelope = submitted_envelope(
+            &f,
+            serde_json::from_str(&f.delivery.return_payload).expect("canonical return payload"),
+        )
+        .await;
+        let raw = envelope.payload["payload"].to_string();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let mut interrupted = build_refinement_actor(&f.db, &events, spawn_test_pool(&f.db, 2));
+        interrupted.interrupt_after_evidence_commit_before_resume_for_test(&f.spike_task_id);
+        let committed = interrupted
+            .ingest_raw_tribunal_evidence_return_v1(&f.spike_task_id, &raw)
+            .await
+            .unwrap();
+        drop(interrupted);
+
+        let proposals = ProposalRepository::new(f.db.clone(), EventBus::noop());
+        if gate == "global_dispatch_pause" {
+            DispatchPauseRepository::new(f.db.clone(), EventBus::noop())
+                .pause(
+                    DispatchPauseTarget::Global,
+                    DispatchPause {
+                        paused_by: "commit-before-resume-test".into(),
+                        paused_at: ::time::OffsetDateTime::now_utc()
+                            .format(&::time::format_description::well_known::Rfc3339)
+                            .unwrap(),
+                        reason: "prove recovery gate".into(),
+                        expires_at: None,
+                    },
+                )
+                .await
+                .unwrap();
+        } else {
+            proposals.set_frozen(&f.proposal_id, true).await.unwrap();
+        }
+        let task_count = TaskRepository::new(f.db.clone(), EventBus::noop())
+            .list_by_project(&f.project_id)
+            .await
+            .unwrap()
+            .len();
+        let (cold_events, _) = tokio::sync::broadcast::channel(16);
+        let mut cold = build_refinement_actor(&f.db, &cold_events, spawn_test_pool(&f.db, 2));
+        cold.recover_interrupted_refinements().await;
+        let replay = cold.recover_terminal_linked_spike_evidence().await;
+        assert!(replay[0].replayed);
+        assert_eq!(replay[0].validation_id, committed.validation_id);
+        assert_eq!(
+            cold.active_refinements[&run_id].phase,
+            RefinementPhase::AdvocateRevision
+        );
+        assert!(
+            cold.refinement_sessions.is_empty(),
+            "{gate}: Advocate was not dispatched"
+        );
+        assert_eq!(
+            TaskRepository::new(f.db.clone(), EventBus::noop())
+                .list_by_project(&f.project_id)
+                .await
+                .unwrap()
+                .len(),
+            task_count,
+            "{gate}: no Advocate task was created"
+        );
+        let raw_finding =
+            djinn_db::test_support::typed_evidence_finding_snapshot_for_test(&f.db, &f.finding_id)
+                .await;
+        assert_eq!(raw_finding.lifecycle, "evidence_received", "{gate}");
+        assert_eq!(raw_finding.validation_count, 1, "{gate}");
+        let proposal = proposals.get(&f.proposal_id).await.unwrap().unwrap();
+        assert!(
+            proposal.linked_spike_task_id.is_none() && proposal.needs_evidence_claim.is_none(),
+            "{gate}: receipt retains compatibility cleanup"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_invalid_deliveries_fail_raw_typed_lifecycle_and_keep_link() {
     for case in [
@@ -350,6 +625,260 @@ fn assert_failed_without_receipt(raw: &TypedEvidenceFindingSnapshotForTest, case
             .and_then(|transition| transition["to_lifecycle"].as_str()),
         Some("failed"),
         "{case} persists a raw failed transition"
+    );
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ImmutableAttemptOneSnapshot {
+    attempt_id: String,
+    task_status: String,
+    activity_history: Vec<(String, String)>,
+    validation_count: i64,
+}
+
+async fn immutable_attempt_one_snapshot(f: &Fixture) -> ImmutableAttemptOneSnapshot {
+    let tasks = TaskRepository::new(f.db.clone(), EventBus::noop());
+    let task = tasks.get(&f.spike_task_id).await.unwrap().unwrap();
+    let activity_history = tasks
+        .list_activity(&f.spike_task_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|activity| (activity.event_type, activity.payload))
+        .collect();
+    ImmutableAttemptOneSnapshot {
+        attempt_id: f.delivery.attempt_id.clone(),
+        task_status: task.status,
+        activity_history,
+        validation_count:
+            djinn_db::test_support::typed_evidence_validation_count_for_attempt_for_test(
+                &f.db,
+                &f.delivery.attempt_id,
+            )
+            .await,
+    }
+}
+
+/// One evolving finding: production ingress, repository retry authority, and
+/// the coordinator dispatch seam prove the fixture's documented contract.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_evidence_failed_retry_v1() {
+    let fixture_json: serde_json::Value = serde_json::from_str(include_str!(
+        "../tests/fixtures/typed_evidence_failed_retry_v1.json"
+    ))
+    .expect("versioned fixture is valid JSON");
+    assert_eq!(fixture_json["version"], 1);
+    assert_eq!(fixture_json["fixture"], "typed_evidence_failed_retry_v1");
+
+    let f = fixture(CanonicalTypedEvidenceReturnOutcomeForTest::Resolved).await;
+    let mut malformed: serde_json::Value =
+        serde_json::from_str(&f.delivery.return_payload).unwrap();
+    malformed["checks"] = serde_json::json!("not an array");
+    let attempt_one_event = submitted_envelope(&f, malformed).await;
+    let (events, _) = tokio::sync::broadcast::channel(16);
+    let mut first_actor = build_refinement_actor(&f.db, &events, spawn_test_pool(&f.db, 2));
+    first_actor.handle_event(attempt_one_event).await;
+    let before_retry =
+        djinn_db::test_support::typed_evidence_finding_snapshot_for_test(&f.db, &f.finding_id)
+            .await;
+    assert_failed_without_receipt(&before_retry, "production malformed attempt one");
+    assert_eq!(before_retry.attempt_id, f.delivery.attempt_id);
+    let immutable_attempt_one = immutable_attempt_one_snapshot(&f).await;
+    assert_eq!(immutable_attempt_one.task_status, "closed");
+    assert_eq!(immutable_attempt_one.validation_count, 0);
+    assert_eq!(
+        immutable_attempt_one
+            .activity_history
+            .iter()
+            .filter(|(event_type, _)| event_type == "tribunal_evidence_return_v1")
+            .count(),
+        1
+    );
+
+    let authority_task_id = retry_authority(&f, "failed-retry-conformance").await;
+    let failed_transition_id = before_retry
+        .transition_ids
+        .last()
+        .cloned()
+        .expect("failed ingress transition has durable identity");
+    let proposals = ProposalRepository::new(f.db.clone(), EventBus::noop());
+    assert!(
+        proposals
+            .retry_evidence_atomically(AtomicEvidenceRetryInput {
+                finding_id: f.finding_id.clone(),
+                failed_transition_id: uuid::Uuid::now_v7().to_string(),
+                caller_user_id: f.user_id.clone(),
+            })
+            .await
+            .is_err(),
+        "stale failed-transition is rejected by repository authority"
+    );
+    let first = proposals
+        .retry_evidence_atomically(AtomicEvidenceRetryInput {
+            finding_id: f.finding_id.clone(),
+            failed_transition_id: failed_transition_id.clone(),
+            caller_user_id: f.user_id.clone(),
+        })
+        .await
+        .expect("authorized retry consumes retained failed compatibility link");
+    assert_eq!(first.allocation.sequence, 2);
+    assert_ne!(authority_task_id, first.allocation.spike_task_id);
+    let after_retry =
+        djinn_db::test_support::typed_evidence_finding_snapshot_for_test(&f.db, &f.finding_id)
+            .await;
+    assert_eq!(after_retry.lifecycle, "demanded");
+    assert_eq!(after_retry.attempt_id, first.allocation.attempt_id);
+    assert_eq!(
+        &after_retry.transitions[..before_retry.transitions.len()],
+        before_retry.transitions.as_slice()
+    );
+    assert_eq!(
+        immutable_attempt_one_snapshot(&f).await,
+        immutable_attempt_one
+    );
+    let proposal = proposals.get(&f.proposal_id).await.unwrap().unwrap();
+    assert_eq!(
+        proposal.linked_spike_task_id.as_deref(),
+        Some(first.allocation.spike_task_id.as_str()),
+        "authorized retry atomically moves the retained compatibility link"
+    );
+
+    let duplicate = proposals
+        .retry_evidence_atomically(AtomicEvidenceRetryInput {
+            finding_id: f.finding_id.clone(),
+            failed_transition_id: failed_transition_id.clone(),
+            caller_user_id: f.user_id.clone(),
+        })
+        .await
+        .expect("duplicate retry reads allocation from repository authority");
+    assert!(duplicate.replayed);
+    assert_eq!(first.allocation, duplicate.allocation);
+    let occupied = proposals
+        .retry_evidence_atomically(AtomicEvidenceRetryInput {
+            finding_id: f.finding_id.clone(),
+            failed_transition_id: after_retry.transition_ids.last().cloned().unwrap(),
+            caller_user_id: f.user_id.clone(),
+        })
+        .await;
+    assert!(
+        matches!(
+            occupied,
+            Err(djinn_db::Error::InvalidTransition(message)) if message == "active_evidence_conflict"
+        ),
+        "occupied retry slot is rejected by repository authority"
+    );
+    let open_spikes = TaskRepository::new(f.db.clone(), EventBus::noop())
+        .list_by_project(&f.project_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|task| {
+            task.issue_type == "spike" && matches!(task.status.as_str(), "open" | "in_progress")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        open_spikes.len(),
+        1,
+        "exactly one evidence task is open or active"
+    );
+    assert_eq!(open_spikes[0].id, first.allocation.spike_task_id);
+
+    crate::evidence_dispatch_recovery::set_evidence_dispatch_test_script(
+        &first.allocation.spike_task_id,
+        [
+            crate::evidence_dispatch_recovery::EvidenceDispatchTestOutcome::EnqueueFailed,
+            crate::evidence_dispatch_recovery::EvidenceDispatchTestOutcome::Accepted,
+            crate::evidence_dispatch_recovery::EvidenceDispatchTestOutcome::AlreadyActive,
+        ],
+        true,
+    );
+    let (dispatch_events, _) = tokio::sync::broadcast::channel(16);
+    let mut dispatcher = build_refinement_actor(&f.db, &dispatch_events, spawn_test_pool(&f.db, 2));
+    dispatcher.redrive_demanded_evidence_dispatches().await;
+    let after_enqueue_failure =
+        djinn_db::test_support::typed_evidence_finding_snapshot_for_test(&f.db, &f.finding_id)
+            .await;
+    assert_eq!(after_enqueue_failure.lifecycle, "demanded");
+    assert_eq!(
+        after_enqueue_failure.attempt_id,
+        first.allocation.attempt_id
+    );
+    assert_eq!(after_enqueue_failure.transitions, after_retry.transitions);
+    assert_eq!(
+        immutable_attempt_one_snapshot(&f).await,
+        immutable_attempt_one
+    );
+    dispatcher.redrive_demanded_evidence_dispatches().await;
+    let after_activation_failure =
+        djinn_db::test_support::typed_evidence_finding_snapshot_for_test(&f.db, &f.finding_id)
+            .await;
+    assert_eq!(after_activation_failure.lifecycle, "demanded");
+    assert_eq!(
+        after_activation_failure.attempt_id,
+        first.allocation.attempt_id
+    );
+    assert_eq!(
+        after_activation_failure.transitions,
+        after_retry.transitions
+    );
+    assert_eq!(
+        immutable_attempt_one_snapshot(&f).await,
+        immutable_attempt_one
+    );
+    drop(dispatcher);
+
+    let (restart_events, _) = tokio::sync::broadcast::channel(16);
+    let mut restarted = build_refinement_actor(&f.db, &restart_events, spawn_test_pool(&f.db, 2));
+    restarted.redrive_demanded_evidence_dispatches().await;
+    let after_dispatch =
+        djinn_db::test_support::typed_evidence_finding_snapshot_for_test(&f.db, &f.finding_id)
+            .await;
+    assert_eq!(after_dispatch.lifecycle, "spike_active");
+    assert_eq!(after_dispatch.attempt_id, first.allocation.attempt_id);
+    assert_eq!(
+        &after_dispatch.transitions[..before_retry.transitions.len()],
+        before_retry.transitions.as_slice()
+    );
+    assert_eq!(
+        immutable_attempt_one_snapshot(&f).await,
+        immutable_attempt_one
+    );
+
+    let mut valid: serde_json::Value = serde_json::from_str(&f.delivery.return_payload).unwrap();
+    valid["attempt_id"] = serde_json::json!(first.allocation.attempt_id);
+    valid["spike_task_id"] = serde_json::json!(first.allocation.spike_task_id);
+    let valid_event =
+        submitted_envelope_for_task(&f.db, &first.allocation.spike_task_id, valid).await;
+    // `submit_work` durably emits the typed activity but deliberately does not
+    // close its task. The coordinator's production ingress accepts terminal
+    // evidence only from a closed spike, so finish this exact allocated retry
+    // through the repository status transition before consuming its committed
+    // envelope. This is the production terminal task action, not fixture repair.
+    TaskRepository::new(f.db.clone(), EventBus::noop())
+        .set_status_with_reason(&first.allocation.spike_task_id, "closed", Some("completed"))
+        .await
+        .expect("terminally close the exact allocated retry task");
+    restarted.handle_event(valid_event).await;
+    let receipt = djinn_db::test_support::typed_evidence_validation_snapshot_for_finding_for_test(
+        &f.db,
+        &f.finding_id,
+    )
+    .await;
+    assert_eq!(receipt.finding_lifecycle, "evidence_received");
+    assert_eq!(receipt.transition_count, 1);
+    assert_eq!(
+        immutable_attempt_one_snapshot(&f).await,
+        immutable_attempt_one
+    );
+    assert_eq!(
+        TaskRepository::new(f.db.clone(), EventBus::noop())
+            .get(&f.spike_task_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "closed",
+        "terminal attempt one never reopens"
     );
 }
 
