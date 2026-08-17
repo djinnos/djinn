@@ -8,12 +8,11 @@ use crate::refinement_dispatch::refinement_cap_tests::{
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::NeedsEvidenceClaim;
 use djinn_db::test_support::{
-    TypedEvidenceFindingSnapshotForTest, TypedEvidenceIngressFixtureForTest,
-    TypedEvidenceValidationSnapshotForTest,
+    CanonicalTypedEvidenceReturnOutcomeForTest, TypedEvidenceFindingSnapshotForTest,
+    TypedEvidenceIngressFixtureForTest, TypedEvidenceValidationSnapshotForTest,
 };
 use djinn_db::{
-    CanonicalTypedEvidenceReturnOutcomeForTest, EffectiveCreatorProvenance, ProposalRepository,
-    TaskRepository, TypedEvidenceRepository,
+    EffectiveCreatorProvenance, ProposalRepository, TaskRepository, TypedEvidenceRepository,
 };
 use djinn_slot::finalize_handlers::handle_submit_work;
 use tokio_util::sync::CancellationToken;
@@ -380,5 +379,34 @@ async fn non_envelope_terminal_activity_never_creates_typed_receipt() {
             )
         }),
         "ordinary closure produces no typed terminal transition"
+    );
+
+    // Recovery over the same payload-free terminal state must not infer receipt.
+    drop(actor);
+    let (events, _) = tokio::sync::broadcast::channel(16);
+    let mut cold_actor = build_refinement_actor(&f.db, &events, spawn_test_pool(&f.db, 2));
+    assert!(
+        cold_actor
+            .recover_terminal_linked_spike_evidence()
+            .await
+            .is_empty(),
+        "cold recovery cannot manufacture a typed receipt"
+    );
+    let raw =
+        djinn_db::test_support::typed_evidence_finding_snapshot_for_test(&f.db, &f.finding_id)
+            .await;
+    assert_eq!(raw.lifecycle, "spike_active");
+    assert_eq!(
+        raw.validation_count, 0,
+        "cold recovery persisted no receipt"
+    );
+    assert!(
+        raw.transitions.iter().all(|transition| {
+            !matches!(
+                transition["to_lifecycle"].as_str(),
+                Some("evidence_received" | "failed")
+            )
+        }),
+        "cold recovery produces no typed terminal transition"
     );
 }
