@@ -772,6 +772,11 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
             "fixture must contain exactly the seeded attempt PR owner"
         );
         assert_eq!(
+            before_counts.attempt_pr_identities,
+            Some(1),
+            "fixture must contain exactly one complete attempt PR identity"
+        );
+        assert_eq!(
             before_counts.deliveries,
             Some(0),
             "fixture must begin with an exact empty delivery ledger"
@@ -818,7 +823,8 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
         };
         let before_epoch = DirectDeliveryCapabilityRepository::new(db.clone())
             .probe()
-            .await;
+            .await
+            .map_err(|error| error.to_string());
         clear_boundary_operations();
         let outcome = supervisor_pr_open(&spec, &task, &callbacks).await;
         let operations = take_boundary_operations();
@@ -843,7 +849,8 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
         let after_task = tasks.get(&task.id).await.unwrap().unwrap();
         let after_epoch = DirectDeliveryCapabilityRepository::new(db.clone())
             .probe()
-            .await;
+            .await
+            .map_err(|error| error.to_string());
         assert_eq!(
             after_epoch, before_epoch,
             "supervisor must preserve the exact readable or fail-closed epoch probe"
@@ -1196,6 +1203,11 @@ async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
         "SupportedDisabled fixture must contain exactly one attempt PR identity"
     );
     assert_eq!(
+        before_counts.attempt_pr_identities,
+        Some(1),
+        "SupportedDisabled fixture must contain exactly one complete attempt PR identity"
+    );
+    assert_eq!(
         before_counts.deliveries,
         Some(0),
         "SupportedDisabled fixture must snapshot an exact empty ledger"
@@ -1538,6 +1550,11 @@ async fn supported_active_explicit_legacy_adopts_through_every_poller() {
         before_counts.build_attempts,
         Some(1),
         "explicit-legacy fixture must contain exactly one attempt PR identity"
+    );
+    assert_eq!(
+        before_counts.attempt_pr_identities,
+        Some(1),
+        "explicit-legacy fixture must contain exactly one complete attempt PR identity"
     );
     assert_eq!(
         before_counts.deliveries,

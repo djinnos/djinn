@@ -52,6 +52,7 @@ pub async fn disable_direct_delivery_epoch_for_test(db: &Database) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirectDeliveryMatrixCountsForTest {
     pub build_attempts: Option<i64>,
+    pub attempt_pr_identities: Option<i64>,
     pub deliveries: Option<i64>,
 }
 
@@ -66,12 +67,20 @@ pub async fn direct_delivery_matrix_counts_for_test(
             .fetch_one(db.pool())
             .await
             .ok();
+    let attempt_pr_identities = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM proposal_build_attempts \
+         WHERE proposal_pr_number IS NOT NULL AND proposal_pr_url IS NOT NULL",
+    )
+    .fetch_one(db.pool())
+    .await
+    .ok();
     let deliveries = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM task_deliveries")
         .fetch_one(db.pool())
         .await
         .ok();
     DirectDeliveryMatrixCountsForTest {
         build_attempts,
+        attempt_pr_identities,
         deliveries,
     }
 }
