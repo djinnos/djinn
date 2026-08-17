@@ -2079,6 +2079,14 @@ impl AppState {
 
         self.restore_model_health_state().await;
 
+        // Keep that snapshot durable. Without this loop the breaker's
+        // "persisted" quarantine state only ever reached the database when an
+        // operator ran an admin command (see `run_model_health_persist_loop`).
+        let persist_self = self.clone();
+        tokio::spawn(async move {
+            persist_self.run_model_health_persist_loop().await;
+        });
+
         // NOTE: stale-session finalization is a mutating sweep and now runs in
         // `become_leader()` — only the active (lock-holding) pod may touch
         // `running` sessions, otherwise a standby pod would interrupt the
@@ -2894,6 +2902,47 @@ impl AppState {
                 }
             }
             Err(e) => tracing::warn!(error = %e, "failed to serialize model health state"),
+        }
+    }
+
+    /// Persist the model-health snapshot on a fixed cadence, and once more on
+    /// shutdown.
+    ///
+    /// Until this existed, `persist_model_health_state` had exactly three
+    /// callers, all of them the human `model_health` reset/reset_all/enable
+    /// actions. Nothing wrote the snapshot periodically and nothing wrote it at
+    /// shutdown, so every property the breaker documents as "persisted" — the
+    /// hard-disable latch, its escalation tier, its probation state and its
+    /// wall-clock probe deadline — was in practice only as durable as the last
+    /// time an operator happened to run an admin command. A quarantined model
+    /// could be silently forgiven by a deploy, which is precisely the laundering
+    /// the probation mechanism exists to prevent.
+    ///
+    /// The cadence is deliberately short relative to the 6h base quarantine: the
+    /// worst case is losing one interval of quarantine progress on an ungraceful
+    /// kill, and at five minutes that is negligible against every deadline the
+    /// breaker tracks. The write is a single settings-row upsert.
+    async fn run_model_health_persist_loop(self) {
+        const PERSIST_INTERVAL: Duration = Duration::from_secs(5 * 60);
+        let cancel = self.cancel().clone();
+        let mut ticker = tokio::time::interval(PERSIST_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first tick completes immediately; skip it so startup does not
+        // immediately re-persist what `restore_model_health_state` just loaded.
+        ticker.tick().await;
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    self.persist_model_health_state().await;
+                }
+                _ = cancel.cancelled() => {
+                    // Graceful shutdown: take one final snapshot so an orderly
+                    // restart resumes the exact quarantine state it left.
+                    self.persist_model_health_state().await;
+                    tracing::debug!("model-health persist loop stopped; final snapshot written");
+                    return;
+                }
+            }
         }
     }
 

@@ -1,7 +1,7 @@
 // djinn:allow-oversize — per-(scope, model) breaker state: typed-failure, throttle, stall and transient ladders share one mutex-guarded catalog.
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use djinn_core::clock::{Clock, SystemClock};
 use serde::{Deserialize, Serialize};
@@ -169,47 +169,99 @@ const _: () = assert!(
     "HARD_DISABLE_MAX_PROBE_TIER must be large enough to actually reach the ceiling"
 );
 
-/// Trips required to re-quarantine a bucket that is on **probation** — i.e. one
-/// whose latch was released by a successful half-open probe but which has not
-/// yet re-proven itself (see [`HARD_DISABLE_PROBATION_SUCCESSES`]).
+/// Successful sessions a bucket on probation must win to have its hard-disable
+/// history forgiven, out of a trial of [`HARD_DISABLE_PROBATION_TRIAL_SESSIONS`].
 ///
-/// A probation bucket has already demonstrated it can reach
-/// [`TRIP_RATE_CEILING`], and it was handed the lane back on the strength of a
-/// SINGLE session. Making it earn eight fresh trips before it can be
-/// re-quarantined is what turns a lucky probe into a flap: the first version of
-/// this change cleared `trip_times`, `disable_ttl_trips` and the quarantine tier
-/// on a probe success, leaving the bucket byte-identical to a never-tripped
-/// model. Measured against the `xiaomi-token-plan-sgp/mimo-v2.5-pro` profile
-/// (78 failures / 16 successes — roughly one success in six), that produced one
-/// lucky probe followed by **4712 exposed sessions in 30 days and no re-latch**:
-/// strictly worse than the permanent latch it replaced. The escalation ladder
-/// was only ever reachable by a model whose backend was completely gone, which
-/// is not the class either incident belongs to.
-///
-/// `1` — a single trip re-quarantines. A trip still costs
-/// [`CIRCUIT_BREAKER_THRESHOLD`] consecutive breaker-eligible failures, so a
-/// genuinely recovered model (which produces none) sails through probation with
-/// full throughput, while an intermittently-broken one is back in quarantine
-/// within a handful of sessions — and at the NEXT tier, because the tier is
-/// preserved across the release.
-const HARD_DISABLE_PROBATION_TRIP_CEILING: usize = 1;
-
-/// Consecutive successful sessions a bucket on probation must produce before the
-/// hard-disable history is forgiven and it returns to the ordinary
-/// [`TRIP_RATE_CEILING`] with a reset quarantine tier.
+/// Probation is the state a bucket enters when a half-open probe SUCCEEDS. The
+/// lane reopens at full throughput — that is what fixes the 4-day outage — but
+/// the quarantine tier is preserved and the bucket must win a short,
+/// hard-bounded trial before its history is written off.
 ///
 /// Deliberately evidence-based rather than clock-based: "prove you work" is the
 /// question probation asks, and a wall-clock window would forgive a model that
-/// was merely idle. `5` separates the two incident profiles cleanly — the
-/// recovered model from the 4-day outage went 10-for-10 immediately and clears
-/// probation on its fifth session, while a one-success-in-six model has a
-/// ~1-in-7776 chance of ever clearing it and therefore stays permanently one
-/// trip away from re-quarantine.
-///
-/// Runtime-only counter (`consecutive_successes`): a restart restarts the streak,
-/// which only ever keeps a bucket on probation LONGER. That is the safe
-/// direction.
+/// was merely idle.
 const HARD_DISABLE_PROBATION_SUCCESSES: u32 = 5;
+
+/// Hard ceiling on how many dispatches a bucket on probation may be handed
+/// before it is either forgiven or re-quarantined.
+///
+/// ## Why probation is counted, not streaked
+///
+/// The first version of probation re-quarantined on a *trip*, and a trip needs
+/// [`CIRCUIT_BREAKER_THRESHOLD`] **consecutive** breaker-eligible failures, with
+/// any interleaved success resetting that counter. That made probation defeated
+/// by failure CLUSTERING rather than by failure rate: a model that never happens
+/// to fail three times in a row was never re-quarantined at all, however bad it
+/// was. Measured over 30 simulated days with probation nominally in force:
+///
+/// ```text
+///   one success in 2 → 42840 exposed, never re-quarantined
+///   one success in 3 → 42840 exposed, never re-quarantined
+///   F,F,S repeating  → 40682 exposed, never re-quarantined
+///   one success in 6 →    17 exposed  (the single input the old test asserted)
+/// ```
+///
+/// 42840 is bit-for-bit the number the pre-probation version was rejected for.
+/// `origin/main` exposes 0. So the bound has to be a property of the mechanism
+/// rather than of the input distribution.
+///
+/// ## The bound
+///
+/// Probation is now a fixed trial: **win [`HARD_DISABLE_PROBATION_SUCCESSES`] of
+/// at most this many sessions**. Successes and failures are counted
+/// independently and neither resets the other, so clustering is irrelevant. The
+/// trial resolves in one of three ways, all of them inside this many dispatches:
+///
+/// * [`HARD_DISABLE_PROBATION_SUCCESSES`] wins → history forgiven;
+/// * [`probation_failure_ceiling`] losses → re-quarantined one tier higher (the
+///   point at which winning has become arithmetically impossible);
+/// * this many dispatches consumed without either → re-quarantined.
+///
+/// The third clause is what makes the bound unconditional. It is counted in
+/// [`HealthTracker::note_dispatch_accepted`], at the moment a task is actually
+/// exposed, so it holds even when sessions produce no outcome record at all
+/// (killed task, leader failover, pod OOM) — the same fail-closed reasoning as
+/// the probe itself. Exposure per released quarantine is therefore at most
+/// `1 + HARD_DISABLE_PROBATION_TRIAL_SESSIONS` sessions, by construction,
+/// against any input whatsoever.
+///
+/// `6` leaves a genuinely recovered model room for one bad session out of six
+/// (the 4-day outage's model went 10-for-10 and clears on its fifth), while a
+/// one-success-in-six model needs at least 5 wins in 6 — probability
+/// `C(6,5)·(1/6)^5·(5/6) + (1/6)^6 ≈ 0.00066`, about 1 in 1500 — so it is
+/// re-quarantined essentially every cycle, one rung higher each time.
+const HARD_DISABLE_PROBATION_TRIAL_SESSIONS: u32 = 6;
+
+const _: () = assert!(
+    HARD_DISABLE_PROBATION_TRIAL_SESSIONS >= HARD_DISABLE_PROBATION_SUCCESSES,
+    "the probation trial must be long enough that the bucket can actually win it"
+);
+
+/// Failures that make the probation trial unwinnable and therefore re-quarantine
+/// the bucket at once. Derived, not tuned: once this many sessions are lost,
+/// [`HARD_DISABLE_PROBATION_SUCCESSES`] wins can no longer fit inside
+/// [`HARD_DISABLE_PROBATION_TRIAL_SESSIONS`].
+///
+/// This counts EVERY kind of failure record, including a throttle-classified
+/// stall (`record_stall(escalate = false)`). That is deliberate, and it is what
+/// makes probation bite on the class the 5.75h flap incident actually belonged
+/// to: the throttle ladder normally waits for
+/// [`PERSISTENT_THROTTLE_TRIP_THRESHOLD`] (6) consecutive trips before it
+/// escalates at all, so a bucket on probation would otherwise burn six 429
+/// crashes before being re-quarantined. On probation it burns two.
+const fn probation_failure_ceiling() -> u32 {
+    HARD_DISABLE_PROBATION_TRIAL_SESSIONS - HARD_DISABLE_PROBATION_SUCCESSES + 1
+}
+
+/// Wall-clock instant as whole Unix seconds. Pre-epoch times (only reachable
+/// from a badly-skewed host clock) render as a negative offset rather than
+/// panicking.
+fn unix_seconds(wall: SystemTime) -> i64 {
+    match wall.duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_secs() as i64,
+        Err(e) => -(e.duration().as_secs() as i64),
+    }
+}
 
 /// Quarantine length for an escalation `tier`: [`HARD_DISABLE_QUARANTINE_BASE`]
 /// doubled once per prior failed probe, capped at [`HARD_DISABLE_QUARANTINE_MAX`].
@@ -374,10 +426,27 @@ pub struct ModelHealth {
     /// when the bucket is not hard-disabled; `Some(0)` when a probe is
     /// admissible right now. This is the field that answers "will this recover
     /// on its own, and when?" — the question an operator could not answer for
-    /// four days. Derived, like `cooldown_seconds_remaining`, so `restore_all`
-    /// ignores it and re-anchors from the persisted tier instead.
+    /// four days. Purely derived for display; `restore_all` reads the absolute
+    /// deadline below instead, so that a snapshot taken long before a boot is
+    /// not treated as if it were taken at boot.
     #[serde(default)]
     pub hard_disable_probe_seconds_remaining: Option<u64>,
+    /// Absolute **wall-clock** deadline for the next half-open probe, as a Unix
+    /// timestamp in seconds. `None` when the bucket is not hard-disabled.
+    ///
+    /// This is what makes a quarantine survive a restart without being either
+    /// wiped or extended. `Instant`s are monotonic and meaningless across a
+    /// process boundary, so the first version of this change re-anchored the
+    /// deadline at `now + quarantine_for_tier(tier)` on boot — charging a FULL
+    /// fresh quarantine every restart. Measured against this repo's real deploy
+    /// cadence (median gap 6.08h across the last 25 release tags, 12 of 24 gaps
+    /// under 6h, some as low as 0.6h) that starved the probe outright: a deploy
+    /// every 4h admitted **zero** probes in 30 days, and the escalation ladder
+    /// made it worse, not better — at the 7-day rung essentially every deploy
+    /// lands inside the quarantine. That is the 4-day outage reproduced through
+    /// a different door.
+    #[serde(default)]
+    pub hard_disable_probe_at_unix: Option<i64>,
     /// The bucket's quarantine was released by a successful probe but it has not
     /// yet produced enough clean sessions to have its hard-disable history
     /// forgiven: it is dispatchable at full throughput, but a single breaker
@@ -474,18 +543,29 @@ struct ModelState {
     /// Runtime-only: a restart drops it, which at worst costs one un-escalated
     /// quarantine, and `restore_all` re-anchors the deadline anyway.
     probe_outstanding: bool,
-    /// The latch was released by a successful half-open probe, but the bucket
-    /// has not yet re-proven itself with [`HARD_DISABLE_PROBATION_SUCCESSES`]
-    /// clean sessions. While set, a single trip re-quarantines the bucket at the
-    /// NEXT tier (see [`HARD_DISABLE_PROBATION_TRIP_CEILING`]).
+    /// The latch was released by a successful half-open probe, but the bucket has
+    /// not yet won its trial (see [`HARD_DISABLE_PROBATION_TRIAL_SESSIONS`]).
+    /// While set, the bucket is dispatchable at full throughput but every
+    /// dispatch and every outcome is counted against the probation ledger below.
     ///
     /// Persisted, because forgetting it across a restart is what would let an
-    /// intermittently-broken model reset its history by waiting for a deploy.
+    /// intermittently-broken model launder its history by waiting for a deploy.
     hard_disable_on_probation: bool,
-    /// Consecutive successful sessions with no intervening failure. Drives the
-    /// probation exit only. Runtime-only; a restart restarts the streak, which
-    /// keeps a bucket on probation longer (the safe direction).
-    consecutive_successes: u32,
+    /// Probation ledger: sessions won so far in the current trial. Reset by
+    /// `release_quarantine_to_probation`, so a success recorded while the bucket
+    /// was still QUARANTINED cannot pre-charge the trial — the flaw that let
+    /// four stray successes plus one probe success deliver an immediate full
+    /// pardon in the same call.
+    probation_successes: u32,
+    /// Probation ledger: sessions lost so far in the current trial. Counted
+    /// independently of `probation_successes` — neither resets the other — which
+    /// is what makes the trial immune to failure clustering.
+    probation_failures: u32,
+    /// Probation ledger: dispatches actually handed out during the current
+    /// trial, counted at acceptance. This is the outcome-independent bound: a
+    /// session that never reports anything still consumes trial budget, so
+    /// exposure is capped whatever the sessions do.
+    probation_dispatches: u32,
     /// Monotonic timestamps of recent breaker trips, pruned to
     /// [`TRIP_RATE_WINDOW`]. When its length reaches [`TRIP_RATE_CEILING`] the
     /// bucket is hard-disabled. Only genuine (escalating) trips are recorded —
@@ -543,46 +623,106 @@ impl ModelState {
             .count() as u32
     }
 
-    /// Trips required to (re-)quarantine this bucket right now: the ordinary
-    /// [`TRIP_RATE_CEILING`], or [`HARD_DISABLE_PROBATION_TRIP_CEILING`] while
-    /// the bucket is on probation after a released quarantine.
-    fn effective_trip_ceiling(&self) -> usize {
-        if self.hard_disable_on_probation {
-            HARD_DISABLE_PROBATION_TRIP_CEILING
+    /// Put a bucket back into quarantine, one rung further up the ladder when it
+    /// was already carrying a tier (a probation re-quarantine, or a failed
+    /// probe). Shared by every route into the hard-disabled state so they cannot
+    /// drift apart.
+    fn enter_quarantine(&mut self, now: Instant, escalate_tier: bool) {
+        self.hard_disable_probe_tier = if escalate_tier {
+            self.hard_disable_probe_tier
+                .saturating_add(1)
+                .min(HARD_DISABLE_MAX_PROBE_TIER)
         } else {
-            TRIP_RATE_CEILING
-        }
+            0
+        };
+        self.hard_disable_on_probation = false;
+        self.clear_probation_ledger();
+        self.hard_disabled = true;
+        // No ordinary cooldown: clear the deadline so `is_available` relies
+        // solely on the quarantine gate.
+        self.cooldown_until = None;
+        self.probe_available_at = Some(now + quarantine_for_tier(self.hard_disable_probe_tier));
+        self.probe_outstanding = false;
+    }
+
+    fn clear_probation_ledger(&mut self) {
+        self.probation_successes = 0;
+        self.probation_failures = 0;
+        self.probation_dispatches = 0;
     }
 
     /// Record a genuine breaker trip against the rolling trip-rate window and
     /// hard-disable the bucket if the ceiling is reached. Returns `true` when
     /// this trip crossed the ceiling (for one-shot logging).
+    ///
+    /// Note this is the ORDINARY path only. A bucket on probation is
+    /// re-quarantined by its trial ledger (`charge_probation_failure` /
+    /// `charge_probation_dispatch`), not by this rolling window: a trip needs
+    /// [`CIRCUIT_BREAKER_THRESHOLD`] *consecutive* failures, so keying probation
+    /// off it made probation defeated by failure clustering rather than by
+    /// failure rate. See [`HARD_DISABLE_PROBATION_TRIAL_SESSIONS`].
     fn register_trip(&mut self, now: Instant) -> bool {
         // Prune trips that have aged out of the window, then record this one.
         self.trip_times
             .retain(|t| now.duration_since(*t) < TRIP_RATE_WINDOW);
         self.trip_times.push(now);
-        if !self.hard_disabled && self.trip_times.len() >= self.effective_trip_ceiling() {
-            // A bucket on probation is RE-quarantining, so it resumes the
-            // escalation ladder rather than restarting it: the tier it carried
-            // out of its last quarantine is the tier it goes back in above.
-            // Without this, an intermittently-broken model that wins one probe
-            // per cycle would be quarantined for a flat 6h forever.
-            let relatch = self.hard_disable_on_probation;
-            self.hard_disable_probe_tier = if relatch {
-                self.hard_disable_probe_tier
-                    .saturating_add(1)
-                    .min(HARD_DISABLE_MAX_PROBE_TIER)
-            } else {
-                0
-            };
-            self.hard_disable_on_probation = false;
-            self.hard_disabled = true;
-            // No ordinary cooldown: clear the deadline so `is_available` relies
-            // solely on the quarantine gate below.
-            self.cooldown_until = None;
-            self.probe_available_at = Some(now + quarantine_for_tier(self.hard_disable_probe_tier));
-            self.probe_outstanding = false;
+        if !self.hard_disabled && self.trip_times.len() >= TRIP_RATE_CEILING {
+            self.enter_quarantine(now, false);
+            return true;
+        }
+        false
+    }
+
+    /// Charge one lost session against the probation trial, re-quarantining the
+    /// bucket when the trial has become unwinnable. Returns `true` if it did.
+    ///
+    /// Counted, never streaked, and counted for EVERY class of failure record —
+    /// including throttle-classified stalls, which the ordinary ladder would
+    /// otherwise let run to `PERSISTENT_THROTTLE_TRIP_THRESHOLD` (6) before
+    /// escalating at all.
+    fn charge_probation_failure(&mut self, now: Instant) -> bool {
+        if !self.hard_disable_on_probation {
+            return false;
+        }
+        self.probation_failures = self.probation_failures.saturating_add(1);
+        if self.probation_failures >= probation_failure_ceiling() {
+            self.enter_quarantine(now, true);
+            return true;
+        }
+        false
+    }
+
+    /// Charge one won session against the probation trial, forgiving the
+    /// hard-disable history once the bucket has won enough of them. Returns
+    /// `true` if probation ended.
+    fn charge_probation_success(&mut self) -> bool {
+        if !self.hard_disable_on_probation {
+            return false;
+        }
+        self.probation_successes = self.probation_successes.saturating_add(1);
+        if self.probation_successes >= HARD_DISABLE_PROBATION_SUCCESSES {
+            self.clear_hard_disable();
+            return true;
+        }
+        false
+    }
+
+    /// Charge one dispatch against the probation trial and re-quarantine the
+    /// bucket if the trial budget is now spent.
+    ///
+    /// This is the clause that makes the probation bound unconditional: it fires
+    /// on exposure rather than on outcome, so a run of sessions that never
+    /// report anything (killed task, leader failover, pod OOM) still ends the
+    /// trial instead of leaving the lane open indefinitely.
+    fn charge_probation_dispatch(&mut self, now: Instant) -> bool {
+        if !self.hard_disable_on_probation {
+            return false;
+        }
+        self.probation_dispatches = self.probation_dispatches.saturating_add(1);
+        if self.probation_dispatches >= HARD_DISABLE_PROBATION_TRIAL_SESSIONS
+            && self.probation_successes < HARD_DISABLE_PROBATION_SUCCESSES
+        {
+            self.enter_quarantine(now, true);
             return true;
         }
         false
@@ -636,14 +776,25 @@ impl ModelState {
     /// a bucket that reached eight trips in six hours, and treating it as a full
     /// pardon (clearing the tier, the trip window and the escalating cooldown)
     /// is what let a one-success-in-six model escape the ladder entirely. So the
-    /// tier survives, and until the bucket produces
-    /// [`HARD_DISABLE_PROBATION_SUCCESSES`] clean sessions a single trip puts it
-    /// straight back into quarantine one rung higher.
+    /// tier survives, and the bucket must win
+    /// [`HARD_DISABLE_PROBATION_SUCCESSES`] of at most
+    /// [`HARD_DISABLE_PROBATION_TRIAL_SESSIONS`] sessions before the history is
+    /// written off.
+    ///
+    /// The ledger is reset here, and that reset is load-bearing: successes
+    /// recorded while the bucket was still QUARANTINED must not pre-charge the
+    /// trial. Without it, four stray successes on a quarantined bucket (a
+    /// health-blind path, or sessions in flight at latch time — the class the
+    /// `record_success` gate itself calls routine) left the counter at four, so
+    /// the very next probe success released the latch and fell straight through
+    /// to the exit check in the same call: a full pardon, byte-identical to a
+    /// never-tripped model, from one probe.
     fn release_quarantine_to_probation(&mut self) {
         self.hard_disabled = false;
         self.probe_available_at = None;
         self.probe_outstanding = false;
         self.hard_disable_on_probation = true;
+        self.clear_probation_ledger();
         // `hard_disable_probe_tier` is deliberately PRESERVED.
         self.auto_disabled = false;
         self.cooldown_until = None;
@@ -661,6 +812,7 @@ impl ModelState {
         self.hard_disable_probe_tier = 0;
         self.probe_outstanding = false;
         self.hard_disable_on_probation = false;
+        self.clear_probation_ledger();
         self.auto_disabled = false;
         self.cooldown_until = None;
     }
@@ -684,7 +836,7 @@ impl ModelState {
         }
     }
 
-    fn to_health(&self, key: &HealthKey, now: Instant) -> ModelHealth {
+    fn to_health(&self, key: &HealthKey, now: Instant, wall_now: SystemTime) -> ModelHealth {
         ModelHealth {
             model_id: key.model_id.clone(),
             scope: key.scope.clone(),
@@ -700,6 +852,9 @@ impl ModelState {
             hard_disabled: self.hard_disabled,
             hard_disable_probe_tier: self.hard_disable_probe_tier,
             hard_disable_probe_seconds_remaining: self.probe_seconds_remaining(now),
+            hard_disable_probe_at_unix: self
+                .probe_seconds_remaining(now)
+                .map(|remaining| unix_seconds(wall_now).saturating_add(remaining as i64)),
             hard_disable_on_probation: self.hard_disable_on_probation,
             trips_in_window: self.trips_in_window(now),
         }
@@ -928,6 +1083,21 @@ impl HealthTracker {
             return;
         }
 
+        // Probation trial: one session lost. Charged for every failure class —
+        // including throttle-classified stalls, which the ordinary ladder would
+        // let run to PERSISTENT_THROTTLE_TRIP_THRESHOLD before escalating at all.
+        if state.charge_probation_failure(now) {
+            tracing::warn!(
+                model_id = %key.model_id,
+                scope = ?key.scope,
+                probation_failures = probation_failure_ceiling(),
+                probe_tier = state.hard_disable_probe_tier,
+                next_probe_in_secs = quarantine_for_tier(state.hard_disable_probe_tier).as_secs(),
+                "model lost its probation trial — re-quarantined one tier higher"
+            );
+            return;
+        }
+
         // If the previous cooldown expired, clear the flag so we can re-trip.
         if state.auto_disabled && state.is_available(now) {
             state.auto_disabled = false;
@@ -977,7 +1147,11 @@ impl HealthTracker {
         state.breaker_eligible_consecutive_failures = 0;
         state.transient_consecutive_failures = 0;
         state.total_successes += 1;
-        state.consecutive_successes = state.consecutive_successes.saturating_add(1);
+        // NOTE: nothing probation-related is charged before the quarantine gate
+        // below. The probation ledger is advanced only by
+        // `charge_probation_success`, which no-ops unless the bucket is actually
+        // on probation, so a success on a QUARANTINED bucket cannot pre-charge
+        // the trial it will later be handed.
 
         if state.hard_disabled {
             // Only an ADMITTED PROBE's success may release a quarantine. A
@@ -1002,9 +1176,15 @@ impl HealthTracker {
                 scope = ?scope,
                 probe_tier = state.hard_disable_probe_tier,
                 probation_successes_required = HARD_DISABLE_PROBATION_SUCCESSES,
+                probation_trial_sessions = HARD_DISABLE_PROBATION_TRIAL_SESSIONS,
                 "half-open probe succeeded — quarantine released onto probation \
-                 (one further trip re-quarantines at the next tier)"
+                 (must win {HARD_DISABLE_PROBATION_SUCCESSES} of the next \
+                 {HARD_DISABLE_PROBATION_TRIAL_SESSIONS} sessions)"
             );
+            // The probe's own success is NOT charged to the trial: the ledger was
+            // just reset, and the trial is about what the model does with the
+            // lane it has been handed back.
+            return;
         }
 
         // A productive session is proof the model recovered — reset the
@@ -1021,20 +1201,17 @@ impl HealthTracker {
         state.throttle_streak_started_at = None;
         state.last_trip_throttle = false;
 
-        // Probation exit: enough consecutive clean sessions to forgive the
-        // hard-disable history and hand back the ordinary `TRIP_RATE_CEILING`
-        // with a reset quarantine tier. A model that is actually healthy again
-        // reaches this in five sessions; a one-success-in-six model effectively
-        // never does, and so stays one trip away from re-quarantine.
-        if state.hard_disable_on_probation
-            && state.consecutive_successes >= HARD_DISABLE_PROBATION_SUCCESSES
-        {
-            state.clear_hard_disable();
+        // Probation trial: one session won. Counted, not streaked — an
+        // interleaved failure does not reset it, and does not need to, because
+        // the failure is counted independently against
+        // `probation_failure_ceiling()`.
+        if state.charge_probation_success() {
             tracing::info!(
                 model_id = %model_id,
                 scope = ?scope,
-                consecutive_successes = state.consecutive_successes,
-                "model re-proved itself after a released quarantine — probation cleared"
+                required = HARD_DISABLE_PROBATION_SUCCESSES,
+                "model won its probation trial after a released quarantine — \
+                 hard-disable history forgiven"
             );
         }
 
@@ -1050,7 +1227,9 @@ impl HealthTracker {
     /// For a healthy bucket this is a no-op. For a *quarantined* one it consumes
     /// the single half-open probe that [`ModelState::is_available`] just
     /// admitted, pushing the next probe deadline a full quarantine into the
-    /// future before the probe's verdict is known.
+    /// future before the probe's verdict is known. For one on **probation** it
+    /// spends a session of the trial budget, ending the trial when the budget
+    /// runs out.
     ///
     /// Consuming here rather than at the availability check is deliberate:
     /// `is_available` is a pure predicate consulted several times per dispatch
@@ -1070,6 +1249,21 @@ impl HealthTracker {
             return;
         };
         if !state.hard_disabled {
+            // Probation trial budget. Charged on EXPOSURE rather than on
+            // outcome, so a run of sessions that never report anything cannot
+            // hold the lane open: the trial ends either way.
+            if state.charge_probation_dispatch(now) {
+                tracing::warn!(
+                    model_id = %model_id,
+                    scope = ?scope,
+                    trial_sessions = HARD_DISABLE_PROBATION_TRIAL_SESSIONS,
+                    probe_tier = state.hard_disable_probe_tier,
+                    next_probe_in_secs =
+                        quarantine_for_tier(state.hard_disable_probe_tier).as_secs(),
+                    "model spent its probation trial budget without winning it — \
+                     re-quarantined one tier higher"
+                );
+            }
             return;
         }
         if !state.probe_available_at.is_some_and(|at| now >= at) {
@@ -1099,7 +1293,6 @@ impl HealthTracker {
         state.consecutive_failures += 1;
         state.breaker_eligible_consecutive_failures += 1;
         state.total_failures += 1;
-        state.consecutive_successes = 0;
 
         // Half-open probe verdict — see `apply_breaker_check_for`.
         if state.hard_disabled {
@@ -1113,6 +1306,21 @@ impl HealthTracker {
                     "half-open probe of a hard-disabled model failed — re-quarantined"
                 );
             }
+            return;
+        }
+
+        // Probation trial: one session lost. Charged for every failure class —
+        // including throttle-classified stalls, which the ordinary ladder would
+        // let run to PERSISTENT_THROTTLE_TRIP_THRESHOLD before escalating at all.
+        if state.charge_probation_failure(now) {
+            tracing::warn!(
+                model_id = %key.model_id,
+                scope = ?key.scope,
+                probation_failures = probation_failure_ceiling(),
+                probe_tier = state.hard_disable_probe_tier,
+                next_probe_in_secs = quarantine_for_tier(state.hard_disable_probe_tier).as_secs(),
+                "model lost its probation trial — re-quarantined one tier higher"
+            );
             return;
         }
 
@@ -1194,7 +1402,6 @@ impl HealthTracker {
         state.consecutive_failures += 1;
         state.transient_consecutive_failures += 1;
         state.total_failures += 1;
-        state.consecutive_successes = 0;
 
         // Half-open probe verdict — see `apply_breaker_check_for`, but WITHOUT
         // escalation (`escalate = false`). The probe produced nothing usable, so
@@ -1218,6 +1425,21 @@ impl HealthTracker {
                      — re-quarantined at the same tier, not escalated"
                 );
             }
+            return;
+        }
+
+        // Probation trial: one session lost. Charged for every failure class —
+        // including throttle-classified stalls, which the ordinary ladder would
+        // let run to PERSISTENT_THROTTLE_TRIP_THRESHOLD before escalating at all.
+        if state.charge_probation_failure(now) {
+            tracing::warn!(
+                model_id = %key.model_id,
+                scope = ?key.scope,
+                probation_failures = probation_failure_ceiling(),
+                probe_tier = state.hard_disable_probe_tier,
+                next_probe_in_secs = quarantine_for_tier(state.hard_disable_probe_tier).as_secs(),
+                "model lost its probation trial — re-quarantined one tier higher"
+            );
             return;
         }
 
@@ -1302,7 +1524,6 @@ impl HealthTracker {
         let state = map.entry(key.clone()).or_default();
         state.consecutive_failures += 1;
         state.total_failures += 1;
-        state.consecutive_successes = 0;
 
         // Half-open probe verdict — see `apply_breaker_check_for`. Note this
         // runs BEFORE the throttle-streak bookkeeping below: while quarantined
@@ -1320,6 +1541,21 @@ impl HealthTracker {
                     "half-open probe of a hard-disabled model stalled — re-quarantined"
                 );
             }
+            return;
+        }
+
+        // Probation trial: one session lost. Charged for every failure class —
+        // including throttle-classified stalls, which the ordinary ladder would
+        // let run to PERSISTENT_THROTTLE_TRIP_THRESHOLD before escalating at all.
+        if state.charge_probation_failure(now) {
+            tracing::warn!(
+                model_id = %key.model_id,
+                scope = ?key.scope,
+                probation_failures = probation_failure_ceiling(),
+                probe_tier = state.hard_disable_probe_tier,
+                next_probe_in_secs = quarantine_for_tier(state.hard_disable_probe_tier).as_secs(),
+                "model lost its probation trial — re-quarantined one tier higher"
+            );
             return;
         }
 
@@ -1430,7 +1666,11 @@ impl HealthTracker {
     pub fn all_health(&self) -> Vec<ModelHealth> {
         let now = self.now();
         let map = self.inner.lock().unwrap();
-        let mut health: Vec<_> = map.iter().map(|(key, s)| s.to_health(key, now)).collect();
+        let wall_now = self.clock.now();
+        let mut health: Vec<_> = map
+            .iter()
+            .map(|(key, s)| s.to_health(key, now, wall_now))
+            .collect();
         health.sort_by(|a, b| {
             a.scope
                 .cmp(&b.scope)
@@ -1554,6 +1794,7 @@ impl HealthTracker {
     /// Replace all tracked health state with a persisted snapshot.
     pub fn restore_all(&self, snapshot: Vec<ModelHealth>) {
         let now = self.now();
+        let wall_now = self.clock.now();
         let mut map = self.inner.lock().unwrap();
         map.clear();
         for health in snapshot {
@@ -1583,38 +1824,54 @@ impl HealthTracker {
                 // remaining seconds; availability is the quarantine gate only.
                 state.auto_disabled = true;
                 state.cooldown_until = None;
-                // `Instant`s cannot cross the persist boundary, so the
-                // quarantine deadline is re-anchored at `now` using the
-                // PERSISTED escalation tier. Two properties fall out, and both
-                // matter:
-                //
-                // * A restart can only ever DELAY the next probe — it charges a
-                //   full fresh quarantine — never shorten one and never fire a
-                //   probe at boot. A crash-loop or a rapid deploy train
-                //   therefore cannot be turned into a probe loop, and a
-                //   genuinely-dead model cannot be resurrected into a flap by
-                //   restarting the server.
-                // * Because the tier survives, a model that has failed its way
-                //   out to the 7-day rung stays on the 7-day rung. Dropping the
-                //   tier would silently demote it to the 6h base and quadruple
-                //   its daily exposure across every deploy.
-                //
-                // The cost is that a long-quarantined model's remaining wait
-                // restarts. That is the safe direction, and at the ceiling it is
-                // bounded by one extra week.
                 state.hard_disable_probe_tier = health
                     .hard_disable_probe_tier
                     .min(HARD_DISABLE_MAX_PROBE_TIER);
-                state.probe_available_at =
-                    Some(now + quarantine_for_tier(state.hard_disable_probe_tier));
+                // `Instant`s are monotonic and meaningless across a process
+                // boundary, so the quarantine's remaining time is carried as an
+                // absolute WALL-CLOCK deadline and converted back to a local
+                // deadline here. A restart therefore neither wipes the
+                // quarantine nor extends it: elapsed downtime counts against it
+                // exactly as uptime would.
+                //
+                // The alternative — re-anchoring at `now + quarantine_for_tier`
+                // — looked conservative and was not. It charged a FULL fresh
+                // quarantine on every boot, so against this repo's real deploy
+                // cadence (median gap 6.08h over the last 25 release tags, 12 of
+                // 24 gaps under 6h) the probe simply never fired: a deploy every
+                // 4h admitted ZERO probes in 30 days. The escalation ladder made
+                // it strictly worse, because at the 7-day rung essentially every
+                // deploy lands inside the quarantine. That is the 4-day outage
+                // reproduced through a different door, which is why the deadline
+                // is now persisted rather than recomputed.
+                //
+                // The remaining time is still clamped to this tier's quarantine:
+                // a corrupt or clock-skewed snapshot may shorten a quarantine
+                // (bounded by the ordinary ladder) but can never manufacture one
+                // longer than the tier allows.
+                let remaining = match health.hard_disable_probe_at_unix {
+                    Some(deadline) => Duration::from_secs(
+                        deadline.saturating_sub(unix_seconds(wall_now)).max(0) as u64,
+                    )
+                    .min(quarantine_for_tier(state.hard_disable_probe_tier)),
+                    // Pre-deadline snapshot (or a bucket persisted by an older
+                    // build): fall back to a full quarantine from now. Strictly
+                    // the conservative direction, and it self-corrects on the
+                    // next persist.
+                    None => quarantine_for_tier(state.hard_disable_probe_tier),
+                };
+                state.probe_available_at = Some(now + remaining);
             } else if health.hard_disable_on_probation {
                 // Released by a probe but not yet re-proven. Probation is
                 // persisted for the same reason the tier is: without it, a
                 // model whose quarantine keeps getting released by lucky probes
                 // could launder its history through a deploy and go back to
-                // needing eight fresh trips. The consecutive-success streak that
-                // ENDS probation is runtime-only, so a restart restarts it —
-                // keeping the bucket on probation longer, the safe direction.
+                // needing eight fresh trips. The trial LEDGER is runtime-only,
+                // so a restart restarts the trial from zero: the bucket must
+                // win its sessions again. That direction is safe — it can only
+                // keep a bucket on probation longer — and the trial is bounded
+                // by `HARD_DISABLE_PROBATION_TRIAL_SESSIONS` dispatches either
+                // way, so restarting it cannot become an exposure leak.
                 state.hard_disable_on_probation = true;
                 // The tier the bucket carried out of its last quarantine, so
                 // the re-latch a single trip triggers resumes the ladder one
@@ -1652,10 +1909,11 @@ impl HealthTracker {
     /// state if untracked).
     pub fn model_health(&self, scope: Option<&str>, model_id: &str) -> ModelHealth {
         let now = self.now();
+        let wall_now = self.clock.now();
         let key = HealthKey::new(scope, model_id);
         let map = self.inner.lock().unwrap();
         map.get(&key)
-            .map(|s| s.to_health(&key, now))
+            .map(|s| s.to_health(&key, now, wall_now))
             .unwrap_or(ModelHealth {
                 model_id: model_id.to_owned(),
                 scope: scope.map(str::to_owned),
@@ -1669,6 +1927,7 @@ impl HealthTracker {
                 hard_disabled: false,
                 hard_disable_probe_tier: 0,
                 hard_disable_probe_seconds_remaining: None,
+                hard_disable_probe_at_unix: None,
                 hard_disable_on_probation: false,
                 trips_in_window: 0,
             })
