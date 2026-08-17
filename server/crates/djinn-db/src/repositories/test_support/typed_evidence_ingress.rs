@@ -124,14 +124,64 @@ pub async fn seed_canonical_typed_evidence_ingress_fixture_for_test(
         .fetch_one(&mut *tx)
         .await
         .unwrap();
-    let finding_id = uuid::Uuid::now_v7().to_string();
-    let attempt_id = uuid::Uuid::now_v7().to_string();
+    // Coordinator fixtures first establish authority through
+    // `set_structured_needs_evidence_spike`, while standalone repository tests
+    // intentionally start without typed authority. Reuse only the exact active
+    // proposal/task binding; never create a competing unresolved finding or
+    // silently attach evidence facts to a different attempt.
+    let existing = sqlx::query(
+        "SELECT f.id AS finding_id,f.lifecycle,a.id AS attempt_id,a.evidence_plan_id \
+         FROM typed_evidence_findings f \
+         LEFT JOIN typed_evidence_attempts a \
+           ON a.finding_id=f.id AND a.spike_task_id=$2 \
+         WHERE f.proposal_id=$1 \
+           AND f.lifecycle IN ('demanded','spike_active','evidence_received','failed') \
+         FOR UPDATE OF f",
+    )
+    .bind(proposal_id)
+    .bind(spike_task_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .unwrap();
+    let (finding_id, attempt_id, attempt_exists) = if let Some(row) = existing {
+        assert_eq!(
+            row.get::<String, _>("lifecycle"),
+            "spike_active",
+            "canonical ingress fixture requires spike_active authority"
+        );
+        let attempt_id = row
+            .get::<Option<String>, _>("attempt_id")
+            .expect("active typed authority must belong to the exact spike task");
+        assert!(
+            row.get::<Option<String>, _>("evidence_plan_id").is_none(),
+            "canonical ingress fixture cannot replace an attempt's immutable evidence plan"
+        );
+        let already_shaped: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM typed_evidence_planned_checks WHERE attempt_id=$1 UNION ALL SELECT 1 FROM typed_evidence_validation_results WHERE attempt_id=$1)",
+        )
+        .bind(&attempt_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        assert!(
+            !already_shaped,
+            "canonical ingress fixture requires an unshaped, unvalidated authoritative attempt"
+        );
+        (row.get("finding_id"), attempt_id, true)
+    } else {
+        (
+            uuid::Uuid::now_v7().to_string(),
+            uuid::Uuid::now_v7().to_string(),
+            false,
+        )
+    };
     let session_id = uuid::Uuid::now_v7().to_string();
     let plan_id = uuid::Uuid::now_v7().to_string();
     let invocation_id = uuid::Uuid::now_v7().to_string();
     let command_id = format!("{check_id}-command");
     let secondary_id = format!("{check_id}-secondary");
-    sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,'spike_active','{}',1,$4)")
+    if !attempt_exists {
+        sqlx::query("INSERT INTO typed_evidence_findings (id,proposal_id,demand_hash,lifecycle,claim,demanded_revision_seq,created_by_task_id) VALUES ($1,$2,$3,'spike_active','{}',1,$4)")
             .bind(&finding_id)
             .bind(proposal_id)
             .bind(format!("ingress-demand-{finding_id}"))
@@ -139,13 +189,15 @@ pub async fn seed_canonical_typed_evidence_ingress_fixture_for_test(
             .execute(&mut *tx)
             .await
             .unwrap();
+    }
     sqlx::query("INSERT INTO sessions (id,project_id,task_id,model_id,agent_type,status) VALUES ($1,$2,$3,'fixture','worker','running')").bind(&session_id).bind(&project_id).bind(spike_task_id).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO evidence_plans (id,spike_task_id,session_id,captured_commit_sha,worktree_fingerprint) VALUES ($1,$2,$3,'abcdef0123456789','fixture')").bind(&plan_id).bind(spike_task_id).bind(&session_id).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO evidence_plan_checks (plan_id,ordinal,check_id,question,method) VALUES ($1,1,$2,'command observation','command')").bind(&plan_id).bind(&command_id).execute(&mut *tx).await.unwrap();
     if expected == CanonicalTypedEvidenceReturnOutcomeForTest::Partial {
         sqlx::query("INSERT INTO evidence_plan_checks (plan_id,ordinal,check_id,question,method) VALUES ($1,2,$2,'unavailable observation','code')").bind(&plan_id).bind(&secondary_id).execute(&mut *tx).await.unwrap();
     }
-    sqlx::query("INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id,evidence_plan_id) VALUES ($1,$2,1,$3,$4)")
+    if !attempt_exists {
+        sqlx::query("INSERT INTO typed_evidence_attempts (id,finding_id,sequence,spike_task_id,evidence_plan_id) VALUES ($1,$2,1,$3,$4)")
             .bind(&attempt_id)
             .bind(&finding_id)
             .bind(spike_task_id)
@@ -153,6 +205,7 @@ pub async fn seed_canonical_typed_evidence_ingress_fixture_for_test(
             .execute(&mut *tx)
             .await
             .unwrap();
+    }
     sqlx::query("INSERT INTO typed_evidence_planned_checks (id,attempt_id,ordinal,check_id,method,evidence_plan_id,evidence_plan_check_id) VALUES ($1,$2,1,$3,'command',$4,$3)")
         .bind(uuid::Uuid::now_v7().to_string())
         .bind(&attempt_id)

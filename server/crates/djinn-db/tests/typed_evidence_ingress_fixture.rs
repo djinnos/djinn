@@ -1,5 +1,6 @@
+use djinn_core::{events::EventBus, models::NeedsEvidenceClaim};
 use djinn_db::{
-    Database, TypedEvidenceRepository,
+    Database, ProposalRepository, TypedEvidenceRepository,
     test_support::{
         CanonicalTypedEvidenceReturnOutcomeForTest, UsageTestTaskSeed,
         seed_canonical_typed_evidence_ingress_fixture_for_test, seed_project, seed_task_row,
@@ -29,6 +30,67 @@ async fn fixture_parent_rows(db: &Database) -> (String, String) {
         .await
         .unwrap();
     (proposal_id, spike_task_id)
+}
+
+#[tokio::test]
+async fn canonical_fixture_reuses_exact_repository_authority() {
+    let db = Database::ephemeral().await.unwrap();
+    db.ensure_initialized().await.unwrap();
+    let (proposal_id, spike_task_id) = fixture_parent_rows(&db).await;
+    let claim = NeedsEvidenceClaim {
+        question: "Can the canonical fixture preserve authority?".into(),
+        target_subsystem: "typed evidence test support".into(),
+        spec_unknown_anchor: "existing finding and attempt".into(),
+        insufficient_in_session_research: "requires persisted hydration".into(),
+        expected_findings: "immutable command evidence".into(),
+        created_by_task_id: spike_task_id.clone(),
+        round: 1,
+        against_revision_seq: 1,
+    };
+    ProposalRepository::new(db.clone(), EventBus::noop())
+        .set_structured_needs_evidence_spike(&proposal_id, &spike_task_id, &claim)
+        .await
+        .unwrap();
+    let authority: (String, String) = sqlx::query_as(
+        "SELECT f.id,a.id FROM typed_evidence_findings f \
+         JOIN typed_evidence_attempts a ON a.finding_id=f.id \
+         WHERE f.proposal_id=$1 AND a.spike_task_id=$2",
+    )
+    .bind(&proposal_id)
+    .bind(&spike_task_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+
+    let fixture = seed_canonical_typed_evidence_ingress_fixture_for_test(
+        &db,
+        &proposal_id,
+        &spike_task_id,
+        "preseeded",
+        CanonicalTypedEvidenceReturnOutcomeForTest::Resolved,
+    )
+    .await;
+    assert_eq!(fixture.finding_id, authority.0);
+    assert_eq!(fixture.attempt_id, authority.1);
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM typed_evidence_findings WHERE proposal_id=$1), \
+                (SELECT count(*) FROM typed_evidence_attempts WHERE finding_id=$2)",
+    )
+    .bind(&proposal_id)
+    .bind(&fixture.finding_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(counts, (1, 1));
+
+    let result = TypedEvidenceRepository::new(db.clone())
+        .submit_return_v1(fixture.return_payload.as_bytes())
+        .await
+        .unwrap();
+    let snapshot = typed_evidence_validation_snapshot_for_test(&db, &result.validation_id).await;
+    assert_eq!(snapshot.outcome, "resolved");
+    assert_eq!(snapshot.check_anchors[0]["health"], "healthy");
+    assert_eq!(snapshot.check_anchors[0]["method_compatible"], true);
 }
 
 #[tokio::test]
