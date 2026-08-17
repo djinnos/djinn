@@ -326,7 +326,7 @@ async fn startup_stage_a_identity_matrix() {
     state
         .interrupt_stale_sessions_on_startup_with_census(&census)
         .await;
-    let repo = SessionRepository::new(db, events);
+    let repo = SessionRepository::new(db.clone(), events);
     for id in [
         absent_starting_session,
         absent_running_session,
