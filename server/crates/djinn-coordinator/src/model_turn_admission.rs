@@ -680,7 +680,10 @@ mod tests {
         ProviderAttemptRouteCoverageV1, ProviderAttemptScopeV1, ProviderAttemptTerminalV1,
         ProviderCredentialRecordScopeV1, ProviderOutputReservationSourceV1,
     };
-    use std::collections::BTreeMap;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        path::{Path, PathBuf},
+    };
 
     fn record(
         uid: Option<&str>,
@@ -1281,13 +1284,120 @@ mod tests {
         }
     }
 
+    /// Production source inventory for the Phase-C boundary audit. This walks
+    /// both server source roots so a new caller in another crate cannot hide
+    /// behind this module's local source assertions.
+    fn production_sources(directory: &Path, result: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(directory).expect("production source tree readable") {
+            let path = entry.expect("production source entry readable").path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name == "tests") {
+                    continue;
+                }
+                production_sources(&path, result);
+            } else if path.extension().is_some_and(|extension| extension == "rs")
+                && path.file_name().is_none_or(|name| {
+                    let name = name.to_string_lossy();
+                    name != "tests.rs" && !name.ends_with("_tests.rs")
+                })
+            {
+                result.push(path);
+            }
+        }
+    }
+
+    /// Test modules live at the end of the affected production files. Their
+    /// fixture SQL and assertion text are not production callers or queries.
+    fn production_part(source: &str) -> &str {
+        source.split("\n#[cfg(test)]").next().unwrap_or(source)
+    }
+
+    fn repository_production_sources() -> Vec<(String, String)> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let mut files = Vec::new();
+        for directory in [root.join("server/crates"), root.join("server/src")] {
+            production_sources(&directory, &mut files);
+        }
+        files
+            .into_iter()
+            .map(|path| {
+                let relative = path
+                    .strip_prefix(&root)
+                    .expect("production source is under repository root")
+                    .display()
+                    .to_string();
+                let source = std::fs::read_to_string(path).expect("production source readable");
+                (relative, production_part(&source).to_owned())
+            })
+            .collect()
+    }
+
+    fn source_paths_containing(sources: &[(String, String)], needle: &str) -> BTreeSet<String> {
+        sources
+            .iter()
+            .filter(|(_, source)| source.contains(needle))
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
     #[test]
-    fn source_locks_catalog_qualified_production_window_topology() {
-        let source = include_str!("model_turn_admission.rs");
-        assert_eq!(source.matches(".upsert_controller_window(").count(), 1);
-        assert_eq!(source.matches(".learner_window(").count(), 1);
-        assert!(!source.contains("snapshot.json"));
-        assert!(source.contains("let Some(model) = catalog.find_model"));
-        assert!(source.contains("model_id: model.id"));
+    fn repository_source_locks_catalog_qualified_production_window_topology() {
+        let sources = repository_production_sources();
+        let coordinator = "server/crates/djinn-coordinator/src/model_turn_admission.rs";
+        // Keep these literals split so this audit does not nominate its own
+        // assertions as production callsites.
+        let storage_write = concat!(".upsert_", "controller_window(");
+        let storage_read = concat!(".learner_", "window(");
+        assert_eq!(
+            source_paths_containing(&sources, storage_write),
+            BTreeSet::from([coordinator.to_owned()]),
+            "only the coordinator catalog-qualified persistence wrapper may write controller windows"
+        );
+        assert_eq!(
+            source_paths_containing(&sources, storage_read),
+            BTreeSet::from([coordinator.to_owned()]),
+            "only the coordinator catalog-qualified learner wrapper may read learner windows"
+        );
+
+        let coordinator_source = sources
+            .iter()
+            .find_map(|(path, source)| (path == coordinator).then_some(source.as_str()))
+            .expect("coordinator Phase-C boundary source is inventoried");
+        assert_eq!(coordinator_source.matches(storage_write).count(), 1);
+        assert_eq!(coordinator_source.matches(storage_read).count(), 1);
+        assert!(coordinator_source.contains("let Some(model) = catalog.find_model"));
+        assert!(coordinator_source.contains("model_id: model.id"));
+
+        // The database is structural storage, not another catalog, and the
+        // only raw controller-window table access remains in that repository.
+        let controller_table = concat!("model_turn_", "controller_windows");
+        assert_eq!(
+            source_paths_containing(&sources, controller_table),
+            BTreeSet::from([
+                "server/crates/djinn-db/src/repositories/model_turn_admission.rs".to_owned(),
+            ]),
+            "no alternate production learner or raw controller-window query may bypass the coordinator"
+        );
+        for (path, source) in &sources {
+            if path.starts_with("server/crates/djinn-coordinator/")
+                || path.starts_with("server/crates/djinn-db/")
+            {
+                assert!(
+                    !source.contains(concat!("snapshot", ".json")),
+                    "{path} must not embed snapshot catalog authority"
+                );
+            }
+        }
+        let db_boundary = sources
+            .iter()
+            .find_map(|(path, source)| {
+                (path == "server/crates/djinn-db/src/repositories/model_turn_admission.rs")
+                    .then_some(source.as_str())
+            })
+            .expect("DB Phase-C storage boundary source is inventoried");
+        assert!(
+            !db_boundary.contains("CatalogService"),
+            "pool/evidence label correlation must not become DB catalog authority"
+        );
     }
 }
