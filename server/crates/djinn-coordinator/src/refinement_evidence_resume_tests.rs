@@ -21,16 +21,7 @@ use djinn_db::{
     RefinementAdmissionOutcome, RefinementAdmissionSource, TaskRepository, TypedEvidenceRepository,
 };
 use djinn_slot::finalize_handlers::handle_submit_work;
-use std::sync::OnceLock;
 use tokio_util::sync::CancellationToken;
-
-// The ingress seam is process-global in test builds, so fault-injection cases
-// serialize their arm/consume interval even while the rest of this module runs
-// concurrently.
-fn commit_before_resume_seam_lock() -> &'static tokio::sync::Mutex<()> {
-    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-}
 
 struct Fixture {
     db: djinn_db::Database,
@@ -351,14 +342,13 @@ async fn production_submit_live_and_cold_replay_have_complete_parity() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commit_before_resume_fault_cold_recovery_reuses_receipt_and_folds_advocate_once() {
-    let _seam_guard = commit_before_resume_seam_lock().lock().await;
     let f = fixture(CanonicalTypedEvidenceReturnOutcomeForTest::Resolved).await;
     let run_id = park_awaiting_evidence(&f, "commit-before-resume-ungated").await;
     let raw = f.delivery.return_payload.clone();
     let (events, _) = tokio::sync::broadcast::channel(16);
     let mut interrupted = build_refinement_actor(&f.db, &events, spawn_test_pool(&f.db, 2));
 
-    CoordinatorActor::set_interrupt_after_evidence_commit_before_resume_for_test(true);
+    CoordinatorActor::interrupt_after_evidence_commit_before_resume_for_test(&f.spike_task_id);
     let committed = interrupted
         .ingest_raw_tribunal_evidence_return_v1(&f.spike_task_id, &raw)
         .await
@@ -426,14 +416,13 @@ async fn commit_before_resume_fault_cold_recovery_reuses_receipt_and_folds_advoc
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commit_before_resume_recovery_honors_dispatch_pause_and_proposal_freeze() {
-    let _seam_guard = commit_before_resume_seam_lock().lock().await;
     for gate in ["global_dispatch_pause", "proposal_freeze"] {
         let f = fixture(CanonicalTypedEvidenceReturnOutcomeForTest::Resolved).await;
         let run_id = park_awaiting_evidence(&f, gate).await;
         let raw = f.delivery.return_payload.clone();
         let (events, _) = tokio::sync::broadcast::channel(16);
         let mut interrupted = build_refinement_actor(&f.db, &events, spawn_test_pool(&f.db, 2));
-        CoordinatorActor::set_interrupt_after_evidence_commit_before_resume_for_test(true);
+        CoordinatorActor::interrupt_after_evidence_commit_before_resume_for_test(&f.spike_task_id);
         let committed = interrupted
             .ingest_raw_tribunal_evidence_return_v1(&f.spike_task_id, &raw)
             .await
