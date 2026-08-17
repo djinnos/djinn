@@ -336,7 +336,7 @@ pub enum PhaseCAttemptStageV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PhaseCAttemptEvidenceOutcomeV1 {
     Recorded,
-    Provider(ProviderOutcomeV1),
+    Provider(Box<ProviderOutcomeV1>),
     Missing,
 }
 
@@ -913,7 +913,7 @@ mod tests {
             stage,
             timestamp_second,
             outcome: if stage == PhaseCAttemptStageV1::ProviderOutcome {
-                PhaseCAttemptEvidenceOutcomeV1::Provider(provider.clone())
+                PhaseCAttemptEvidenceOutcomeV1::Provider(Box::new(provider.clone()))
             } else {
                 PhaseCAttemptEvidenceOutcomeV1::Recorded
             },
