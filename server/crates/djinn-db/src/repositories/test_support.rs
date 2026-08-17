@@ -89,6 +89,102 @@ pub async fn direct_delivery_matrix_counts_for_test(
     }
 }
 
+/// One immutable delivery generation, read back exactly as persisted.
+///
+/// This is deliberately *not* an aggregate count. A whole-database
+/// `deliveries: Some(1)` stays identical when a replay rewrites the single
+/// row's state or candidate, so a cardinality snapshot cannot witness
+/// generation immutability. Comparing this struct can.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectDeliveryGenerationSnapshotForTest {
+    pub build_attempt_id: String,
+    pub delivery_generation: i64,
+    pub state: String,
+    pub candidate_sha: String,
+    pub base_sha: String,
+    pub conflict_reason: Option<String>,
+    pub applied: bool,
+}
+
+/// Snapshot every persisted delivery generation for one task, ordered by
+/// generation, so a caller can assert both which generations exist and that
+/// each one's identity is unchanged.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn direct_delivery_generations_for_test(
+    db: &Database,
+    task_id: &str,
+) -> Vec<DirectDeliveryGenerationSnapshotForTest> {
+    db.ensure_initialized().await.unwrap();
+    let rows = sqlx::query_as::<_, (String, i64, String, String, String, Option<String>, bool)>(
+        "SELECT build_attempt_id, delivery_generation, state, candidate_sha, base_sha, \
+         conflict_reason, applied_at IS NOT NULL \
+         FROM task_deliveries WHERE task_id = $1 \
+         ORDER BY delivery_generation, build_attempt_id",
+    )
+    .bind(task_id)
+    .fetch_all(db.pool())
+    .await
+    .expect("read direct-delivery generations for test");
+    rows.into_iter()
+        .map(
+            |(
+                build_attempt_id,
+                delivery_generation,
+                state,
+                candidate_sha,
+                base_sha,
+                conflict_reason,
+                applied,
+            )| DirectDeliveryGenerationSnapshotForTest {
+                build_attempt_id,
+                delivery_generation,
+                state,
+                candidate_sha,
+                base_sha,
+                conflict_reason,
+                applied,
+            },
+        )
+        .collect()
+}
+
+/// How many candidates one task's ledger has ever named, and how many of them
+/// are distinct.
+///
+/// `generations` counting up while `distinct_candidates` stays put is a rebuild
+/// retry; `distinct_candidates` counting up is a *new* candidate. Aggregate
+/// delivery counts conflate the two, so replay tests assert on this instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectDeliveryCandidateCardinalityForTest {
+    pub generations: i64,
+    pub distinct_candidates: i64,
+    pub distinct_build_attempts: i64,
+}
+
+/// Snapshot candidate cardinality for one task's delivery ledger.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn direct_delivery_candidate_cardinality_for_test(
+    db: &Database,
+    task_id: &str,
+) -> DirectDeliveryCandidateCardinalityForTest {
+    db.ensure_initialized().await.unwrap();
+    let (generations, distinct_candidates, distinct_build_attempts) =
+        sqlx::query_as::<_, (i64, i64, i64)>(
+            "SELECT COUNT(*), COUNT(DISTINCT candidate_sha), COUNT(DISTINCT build_attempt_id) \
+             FROM task_deliveries WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("read direct-delivery candidate cardinality for test");
+    DirectDeliveryCandidateCardinalityForTest {
+        generations,
+        distinct_candidates,
+        distinct_build_attempts,
+    }
+}
+
 /// Canonical ownership and immutable-generation identity for liveness tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectDeliveryLivenessFixtureForTest {

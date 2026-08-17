@@ -28,6 +28,7 @@ pub mod test_support {
     pub use crate::query_observer::{QueryTrace, capture_queries};
     pub use crate::repositories::test_support::{
         AtomicEvidenceDemandCountsForTest, CanonicalTypedEvidenceReturnOutcomeForTest,
+        DirectDeliveryCandidateCardinalityForTest, DirectDeliveryGenerationSnapshotForTest,
         DirectDeliveryLivenessFixtureForTest, DirectDeliveryMatrixCountsForTest,
         EvidenceDispatchRecoveryFixtureForTest, EvidenceDispatchRecoverySnapshotForTest,
         HousekeepingFixture, HousekeepingFixtureExpectedCounts, HousekeepingFixtureProject,
@@ -51,7 +52,8 @@ pub mod test_support {
         correlate_task_to_refinement_run_for_test, corrupt_credential_encrypted_value,
         corrupt_refinement_task_role_for_test, count_rows_for_test,
         delete_proposal_lint_result_for_revision_for_test, delete_proposal_lint_results_for_test,
-        delete_session_row, direct_delivery_matrix_counts_for_test,
+        delete_session_row, direct_delivery_candidate_cardinality_for_test,
+        direct_delivery_generations_for_test, direct_delivery_matrix_counts_for_test,
         disable_direct_delivery_epoch_for_test, dispose_typed_evidence_validation_for_test,
         drop_table_cascade_for_test, drop_table_for_test,
         elapse_refinement_run_wall_clock_for_test, ensure_doctor_findings_schema,
