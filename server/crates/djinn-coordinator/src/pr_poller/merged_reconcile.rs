@@ -34,8 +34,9 @@
 //!   themselves.
 //! - OPEN → left untouched. For blind-spot statuses the CI snapshot is refreshed
 //!   in the same pass so a poisoned `failing` snapshot cannot bypass adoption
-//!   forever; for poller-owned statuses the owning loop refreshes it every tick,
-//!   so this pass does not duplicate the provider fan-out.
+//!   forever; for poller-owned statuses the owning loop already refreshes it
+//!   every tick, so this pass skips the redundant `record_ci_snapshot` write
+//!   (the PR fetch above it has happened either way).
 //!
 //! Terminalization is idempotent by construction: the query excludes `closed`,
 //! and the task row is re-read immediately before the transition, so a task the
@@ -232,10 +233,12 @@ impl CoordinatorActor {
                     // change resets internally.
                     //
                     // Except for poller-owned statuses: their loop records the
-                    // same snapshot from its own fetch every tick, so repeating
-                    // it here would only duplicate the provider fan-out
-                    // (required contexts, merge-group correlation) on the slow
-                    // sweep. Coverage of those statuses exists for the MERGED
+                    // same snapshot from its own fetch every tick, so writing it
+                    // again here buys nothing. The PR + check-runs fetch above
+                    // has already happened by this point — only the
+                    // `record_ci_snapshot` write and its own follow-up provider
+                    // calls (required contexts, merge-group correlation) are
+                    // skipped. Coverage of those statuses exists for the MERGED
                     // ground-truth case, not to take over live CI observation.
                     if status_is_poller_owned(&task.status) {
                         continue;
@@ -587,8 +590,13 @@ mod tests {
     // These build a real `CoordinatorActor` and call the production
     // `terminalize_reconciled_merge` — the same method
     // `reconcile_blindspot_merged_prs` calls once GitHub reports the PR merged.
-    // Only the GitHub fetch is elided (there is no HTTP fake in this crate), so
-    // the merge facts are passed in exactly as the fetch would supply them.
+    // The GitHub fetch is elided and the merge facts passed in exactly as the
+    // fetch would supply them, which keeps these focused on the terminalization
+    // itself. The crate DOES have an HTTP double available
+    // (`pr_poller::installation::set_installation_client_base_url_for_test` plus
+    // wiremock — see `supervisor_impl::pr::tests::
+    // merged_pr_under_active_tripwire_hold_still_closes_its_pr_draft_task`), so
+    // reach for that when the behaviour under test involves the fetch itself.
 
     /// Build a coordinator actor plus an epic, returning everything a
     /// terminalization test needs. Caller must `cancel.cancel()` at the end.
@@ -841,6 +849,92 @@ mod tests {
             repo.list_activity(&task.id).await.unwrap().len(),
             activity_after_first,
             "a second reconciliation pass must not emit any audit row"
+        );
+
+        cancel.cancel();
+        db.pool().close().await;
+    }
+
+    /// The blind-spot route: a merged PR whose task sits in a status `PrMerge`
+    /// cannot be applied from. `terminalize_reconciled_merge` must take the
+    /// `user_override → pr_review` hop before merging, and the whole sequence
+    /// must land the same merge semantics the poller-owned route produces.
+    ///
+    /// This is the ONLY test that pins that hop. Deleting the `user_override`
+    /// block leaves every other test in this module green: they all seed
+    /// `pr_draft`, which needs no hop. The blind-spot statuses (`open`,
+    /// `in_progress`, `needs_task_review`, `needs_lead_intervention`, …) are the
+    /// original reason this pass exists, and `needs_task_review` in particular
+    /// is the status `poll_pr_review_stuck_tasks` leaves a merged PR sitting in
+    /// — that loop observes the merge and just `continue`s, so this pass is the
+    /// only thing that terminalizes it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn merged_pr_in_a_blind_spot_status_routes_through_pr_review_and_closes() {
+        let db = Database::open_in_memory().unwrap();
+        let (actor, cancel, repo, epic_id) = reconcile_fixture(&db).await;
+
+        let pr_url = "https://github.com/djinnos/djinn/pull/4244";
+        // `needs_task_review`: not poller-owned, so `PrMerge` is illegal from
+        // here and the reconciler must route through `pr_review` first.
+        let task = seed_task(
+            &repo,
+            &epic_id,
+            "merged-while-in-review",
+            "needs_task_review",
+            Some(pr_url),
+        )
+        .await;
+        assert!(
+            !status_is_poller_owned(&task.status),
+            "precondition: this test must exercise the hop, not the direct path"
+        );
+        let dependent = seed_task(&repo, &epic_id, "blind-spot-dependent", "open", None).await;
+        repo.add_blocker(&dependent.id, &task.id).await.unwrap();
+
+        let selected = repo.list_reconcilable_pr_tasks().await.unwrap();
+        let selected_task = selected
+            .iter()
+            .find(|t| t.id == task.id)
+            .expect("a blind-spot task with a merged PR must be reconcilable");
+
+        actor
+            .terminalize_reconciled_merge(selected_task, pr_url, Some("0badc0de0badc0de"))
+            .await;
+
+        let closed = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            closed.status, "closed",
+            "a blind-spot status must reach `closed`; without the \
+             `user_override → pr_review` hop the `pr_merge` transition is \
+             rejected and the task stays open forever"
+        );
+        assert_eq!(closed.close_reason.as_deref(), Some("completed"));
+        assert!(closed.closed_at.is_some(), "closed_at must be populated");
+        assert_eq!(
+            closed.merge_commit_sha.as_deref(),
+            Some("0badc0de0badc0de"),
+            "the blind-spot route must record the merge commit too"
+        );
+
+        let activity = repo.list_activity(&task.id).await.unwrap();
+        assert!(
+            activity
+                .iter()
+                .any(|a| a.payload.contains("blind-spot merged-PR reconciliation")),
+            "the `user_override` hop must carry RECONCILE_MERGE_REASON so the \
+             audit trail explains the out-of-band close"
+        );
+
+        let ready: Vec<String> = repo
+            .list_ready(djinn_db::ReadyQuery::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert!(
+            ready.contains(&dependent.id),
+            "the blind-spot route must release blocked dependents as well"
         );
 
         cancel.cancel();

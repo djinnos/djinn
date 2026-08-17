@@ -127,16 +127,17 @@ impl CoordinatorActor {
                 )
                 .await;
 
-            // ── GitHub terminal ground truth (BEFORE any advance gate) ───
+            // ── Merged? GitHub ground truth, BEFORE any advance gate ─────
             //
             // A merged PR is ground truth: the work is on the base branch and
             // no Djinn-side gate can un-land it. Every gate below this point
             // (tripwire active-hold, CI gate, merge-conflict check, undraft)
-            // exists to stop Djinn *advancing* a PR toward merge. Evaluating
-            // any of them first turns it into a permanent mask over merge
-            // detection — and a task that never terminalizes never releases its
-            // dependents, so the damage is a silently-stalled dependency chain,
-            // not a stale status column.
+            // exists to stop Djinn *advancing* a PR toward merge, and once
+            // GitHub says merged every one of those advance actions is already
+            // moot. Evaluating any of them first turns it into a permanent mask
+            // over merge detection — and a task that never terminalizes never
+            // releases its dependents, so the damage is a silently-stalled
+            // dependency chain, not a stale status column.
             //
             // This ordering IS the incident. `4vnt`/#3153 and `3kza`/#3155 each
             // had a `tripwire.gate.held` activity event on the PR's *live* head
@@ -148,6 +149,10 @@ impl CoordinatorActor {
             // respectively — blocking dependents `296y` and `i58q` — until an
             // operator closed them by hand. `poll_pr_review_tasks` has always
             // had the correct order; only this loop was inverted.
+            //
+            // ONLY the merged case moves. `ClosedUnmerged` deliberately stays
+            // BELOW the hold, unchanged from before this fix — see the block
+            // after the gate for why hoisting it would be a wrong-close.
             //
             // Classification is deliberately SHA-free: both branches had been
             // force-pushed during a rebase, leaving `task_attempts
@@ -186,37 +191,53 @@ impl CoordinatorActor {
                     self.review_stuck_sha_first_seen.remove(&task.id);
                     continue;
                 }
-                merged_reconcile::PrTerminalState::ClosedUnmerged => {
-                    tracing::info!(
-                        task_id = %task.short_id,
-                        pr = pull_number,
-                        "PR poller: PR closed without merge → force-closing task"
-                    );
-                    poll_stack::boxed(|| {
-                        self.apply_pr_transition(
-                            &task.id,
-                            TransitionAction::ForceClose,
-                            Some("PR was closed without merging"),
-                        )
-                    })
-                    .await;
-                    self.pr_status_cache.remove(&task.id);
-                    self.pr_draft_first_seen.remove(&task.id);
-                    self.review_stuck_sha_first_seen.remove(&task.id);
-                    continue;
-                }
-                merged_reconcile::PrTerminalState::Live => {}
+                // Handled below the tripwire gate, on purpose.
+                merged_reconcile::PrTerminalState::ClosedUnmerged
+                | merged_reconcile::PrTerminalState::Live => {}
             }
 
             // ── Tripwire active-hold reconciliation ──────────────────────
             // Re-check hold state before any PR advance; reapply tampered labels.
-            // Only reachable for a PR that is still open, so a hold can no
+            // Only reachable for a PR that did NOT merge, so a hold can no
             // longer mask a merge that already happened.
             if self
                 .reconcile_tripwire_hold(&task, pull_number, &pr.head.sha)
                 .await
             {
                 // Active hold — do not advance; ensure label stays on.
+                self.pr_status_cache.remove(&task.id);
+                self.pr_draft_first_seen.remove(&task.id);
+                self.review_stuck_sha_first_seen.remove(&task.id);
+                continue;
+            }
+
+            // ── PR closed without merge ──────────────────────────────────
+            //
+            // Stays BELOW the tripwire gate, exactly where it has always been.
+            // Unlike a merge, this is not a fact Djinn merely records: it
+            // force-closes the task, and `ForceClose` is exempt from the
+            // blocks-others guard (`task/status.rs`), so it RELEASES every
+            // dependent. Hoisting it above the hold would mean a reviewer who
+            // closes a human-review-held PR unmerged — intending a redo —
+            // instead releases dependents to build on work that never landed.
+            // That wrong-close direction is worse than the stranding this fix
+            // addresses, and no part of the `4vnt`/`3kza` incident required it:
+            // both PRs merged. A held, closed-unmerged PR keeps the pre-fix
+            // behaviour of holding in `pr_draft`.
+            if pr.state == PrState::Closed {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    pr = pull_number,
+                    "PR poller: PR closed without merge → force-closing task"
+                );
+                poll_stack::boxed(|| {
+                    self.apply_pr_transition(
+                        &task.id,
+                        TransitionAction::ForceClose,
+                        Some("PR was closed without merging"),
+                    )
+                })
+                .await;
                 self.pr_status_cache.remove(&task.id);
                 self.pr_draft_first_seen.remove(&task.id);
                 self.review_stuck_sha_first_seen.remove(&task.id);

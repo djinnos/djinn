@@ -545,24 +545,24 @@ fn strip_line_comments(source: &str) -> String {
 /// `poll_pr_review_tasks` always had the correct order; only this loop was
 /// inverted.
 ///
-/// SOURCE-LEVEL, and honestly labelled. Both branches sit after
-/// `gh_client.get_pull_request(..)`, and `resolve_installation_client` builds
-/// `GitHubApiClient::for_installation`, which hard-codes `api.github.com`; this
-/// crate carries no HTTP double and no base-URL seam on that path, so no test
-/// in this crate can drive `poll_pr_draft_tasks` to either branch. The
-/// behavioural half of the proof is the reconciliation coverage in
-/// `merged_reconcile::tests` (which does run the real terminalization against a
-/// real database); this half proves the primary loop cannot regress back into
-/// gating merge detection.
+/// SOURCE-LEVEL, and honestly labelled: this pins the *ordering* of two blocks,
+/// which no behavioural assertion states directly. It is a supplement, not a
+/// substitute — the behavioural proof of the same fix is
+/// `supervisor_impl::pr::tests::
+/// merged_pr_under_active_tripwire_hold_still_closes_its_pr_draft_task`, which
+/// drives the real `poll_pr_draft_tasks` against a wiremock GitHub through the
+/// `set_installation_client_base_url_for_test` seam and observes `pr_draft` vs
+/// `closed`. Prefer extending that test over adding assertions here.
 ///
 /// NAMED FAILING MUTATIONS.
-/// (a) Move `reconcile_tripwire_hold` back above the terminal-state match —
-///     the exact production state before this fix: the ordering assertion
-///     fails.
+/// (a) Move `reconcile_tripwire_hold` back above the merged arm — the exact
+///     production state before this fix: the ordering assertion fails.
 /// (b) Delete the terminal-state match (never terminalize from `pr_draft`):
 ///     the `Merged` arm is not found.
 /// (c) Delete the tripwire hold call: the hold anchor is not found.
 /// (d) Gate the merged arm on a stored head SHA: the SHA-free assertion fails.
+/// (e) Hoist the closed-without-merge block above the hold: the
+///     force-close-stays-below assertion fails.
 #[test]
 fn a_merged_pr_is_observed_before_the_tripwire_hold_gate() {
     let code = strip_line_comments(include_str!("pr_watcher.rs"));
@@ -575,9 +575,9 @@ fn a_merged_pr_is_observed_before_the_tripwire_hold_gate() {
     let merged_arm = body
         .find("merged_reconcile::PrTerminalState::Merged => {")
         .expect("the pr_draft loop must have a merged-PR terminalization arm");
-    let closed_arm = body
-        .find("merged_reconcile::PrTerminalState::ClosedUnmerged => {")
-        .expect("the pr_draft loop must have a closed-without-merge arm");
+    let force_close = body
+        .find("TransitionAction::ForceClose,")
+        .expect("the pr_draft loop must still force-close a closed-unmerged PR");
     let hold_gate = body
         .find(".reconcile_tripwire_hold(")
         .expect("the pr_draft loop must still evaluate the tripwire active hold");
@@ -589,10 +589,16 @@ fn a_merged_pr_is_observed_before_the_tripwire_hold_gate() {
          its task in pr_draft forever and never releases its dependents \
          (incidents 4vnt/#3153 and 3kza/#3155)",
     );
+    // The deliberate asymmetry. `ForceClose` is exempt from the blocks-others
+    // guard, so hoisting the closed-unmerged branch above the hold would let a
+    // reviewer who closes a held PR unmerged (intending a redo) release every
+    // dependent onto work that never landed. Merging is a fact Djinn records;
+    // force-closing is an action Djinn takes.
     assert!(
-        closed_arm < hold_gate,
-        "a PR closed without merging is equally terminal and must not be masked \
-         by an advance gate either",
+        hold_gate < force_close,
+        "the closed-without-merge force-close must stay BELOW the tripwire hold \
+         — unlike a merge it releases dependents, and releasing them onto work \
+         that never landed is a worse failure than the stranding this fixes",
     );
 
     let classify = body
