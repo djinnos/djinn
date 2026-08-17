@@ -66,7 +66,7 @@ pub async fn typed_evidence_validation_snapshot_for_finding_for_test(
     let validation_id: String = sqlx::query_scalar(
         "SELECT v.id FROM typed_evidence_validation_results v \
          JOIN typed_evidence_attempts a ON a.id=v.attempt_id \
-         WHERE a.finding_id=$1 ORDER BY v.created_at DESC LIMIT 1",
+         WHERE a.finding_id=$1 ORDER BY a.sequence DESC LIMIT 1",
     )
     .bind(finding_id)
     .fetch_one(db.pool())
