@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "fixture": "typed_evidence_failed_retry_v1",
+  "attempt_1": {
+    "delivery": "production_submit_work_malformed",
+    "terminal_lifecycle": "failed",
+    "immutable": ["task", "payload", "validation_history", "transitions"]
+  },
+  "retry": {
+    "authority": "atomic_repository_retry",
+    "duplicate": "stable_attempt_2_identity",
+    "stale_failure": "rejected",
+    "occupied_slot": "rejected",
+    "from_attempt": 1,
+    "to_attempt": 2
+  },
+  "dispatch": {
+    "post_commit_activation_failure": "retains_demanded_allocation",
+    "restart_redrive": "same_task_and_attempt"
+  },
+  "terminal": {
+    "attempt_1_task_never_reopens": true,
+    "attempt_2_durable_receipt": "evidence_received",
+    "open_active_evidence_tasks": 1
+  }
+}
