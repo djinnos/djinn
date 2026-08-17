@@ -56,6 +56,54 @@ fn record_dispatch_live_state(cooldowns_active: usize, inflight_ledger_size: usi
     djinn_telemetry::dispatch::set_inflight_ledger_size(inflight_ledger_size);
 }
 
+/// The ready-dispatch continuation selected after direct-delivery liveness has
+/// been reconciled. `LegacyDispatch` is deliberately the only result that may
+/// cross into role selection, respawn guarding, task-PR handling, and pool
+/// dispatch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadyDispatchContinuation<T = ()> {
+    LegacyDispatch(T),
+    Reconciled,
+    Settled,
+    Parked,
+}
+
+/// Cross the ready-dispatch liveness boundary before any legacy dispatch
+/// continuation is allowed to run. Keeping the continuation as an invocation,
+/// rather than returning only a routing enum, lets production and
+/// repository-backed tests share the same no-fallthrough boundary.
+pub(crate) async fn continue_ready_dispatch<F, Fut, C, CFut, T>(
+    db: djinn_db::Database,
+    tasks: &djinn_db::TaskRepository,
+    task_id: &str,
+    reconcile: F,
+    continue_legacy_dispatch: C,
+) -> anyhow::Result<ReadyDispatchContinuation<T>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<crate::direct_delivery::DeliveryOutcome>>,
+    C: FnOnce() -> CFut,
+    CFut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    match super::respawn_guard::reconcile_ready_dispatch_liveness(db, tasks, task_id, reconcile)
+        .await?
+    {
+        crate::direct_delivery::DirectDeliveryLiveness::Legacy
+        | crate::direct_delivery::DirectDeliveryLiveness::Dispatch => Ok(
+            ReadyDispatchContinuation::LegacyDispatch(continue_legacy_dispatch().await?),
+        ),
+        crate::direct_delivery::DirectDeliveryLiveness::Reconcile => {
+            Ok(ReadyDispatchContinuation::Reconciled)
+        }
+        crate::direct_delivery::DirectDeliveryLiveness::Settled => {
+            Ok(ReadyDispatchContinuation::Settled)
+        }
+        crate::direct_delivery::DirectDeliveryLiveness::Parked => {
+            Ok(ReadyDispatchContinuation::Parked)
+        }
+    }
+}
+
 /// Convert durable import outcomes into the per-pass admission gate.
 ///
 /// `None` is deliberately fail-closed: callers must abandon the entire pass
@@ -2021,35 +2069,31 @@ impl CoordinatorActor {
                 tracing::error!(task_id = %task.short_id, project_id = %task.project_id, "CoordinatorActor: dispatch blocked by failed legacy settings import");
                 continue;
             }
-            // Ready admission and approved completion share this read-only
-            // epoch/ownership boundary. Active unresolved ownership is parked,
-            // never allowed to fall through to legacy behavior.
-            match super::respawn_guard::admit_respawn_guard_liveness(
-                self.db.clone(),
-                &self.task_repo(),
+            // This shared frame is the sole liveness-to-dispatch boundary. The
+            // established continuation below is reachable only after its
+            // Legacy/Dispatch invocation; Applying and Conflict terminate here.
+            let db = self.db.clone();
+            let tasks = self.task_repo();
+            match continue_ready_dispatch(
+                db,
+                &tasks,
                 &task.id,
+                || self.reconcile_direct_delivery_task(&task),
+                || async { Ok(()) },
             )
             .await
             {
-                Ok(crate::direct_delivery::DirectDeliveryLiveness::Legacy)
-                | Ok(crate::direct_delivery::DirectDeliveryLiveness::Dispatch) => {}
-                Ok(crate::direct_delivery::DirectDeliveryLiveness::Parked) => {
+                Ok(ReadyDispatchContinuation::LegacyDispatch(())) => {}
+                Ok(ReadyDispatchContinuation::Parked) => {
                     // The production admission wrapper already persisted the
                     // fail-closed park. Do not issue a second Escalate.
                     continue;
                 }
-                Ok(crate::direct_delivery::DirectDeliveryLiveness::Reconcile) => {
-                    match self.reconcile_direct_delivery_task(&task).await {
-                        Ok(outcome) => {
-                            tracing::info!(task_id = %task.short_id, ?outcome, "CoordinatorActor: reconciled applying direct delivery before refusing spawn")
-                        }
-                        Err(error) => {
-                            tracing::error!(task_id = %task.short_id, %error, "CoordinatorActor: direct delivery reconciliation failed; refusing spawn")
-                        }
-                    }
+                Ok(ReadyDispatchContinuation::Reconciled) => {
+                    tracing::info!(task_id = %task.short_id, "CoordinatorActor: reconciled applying direct delivery before refusing spawn");
                     continue;
                 }
-                Ok(crate::direct_delivery::DirectDeliveryLiveness::Settled) => {
+                Ok(ReadyDispatchContinuation::Settled) => {
                     tracing::info!(task_id = %task.short_id, "CoordinatorActor: immutable direct delivery is settled; refusing respawn");
                     continue;
                 }

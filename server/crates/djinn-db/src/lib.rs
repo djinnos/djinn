@@ -28,7 +28,8 @@ pub mod test_support {
     pub use crate::query_observer::{QueryTrace, capture_queries};
     pub use crate::repositories::test_support::{
         AtomicEvidenceDemandCountsForTest, CanonicalTypedEvidenceReturnOutcomeForTest,
-        DirectDeliveryMatrixCountsForTest, EvidenceDispatchRecoveryFixtureForTest,
+        DirectDeliveryLivenessFixtureForTest, DirectDeliveryMatrixCountsForTest,
+        EvidenceDispatchRecoveryFixtureForTest,
         EvidenceDispatchRecoverySnapshotForTest, HousekeepingFixture,
         HousekeepingFixtureExpectedCounts, HousekeepingFixtureProject,
         ProjectGithubInstallationForTest, RefinementLifecycleAuditRowForTest,
@@ -82,7 +83,8 @@ pub mod test_support {
         restore_active_direct_delivery_epoch_for_test, seed_board_health_mismatch_candidate,
         seed_breaker_open_dispatch_state, seed_canonical_typed_evidence_ingress_fixture_for_test,
         seed_chat_session_row, seed_direct_delivery_proposal_for_test,
-        seed_direct_delivery_proposal_owner_for_test, seed_legacy_launcher_authority_for_test,
+        seed_direct_delivery_liveness_fixture_for_test, seed_direct_delivery_proposal_owner_for_test,
+        seed_legacy_launcher_authority_for_test,
         seed_model_turn_admission_fixture, seed_project, seed_rate_limited_dispatch_state,
         seed_readiness_detail_projection_for_test, seed_session_row, seed_session_row_with_id,
         seed_stale_typed_evidence_disposition_for_test, seed_task_row,
