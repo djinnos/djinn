@@ -325,9 +325,7 @@ mod tests {
     use super::{
         AttemptLifecycleOutcome, ProposalAttemptLifecycle, StartAttemptInput, retirement_tag,
     };
-    use crate::direct_delivery::{
-        BoundaryOperation, clear_boundary_operations, take_boundary_operations,
-    };
+    use crate::direct_delivery::{BoundaryOperation, boundary_operations_scope};
     use djinn_core::events::EventBus;
     use djinn_core::models::ProposalBuildAttemptLifecycle;
     use djinn_db::{
@@ -563,7 +561,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        clear_boundary_operations();
+        let boundary_operations = boundary_operations_scope().await;
+        let boundary_checkpoint = boundary_operations.checkpoint();
         assert!(
             service(db, &server)
                 .start(input(&proposal, "attempt-failure", "failed"))
@@ -571,7 +570,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            take_boundary_operations(),
+            boundary_operations.operations_since(boundary_checkpoint),
             vec![BoundaryOperation::AttemptPrCreateOrAdoptRequest],
             "the request observation must survive ProviderFailure classification"
         );

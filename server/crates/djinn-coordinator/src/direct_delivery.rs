@@ -57,28 +57,76 @@ pub(crate) enum BoundaryOperation {
 }
 
 #[cfg(test)]
-static BOUNDARY_OPERATIONS: std::sync::Mutex<Vec<BoundaryOperation>> =
-    std::sync::Mutex::new(Vec::new());
+static BOUNDARY_OPERATIONS: std::sync::Mutex<
+    Option<(std::thread::ThreadId, Vec<BoundaryOperation>)>,
+> = std::sync::Mutex::new(None);
 
-// The recorder follows real production calls but its assertion buffer is
-// process-global. Tests that clear and inspect its ordered contents must keep
-// other recorder assertions from interleaving while they await collaborators.
+// The recorder follows real production calls, but observation is enabled only
+// while the owning test thread holds this lock. The owner thread ID travels
+// with the buffer so another concurrently running test cannot add effects to
+// this scope. Tokio's default test runtime is current-thread, so effects from
+// the test's production calls retain that owner identity across awaits.
 #[cfg(test)]
 static BOUNDARY_OPERATIONS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
-pub(crate) async fn boundary_operations_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
-    BOUNDARY_OPERATIONS_TEST_LOCK.lock().await
+pub(crate) struct BoundaryOperationsScope {
+    owner: std::thread::ThreadId,
+    _guard: tokio::sync::MutexGuard<'static, ()>,
 }
 
 #[cfg(test)]
-pub(crate) fn clear_boundary_operations() {
-    BOUNDARY_OPERATIONS.lock().unwrap().clear();
+impl BoundaryOperationsScope {
+    /// Marks a point in this scope's ordered production-effect stream.
+    pub(crate) fn checkpoint(&self) -> usize {
+        assert_eq!(
+            std::thread::current().id(),
+            self.owner,
+            "boundary recorder used outside its owner thread"
+        );
+        let operations = BOUNDARY_OPERATIONS.lock().unwrap();
+        let (owner, operations) = operations.as_ref().unwrap();
+        assert_eq!(
+            *owner, self.owner,
+            "boundary recorder used outside its owner thread"
+        );
+        operations.len()
+    }
+
+    /// Returns effects observed after `checkpoint` without consuming them.
+    pub(crate) fn operations_since(&self, checkpoint: usize) -> Vec<BoundaryOperation> {
+        assert_eq!(
+            std::thread::current().id(),
+            self.owner,
+            "boundary recorder used outside its owner thread"
+        );
+        let operations = BOUNDARY_OPERATIONS.lock().unwrap();
+        let (owner, operations) = operations.as_ref().unwrap();
+        assert_eq!(
+            *owner, self.owner,
+            "boundary recorder used outside its owner thread"
+        );
+        operations[checkpoint..].to_vec()
+    }
 }
 
 #[cfg(test)]
-pub(crate) fn take_boundary_operations() -> Vec<BoundaryOperation> {
-    std::mem::take(&mut *BOUNDARY_OPERATIONS.lock().unwrap())
+impl Drop for BoundaryOperationsScope {
+    fn drop(&mut self) {
+        // A panic or early return cannot leak observations into a later scope.
+        *BOUNDARY_OPERATIONS.lock().unwrap() = None;
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn boundary_operations_scope() -> BoundaryOperationsScope {
+    let guard = BOUNDARY_OPERATIONS_TEST_LOCK.lock().await;
+    let owner = std::thread::current().id();
+    *BOUNDARY_OPERATIONS.lock().unwrap() = Some((owner, Vec::new()));
+    BoundaryOperationsScope {
+        owner,
+        _guard: guard,
+    }
 }
 
 /// A no-op outside tests, preserving production behavior and the disabled epoch.
@@ -110,7 +158,11 @@ pub(crate) fn observe_boundary_operation(operation: &'static str) {
             }
             _ => return,
         };
-        BOUNDARY_OPERATIONS.lock().unwrap().push(operation);
+        if let Some((scope_owner, operations)) = BOUNDARY_OPERATIONS.lock().unwrap().as_mut()
+            && *scope_owner == std::thread::current().id()
+        {
+            operations.push(operation);
+        }
     }
     #[cfg(not(test))]
     let _ = operation;
@@ -1507,14 +1559,31 @@ mod tests {
     async fn reconciliation_collaborator_records_the_real_direct_engine_effect() {
         use crate::dispatch::wave_dispatch::run_direct_completion;
 
-        let _boundary_guard = boundary_operations_test_guard().await;
-        clear_boundary_operations();
+        let boundary_operations = boundary_operations_scope().await;
+        let boundary_checkpoint = boundary_operations.checkpoint();
         let outcome = run_direct_completion(|| async { "reconciled" }).await;
 
         assert_eq!(outcome, "reconciled");
         assert_eq!(
-            take_boundary_operations(),
+            boundary_operations.operations_since(boundary_checkpoint),
             [BoundaryOperation::DirectAppend]
+        );
+    }
+
+    #[tokio::test]
+    async fn boundary_recorder_ignores_operations_from_an_unowned_test_thread() {
+        let boundary_operations = boundary_operations_scope().await;
+        let boundary_checkpoint = boundary_operations.checkpoint();
+
+        std::thread::spawn(|| observe_boundary_operation("direct_append"))
+            .join()
+            .unwrap();
+        observe_boundary_operation("simple_close");
+
+        assert_eq!(
+            boundary_operations.operations_since(boundary_checkpoint),
+            [BoundaryOperation::SimpleClose],
+            "an unscoped concurrent test thread must not write this scope's buffer"
         );
     }
 
@@ -1526,7 +1595,7 @@ mod tests {
         use djinn_core::events::EventBus;
         use djinn_db::{EpicRepository, TaskRepository};
 
-        let _boundary_guard = boundary_operations_test_guard().await;
+        let boundary_operations = boundary_operations_scope().await;
         let db = Database::open_in_memory().unwrap();
         let events = EventBus::noop();
         let epic = EpicRepository::new(db.clone(), events.clone())
@@ -1556,7 +1625,7 @@ mod tests {
         let task = repo.get(&task.id).await.unwrap().unwrap();
         djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
 
-        clear_boundary_operations();
+        let boundary_checkpoint = boundary_operations.checkpoint();
         let admission = admit_direct_delivery(db.clone(), &task.id).await.unwrap();
         assert_eq!(admission, DirectDeliveryAdmission::Legacy);
 
@@ -1600,7 +1669,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            take_boundary_operations(),
+            boundary_operations.operations_since(boundary_checkpoint),
             [
                 BoundaryOperation::CapabilityProbe,
                 BoundaryOperation::SupervisorPrOpen
@@ -2722,7 +2791,7 @@ mod tests {
             MissingEpoch,
             UnknownEpoch,
         }
-        let _boundary_guard = boundary_operations_test_guard().await;
+        let boundary_operations = boundary_operations_scope().await;
         for state in [
             State::Disabled,
             State::ExplicitLegacy,
@@ -2810,7 +2879,7 @@ mod tests {
                     _ => {}
                 }
                 let before = snapshot(&db, &tasks, &task.id).await;
-                clear_boundary_operations();
+                let boundary_checkpoint = boundary_operations.checkpoint();
                 let admission = if completion {
                     admit_approved_direct_delivery(db.clone(), &tasks, &task.id).await
                 } else {
@@ -2938,7 +3007,7 @@ mod tests {
                     ],
                 };
                 assert_eq!(
-                    take_boundary_operations(),
+                    boundary_operations.operations_since(boundary_checkpoint),
                     expected_ops,
                     "every matrix cell must assert the complete ordered production effect vector"
                 );
@@ -2999,7 +3068,7 @@ mod ready_dispatch_repository_liveness_tests {
         use djinn_core::events::EventBus;
         use djinn_db::test_support::seed_direct_delivery_liveness_fixture_for_test;
         use djinn_db::{Database, EpicRepository, ProposalBuildAttemptRepository, TaskRepository};
-        let _boundary_guard = boundary_operations_test_guard().await;
+        let boundary_operations = boundary_operations_scope().await;
         let db = Database::open_in_memory().unwrap();
         let epic = EpicRepository::new(db.clone(), EventBus::noop())
             .create("ready", "", "", "", "", None)
@@ -3049,7 +3118,7 @@ mod ready_dispatch_repository_liveness_tests {
             source_sha: "fixture-source".into(),
             normalized_patch: "fixture-patch".into(),
         };
-        clear_boundary_operations();
+        let boundary_checkpoint = boundary_operations.checkpoint();
         updates.lock().unwrap().clear();
         let reconciliations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let reconciliations_for_engine = reconciliations.clone();
@@ -3114,7 +3183,7 @@ mod ready_dispatch_repository_liveness_tests {
             );
         }
         assert_eq!(
-            take_boundary_operations(),
+            boundary_operations.operations_since(boundary_checkpoint),
             vec![
                 BoundaryOperation::CapabilityProbe,
                 BoundaryOperation::ResolveTaskActiveAttempt,
@@ -3172,7 +3241,6 @@ mod ready_dispatch_repository_liveness_tests {
 
     #[tokio::test]
     async fn ready_dispatch_conflict_generation_never_spawns_or_reconciles() {
-        let _boundary_guard = boundary_operations_test_guard().await;
         use djinn_core::events::EventBus;
         use djinn_db::test_support::seed_direct_delivery_liveness_fixture_for_test;
         use djinn_db::{Database, EpicRepository, TaskRepository};
