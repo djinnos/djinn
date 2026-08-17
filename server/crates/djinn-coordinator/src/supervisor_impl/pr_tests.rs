@@ -20,6 +20,39 @@ use super::{
 static RETAINED_LEGACY_LIFECYCLE_GUARD: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
+/// Compare every persisted task field while explicitly accounting for the two
+/// mutations that a retained legacy supervisor adoption is allowed to make.
+/// In particular, do not discard parking evidence: an unexpected escalation
+/// epoch is an ownership mutation even if the task still has a task PR URL.
+fn assert_legacy_supervisor_task_snapshot(
+    before: &djinn_core::models::Task,
+    after: &djinn_core::models::Task,
+    expected_pr_url: &str,
+) {
+    assert_eq!(
+        before.pr_url, None,
+        "the supervisor snapshot must begin without a task-PR identity"
+    );
+    assert_eq!(
+        after.pr_url.as_deref(),
+        Some(expected_pr_url),
+        "the only newly-owned PR identity must be the adopted task PR"
+    );
+    assert_eq!(after.status, "pr_draft");
+    assert_eq!(after.escalation_evidence_at, before.escalation_evidence_at);
+    let mut expected = serde_json::to_value(before).unwrap();
+    let expected = expected.as_object_mut().unwrap();
+    expected.insert("status".into(), serde_json::json!("pr_draft"));
+    expected.insert("pr_url".into(), serde_json::json!(expected_pr_url));
+    // Task-PR adoption deliberately changes only its lifecycle, URL, and
+    // persistence timestamp; every other durable task field remains exact.
+    expected.insert("updated_at".into(), serde_json::json!(after.updated_at));
+    assert_eq!(
+        serde_json::to_value(after).unwrap(),
+        serde_json::Value::Object(expected.clone())
+    );
+}
+
 // ── Unchanged-head remediation rejection predicate ──────────────────────────
 
 /// When `ci_last_remediation_base_sha` matches the post-session head SHA, the
@@ -615,8 +648,9 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
     use djinn_core::events::EventBus;
     use djinn_core::models::{KnowledgeInjectionConfig, TaskRunTrigger};
     use djinn_db::{
-        ActivateProposalBuildAttemptInput, Database, EpicRepository,
-        ProposalBuildAttemptRepository, ReserveProposalBuildAttemptInput, TaskRepository,
+        ActivateProposalBuildAttemptInput, Database, DirectDeliveryCapabilityRepository,
+        EpicRepository, PersistAttemptPrIdentityInput, ProposalBuildAttemptRepository,
+        ReserveProposalBuildAttemptInput, TaskRepository,
     };
     use djinn_runtime::{SupervisorFlow, TaskRunOutcome, TaskRunSpec};
     use tokio_util::sync::CancellationToken;
@@ -629,6 +663,20 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
         Unresolved,
         MissingContract,
         UnknownContract,
+    }
+
+    /// Parking may change only these two task fields. Every call site must
+    /// account for each removed field explicitly rather than treating a partial
+    /// JSON comparison as a full-task snapshot.
+    fn task_snapshot_except_expected_park(task: &djinn_core::models::Task) -> serde_json::Value {
+        let mut task = serde_json::to_value(task).unwrap();
+        {
+            let task = task.as_object_mut().unwrap();
+            for field in ["status", "updated_at"] {
+                task.remove(field);
+            }
+        }
+        task
     }
 
     for fixture in [
@@ -669,36 +717,74 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
                 .await
                 .unwrap();
         }
-        if !matches!(fixture, Fixture::Disabled) {
-            djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
-        }
+        djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
         if matches!(fixture, Fixture::Direct) {
             djinn_db::test_support::seed_direct_delivery_proposal_owner_for_test(
                 &db, &epic.id, "p", "p",
             )
             .await;
-            let attempts = ProposalBuildAttemptRepository::new(db.clone());
-            attempts
-                .reserve(&ReserveProposalBuildAttemptInput {
-                    proposal_id: "p".into(),
-                    proposal_short_id: "p".into(),
-                    build_attempt_id: "a".into(),
-                    build_attempt_short_id: "a".into(),
-                    observed_base_sha: "base".into(),
-                })
-                .await
-                .unwrap();
-            attempts
-                .activate(&ActivateProposalBuildAttemptInput {
-                    build_attempt_id: "a".into(),
-                    expected_lifecycle: djinn_core::models::ProposalBuildAttemptLifecycle::Reserved,
-                    expected_branch_head_sha: None,
-                    branch_head_sha: "base".into(),
-                })
-                .await
-                .unwrap();
+        } else {
+            djinn_db::test_support::seed_direct_delivery_proposal_for_test(&db, "p", "p").await;
         }
+        let attempts = ProposalBuildAttemptRepository::new(db.clone());
+        attempts
+            .reserve(&ReserveProposalBuildAttemptInput {
+                proposal_id: "p".into(),
+                proposal_short_id: "p".into(),
+                build_attempt_id: "a".into(),
+                build_attempt_short_id: "a".into(),
+                observed_base_sha: "base".into(),
+            })
+            .await
+            .unwrap();
+        attempts
+            .activate(&ActivateProposalBuildAttemptInput {
+                build_attempt_id: "a".into(),
+                expected_lifecycle: djinn_core::models::ProposalBuildAttemptLifecycle::Reserved,
+                expected_branch_head_sha: None,
+                branch_head_sha: "base".into(),
+            })
+            .await
+            .unwrap();
+        attempts
+            .persist_pr_identity(&PersistAttemptPrIdentityInput {
+                build_attempt_id: "a".into(),
+                proposal_pr_number: 314,
+                proposal_pr_url: "https://example.test/attempt-pr/314".into(),
+            })
+            .await
+            .unwrap();
+        // Snapshot exact ownership while the epoch contract is readable. The
+        // missing/unknown fixtures intentionally make epoch-gated repositories
+        // unavailable after their mutation below.
+        let task = tasks.get(&task.id).await.unwrap().unwrap();
+        let before_task = task.clone();
+        let before_attempt = attempts.get("a").await.unwrap().unwrap();
+        let before_ledger = tasks
+            .latest_delivery_for_attempt("a", &task.id)
+            .await
+            .unwrap();
+        let before_counts =
+            djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await;
+        assert_eq!(
+            before_counts.build_attempts,
+            Some(1),
+            "fixture must contain exactly the seeded attempt PR owner"
+        );
+        assert_eq!(
+            before_counts.attempt_pr_identities,
+            Some(1),
+            "fixture must contain exactly one complete attempt PR identity"
+        );
+        assert_eq!(
+            before_counts.deliveries,
+            Some(0),
+            "fixture must begin with an exact empty delivery ledger"
+        );
         match fixture {
+            Fixture::Disabled => {
+                djinn_db::test_support::disable_direct_delivery_epoch_for_test(&db).await
+            }
             Fixture::MissingContract => {
                 djinn_db::test_support::remove_direct_delivery_epoch_for_test(&db).await
             }
@@ -735,7 +821,10 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
             cancel: CancellationToken::new(),
             provider_override: None,
         };
-        let task = tasks.get(&task.id).await.unwrap().unwrap();
+        let before_epoch = DirectDeliveryCapabilityRepository::new(db.clone())
+            .probe()
+            .await
+            .map_err(|error| error.to_string());
         clear_boundary_operations();
         let outcome = supervisor_pr_open(&spec, &task, &callbacks).await;
         let operations = take_boundary_operations();
@@ -743,15 +832,66 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
             BoundaryOperation::TaskPrLookup,
             BoundaryOperation::TaskPrAdopt,
             BoundaryOperation::TaskPrCreate,
+            BoundaryOperation::TaskPrInlineCleanup,
+            BoundaryOperation::TaskPrStaleCleanup,
+            BoundaryOperation::TaskPrMerge,
+            BoundaryOperation::TaskPrAutoMerge,
+            BoundaryOperation::TaskPrApproval,
+            BoundaryOperation::TaskPrSignoff,
+            BoundaryOperation::TaskPrCustomEnqueue,
+            BoundaryOperation::AttemptPrCreateOrAdoptRequest,
         ] {
             assert!(
                 !operations.contains(&forbidden),
                 "direct-delivery boundary reached forbidden task-PR effect {forbidden:?}"
             );
         }
+        let after_task = tasks.get(&task.id).await.unwrap().unwrap();
+        let after_epoch = DirectDeliveryCapabilityRepository::new(db.clone())
+            .probe()
+            .await
+            .map_err(|error| error.to_string());
+        assert_eq!(
+            after_epoch, before_epoch,
+            "supervisor must preserve the exact readable or fail-closed epoch probe"
+        );
+        if matches!(fixture, Fixture::MissingContract | Fixture::UnknownContract) {
+            // Restore only the test epoch state so the gated repositories can
+            // reload and compare the pre-existing ownership rows exactly.
+            djinn_db::test_support::restore_active_direct_delivery_epoch_for_test(&db).await;
+        }
+        let after_attempt = attempts.get("a").await.unwrap().unwrap();
+        let after_ledger = tasks
+            .latest_delivery_for_attempt("a", &task.id)
+            .await
+            .unwrap();
+        let after_counts =
+            djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await;
+        assert_eq!(
+            after_attempt, before_attempt,
+            "attempt row and exact PR identity must remain unchanged"
+        );
+        assert_eq!(
+            after_ledger, before_ledger,
+            "exact ledger identities/cardinality must remain unchanged"
+        );
+        assert_eq!(
+            after_counts, before_counts,
+            "supervisor must not create attempts or ledger rows"
+        );
+        assert_eq!(after_attempt.proposal_pr_number, Some(314));
+        assert_eq!(
+            after_attempt.proposal_pr_url.as_deref(),
+            Some("https://example.test/attempt-pr/314")
+        );
         match fixture {
             Fixture::Direct => {
                 assert!(matches!(outcome, TaskRunOutcome::Escalated { .. }));
+                assert_eq!(
+                    serde_json::to_value(&after_task).unwrap(),
+                    serde_json::to_value(&before_task).unwrap(),
+                    "direct supervisor exclusion must preserve the full task row"
+                );
                 assert_eq!(
                     operations,
                     vec![
@@ -762,9 +902,29 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
             }
             Fixture::Unresolved => {
                 assert!(matches!(outcome, TaskRunOutcome::Escalated { .. }));
+                assert_eq!(after_task.status, "needs_lead_intervention");
+                assert_eq!(after_task.pr_url, before_task.pr_url);
+                assert_ne!(
+                    after_task.updated_at, before_task.updated_at,
+                    "parking must persist its timestamp"
+                );
                 assert_eq!(
-                    tasks.get(&task.id).await.unwrap().unwrap().status,
-                    "needs_lead_intervention"
+                    after_task.escalation_evidence_at, before_task.escalation_evidence_at,
+                    "parking must preserve escalation evidence"
+                );
+                assert_eq!(
+                    task_snapshot_except_expected_park(&after_task),
+                    task_snapshot_except_expected_park(&before_task)
+                );
+                assert!(
+                    tasks
+                        .list_activity(&task.id)
+                        .await
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .payload
+                        .contains("no_proposal_owner")
                 );
                 assert_eq!(
                     operations,
@@ -777,9 +937,34 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
             }
             Fixture::MissingContract | Fixture::UnknownContract => {
                 assert!(matches!(outcome, TaskRunOutcome::Escalated { .. }));
+                assert_eq!(after_task.status, "needs_lead_intervention");
+                assert_eq!(after_task.pr_url, before_task.pr_url);
+                assert_ne!(
+                    after_task.updated_at, before_task.updated_at,
+                    "parking must persist its timestamp"
+                );
                 assert_eq!(
-                    tasks.get(&task.id).await.unwrap().unwrap().status,
-                    "needs_lead_intervention"
+                    after_task.escalation_evidence_at, before_task.escalation_evidence_at,
+                    "parking must preserve escalation evidence"
+                );
+                assert_eq!(
+                    task_snapshot_except_expected_park(&after_task),
+                    task_snapshot_except_expected_park(&before_task)
+                );
+                let reason = if matches!(fixture, Fixture::MissingContract) {
+                    "direct_delivery_contract_missing_epoch"
+                } else {
+                    "direct_delivery_contract_unknown_epoch"
+                };
+                assert!(
+                    tasks
+                        .list_activity(&task.id)
+                        .await
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .payload
+                        .contains(reason)
                 );
                 assert_eq!(
                     operations,
@@ -795,6 +980,11 @@ async fn supervisor_pr_open_parks_or_excludes_direct_delivery_before_task_pr_eff
                     "legacy fixture must pass the eligibility gate"
                 );
                 assert_eq!(operations, vec![BoundaryOperation::CapabilityProbe]);
+                assert_eq!(
+                    serde_json::to_value(&after_task).unwrap(),
+                    serde_json::to_value(&before_task).unwrap(),
+                    "legacy eligibility must preserve the full task row"
+                );
                 if matches!(fixture, Fixture::ExplicitLegacy) {
                     assert_eq!(
                         tasks
@@ -827,7 +1017,11 @@ async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
         events::EventBus,
         models::{KnowledgeInjectionConfig, TaskRunTrigger, TransitionAction},
     };
-    use djinn_db::{Database, EpicRepository, TaskRepository};
+    use djinn_db::{
+        ActivateProposalBuildAttemptInput, Database, DirectDeliveryCapabilityRepository,
+        EpicRepository, PersistAttemptPrIdentityInput, ProposalBuildAttemptRepository,
+        ReserveProposalBuildAttemptInput, TaskRepository,
+    };
     use djinn_provider::github_app::installations::prime_cache_for_tests;
     use djinn_runtime::{SupervisorFlow, TaskRunOutcome, TaskRunSpec};
     use djinn_workspace::MirrorManager;
@@ -911,6 +1105,39 @@ async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
     )
     .await;
     prime_cache_for_tests(INSTALLATION, "ghs_installation_fixture");
+    // An unrelated persisted attempt PR must remain exact and cardinality-stable
+    // while this disabled-epoch task takes its retained legacy route.
+    djinn_db::test_support::seed_direct_delivery_proposal_for_test(&db, "p", "p").await;
+    let attempts = ProposalBuildAttemptRepository::new(db.clone());
+    attempts
+        .reserve(&ReserveProposalBuildAttemptInput {
+            proposal_id: "p".into(),
+            proposal_short_id: "p".into(),
+            build_attempt_id: "a".into(),
+            build_attempt_short_id: "a".into(),
+            observed_base_sha: "base".into(),
+        })
+        .await
+        .unwrap();
+    djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
+    attempts
+        .activate(&ActivateProposalBuildAttemptInput {
+            build_attempt_id: "a".into(),
+            expected_lifecycle: djinn_core::models::ProposalBuildAttemptLifecycle::Reserved,
+            expected_branch_head_sha: None,
+            branch_head_sha: "base".into(),
+        })
+        .await
+        .unwrap();
+    attempts
+        .persist_pr_identity(&PersistAttemptPrIdentityInput {
+            build_attempt_id: "a".into(),
+            proposal_pr_number: 314,
+            proposal_pr_url: "https://example.test/attempt-pr/314".into(),
+        })
+        .await
+        .unwrap();
+    djinn_db::test_support::disable_direct_delivery_epoch_for_test(&db).await;
 
     let root = crate::test_helpers::test_tempdir("retained-legacy-git-");
     let mirror_root = root.path().join("mirrors");
@@ -963,19 +1190,63 @@ async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
         cancel: CancellationToken::new(),
         provider_override: None,
     };
+    let before_task = tasks.get(&task.id).await.unwrap().unwrap();
+    let before_attempt = attempts.get("a").await.unwrap().unwrap();
+    let before_ledger = tasks
+        .latest_delivery_for_attempt("a", &task.id)
+        .await
+        .unwrap();
+    let before_counts = djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await;
+    assert_eq!(
+        before_counts.build_attempts,
+        Some(1),
+        "SupportedDisabled fixture must contain exactly one attempt PR identity"
+    );
+    assert_eq!(
+        before_counts.attempt_pr_identities,
+        Some(1),
+        "SupportedDisabled fixture must contain exactly one complete attempt PR identity"
+    );
+    assert_eq!(
+        before_counts.deliveries,
+        Some(0),
+        "SupportedDisabled fixture must snapshot an exact empty ledger"
+    );
+    let before_epoch = DirectDeliveryCapabilityRepository::new(db.clone())
+        .probe()
+        .await
+        .unwrap();
     clear_boundary_operations();
     assert!(
         matches!(supervisor_pr_open(&spec, &tasks.get(&task.id).await.unwrap().unwrap(), &callbacks).await, TaskRunOutcome::PrOpened { ref url, .. } if url == URL)
     );
+    let after_task = tasks.get(&task.id).await.unwrap().unwrap();
+    assert_legacy_supervisor_task_snapshot(&before_task, &after_task, URL);
+    assert_eq!(after_task.pr_url.as_deref(), Some(URL));
+    let after_attempt = attempts.get("a").await.unwrap().unwrap();
+    assert_eq!(after_attempt, before_attempt);
+    assert_eq!(after_attempt.proposal_pr_number, Some(314));
+    assert_eq!(
+        after_attempt.proposal_pr_url.as_deref(),
+        Some("https://example.test/attempt-pr/314")
+    );
     assert_eq!(
         tasks
-            .get(&task.id)
+            .latest_delivery_for_attempt("a", &task.id)
             .await
-            .unwrap()
-            .unwrap()
-            .pr_url
-            .as_deref(),
-        Some(URL)
+            .unwrap(),
+        before_ledger
+    );
+    assert_eq!(
+        djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await,
+        before_counts
+    );
+    assert_eq!(
+        DirectDeliveryCapabilityRepository::new(db.clone())
+            .probe()
+            .await
+            .unwrap(),
+        before_epoch
     );
 
     let (tx, _) = tokio::sync::broadcast::channel(8);
@@ -1053,7 +1324,15 @@ async fn supported_disabled_retained_legacy_adopts_through_every_poller() {
             "missing {expected:?}: {operations:?}"
         );
     }
-    assert!(!operations.contains(&BoundaryOperation::DirectAppend));
+    for forbidden in [
+        BoundaryOperation::DirectAppend,
+        BoundaryOperation::AttemptPrCreateOrAdoptRequest,
+    ] {
+        assert!(
+            !operations.contains(&forbidden),
+            "disabled retained legacy must not reach attempt ownership operation {forbidden:?}: {operations:?}"
+        );
+    }
     super::set_push_url_override_for_test(None);
     set_installation_client_base_url_for_test(None);
     cancel.cancel();
@@ -1076,7 +1355,11 @@ async fn supported_active_explicit_legacy_adopts_through_every_poller() {
         events::EventBus,
         models::{KnowledgeInjectionConfig, TaskRunTrigger, TransitionAction},
     };
-    use djinn_db::{Database, EpicRepository, TaskRepository};
+    use djinn_db::{
+        ActivateProposalBuildAttemptInput, Database, DirectDeliveryCapabilityRepository,
+        EpicRepository, PersistAttemptPrIdentityInput, ProposalBuildAttemptRepository,
+        ReserveProposalBuildAttemptInput, TaskRepository,
+    };
     use djinn_provider::github_app::installations::prime_cache_for_tests;
     use djinn_runtime::{SupervisorFlow, TaskRunOutcome, TaskRunSpec};
     use djinn_workspace::MirrorManager;
@@ -1173,6 +1456,37 @@ async fn supported_active_explicit_legacy_adopts_through_every_poller() {
     )
     .await;
     prime_cache_for_tests(INSTALLATION, "ghs_installation_fixture");
+    // This active-epoch explicit-legacy task must not take ownership of an
+    // existing attempt PR belonging to an unrelated proposal.
+    djinn_db::test_support::seed_direct_delivery_proposal_for_test(&db, "p", "p").await;
+    let attempts = ProposalBuildAttemptRepository::new(db.clone());
+    attempts
+        .reserve(&ReserveProposalBuildAttemptInput {
+            proposal_id: "p".into(),
+            proposal_short_id: "p".into(),
+            build_attempt_id: "a".into(),
+            build_attempt_short_id: "a".into(),
+            observed_base_sha: "base".into(),
+        })
+        .await
+        .unwrap();
+    attempts
+        .activate(&ActivateProposalBuildAttemptInput {
+            build_attempt_id: "a".into(),
+            expected_lifecycle: djinn_core::models::ProposalBuildAttemptLifecycle::Reserved,
+            expected_branch_head_sha: None,
+            branch_head_sha: "base".into(),
+        })
+        .await
+        .unwrap();
+    attempts
+        .persist_pr_identity(&PersistAttemptPrIdentityInput {
+            build_attempt_id: "a".into(),
+            proposal_pr_number: 315,
+            proposal_pr_url: "https://example.test/attempt-pr/315".into(),
+        })
+        .await
+        .unwrap();
 
     let root = crate::test_helpers::test_tempdir("retained-legacy-git-");
     let mirror_root = root.path().join("mirrors");
@@ -1225,19 +1539,63 @@ async fn supported_active_explicit_legacy_adopts_through_every_poller() {
         cancel: CancellationToken::new(),
         provider_override: None,
     };
+    let before_task = tasks.get(&task.id).await.unwrap().unwrap();
+    let before_attempt = attempts.get("a").await.unwrap().unwrap();
+    let before_ledger = tasks
+        .latest_delivery_for_attempt("a", &task.id)
+        .await
+        .unwrap();
+    let before_counts = djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await;
+    assert_eq!(
+        before_counts.build_attempts,
+        Some(1),
+        "explicit-legacy fixture must contain exactly one attempt PR identity"
+    );
+    assert_eq!(
+        before_counts.attempt_pr_identities,
+        Some(1),
+        "explicit-legacy fixture must contain exactly one complete attempt PR identity"
+    );
+    assert_eq!(
+        before_counts.deliveries,
+        Some(0),
+        "explicit-legacy fixture must snapshot an exact empty ledger"
+    );
+    let before_epoch = DirectDeliveryCapabilityRepository::new(db.clone())
+        .probe()
+        .await
+        .unwrap();
     clear_boundary_operations();
     assert!(
         matches!(supervisor_pr_open(&spec, &tasks.get(&task.id).await.unwrap().unwrap(), &callbacks).await, TaskRunOutcome::PrOpened { ref url, .. } if url == URL)
     );
+    let after_task = tasks.get(&task.id).await.unwrap().unwrap();
+    assert_legacy_supervisor_task_snapshot(&before_task, &after_task, URL);
+    assert_eq!(after_task.pr_url.as_deref(), Some(URL));
+    let after_attempt = attempts.get("a").await.unwrap().unwrap();
+    assert_eq!(after_attempt, before_attempt);
+    assert_eq!(after_attempt.proposal_pr_number, Some(315));
+    assert_eq!(
+        after_attempt.proposal_pr_url.as_deref(),
+        Some("https://example.test/attempt-pr/315")
+    );
     assert_eq!(
         tasks
-            .get(&task.id)
+            .latest_delivery_for_attempt("a", &task.id)
             .await
-            .unwrap()
-            .unwrap()
-            .pr_url
-            .as_deref(),
-        Some(URL)
+            .unwrap(),
+        before_ledger
+    );
+    assert_eq!(
+        djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await,
+        before_counts
+    );
+    assert_eq!(
+        DirectDeliveryCapabilityRepository::new(db.clone())
+            .probe()
+            .await
+            .unwrap(),
+        before_epoch
     );
 
     let (tx, _) = tokio::sync::broadcast::channel(8);
@@ -1318,6 +1676,7 @@ async fn supported_active_explicit_legacy_adopts_through_every_poller() {
     for forbidden in [
         BoundaryOperation::DirectAppend,
         BoundaryOperation::TaskPrCreate,
+        BoundaryOperation::AttemptPrCreateOrAdoptRequest,
     ] {
         assert!(
             !operations.contains(&forbidden),
