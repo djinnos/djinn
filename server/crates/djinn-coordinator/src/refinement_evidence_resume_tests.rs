@@ -9,6 +9,8 @@ use djinn_core::models::NeedsEvidenceClaim;
 use djinn_db::{
     EffectiveCreatorProvenance, ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository,
 };
+use djinn_slot::finalize_handlers::handle_submit_work;
+use tokio_util::sync::CancellationToken;
 
 async fn seed_typed_return_delivery(
     db: &djinn_db::Database,
@@ -23,16 +25,26 @@ async fn seed_typed_return_delivery(
     )
     .await;
     let raw = fixture.return_payload;
-    TaskRepository::new(db.clone(), EventBus::noop())
-        .log_activity(
-            Some(spike_task_id),
-            "worker",
-            "worker",
-            "tribunal_evidence_return_v1",
-            &raw,
+    let context =
+        djinn_slot::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    assert!(
+        handle_submit_work(
+            &serde_json::json!({
+                "task_id": spike_task_id,
+                "commit_title": "deliver typed evidence",
+                "summary": "production typed evidence delivery",
+                "files_changed": [],
+                "remaining_concerns": [],
+                "tribunal_evidence_return_v1": serde_json::from_str::<serde_json::Value>(&raw)
+                    .expect("canonical return JSON"),
+            }),
+            spike_task_id,
+            "fixture-session",
+            &context,
         )
-        .await
-        .expect("log durable typed return");
+        .await,
+        "production submit_work must durably emit the typed envelope"
+    );
     raw
 }
 

@@ -56,6 +56,25 @@ pub async fn typed_evidence_validation_snapshot_for_test(
     }
 }
 
+/// Read a fixture finding's persisted validation without re-delivering it.
+/// This deliberately observes storage after the coordinator live event path.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn typed_evidence_validation_snapshot_for_finding_for_test(
+    db: &Database,
+    finding_id: &str,
+) -> TypedEvidenceValidationSnapshotForTest {
+    let validation_id: String = sqlx::query_scalar(
+        "SELECT v.id FROM typed_evidence_validation_results v \
+         JOIN typed_evidence_attempts a ON a.id=v.attempt_id \
+         WHERE a.finding_id=$1 ORDER BY v.created_at DESC LIMIT 1",
+    )
+    .bind(finding_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    typed_evidence_validation_snapshot_for_test(db, &validation_id).await
+}
+
 /// Exact finding/attempt identity and a repository-valid durable return.
 ///
 /// **Not for production use.** Panics on SQL errors.

@@ -95,6 +95,7 @@ pub mod test_support {
         task_attempt_count_for_test, task_row_count_for_test, task_status_for_test,
         typed_evidence_disposition_snapshot_for_test, typed_evidence_retry_snapshot_for_test,
         typed_evidence_transition_count_for_validation_for_test,
+        typed_evidence_validation_snapshot_for_finding_for_test,
         typed_evidence_validation_snapshot_for_test,
     };
 }
