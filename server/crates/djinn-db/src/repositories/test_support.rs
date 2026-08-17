@@ -20,9 +20,39 @@ pub async fn activate_direct_delivery_epoch_for_test(db: &Database) {
     .expect("failed to activate direct-delivery test epoch");
 }
 
+/// Seed an attempt-owning proposal without assigning it to an epic.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn seed_direct_delivery_proposal_for_test(
+    db: &Database,
+    proposal_id: &str,
+    proposal_short_id: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("INSERT INTO proposals (id, short_id, title) VALUES ($1, $2, $2)")
+        .bind(proposal_id)
+        .bind(proposal_short_id)
+        .execute(db.pool())
+        .await
+        .expect("failed to seed unowned direct-delivery proposal");
+}
+
+/// Return the persisted direct-delivery epoch to its shipped disabled state.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn disable_direct_delivery_epoch_for_test(db: &Database) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "UPDATE direct_delivery_epochs SET state = 'disabled', generation = 0 \
+         WHERE name = 'direct_delivery_v1'",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to disable direct-delivery test epoch");
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirectDeliveryMatrixCountsForTest {
     pub build_attempts: Option<i64>,
+    pub attempt_pr_identities: Option<i64>,
     pub deliveries: Option<i64>,
 }
 
@@ -37,12 +67,20 @@ pub async fn direct_delivery_matrix_counts_for_test(
             .fetch_one(db.pool())
             .await
             .ok();
+    let attempt_pr_identities = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM proposal_build_attempts \
+         WHERE proposal_pr_number IS NOT NULL AND proposal_pr_url IS NOT NULL",
+    )
+    .fetch_one(db.pool())
+    .await
+    .ok();
     let deliveries = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM task_deliveries")
         .fetch_one(db.pool())
         .await
         .ok();
     DirectDeliveryMatrixCountsForTest {
         build_attempts,
+        attempt_pr_identities,
         deliveries,
     }
 }
@@ -80,6 +118,20 @@ pub async fn remove_direct_delivery_epoch_for_test(db: &Database) {
         .execute(db.pool())
         .await
         .expect("failed to remove direct-delivery test epoch");
+}
+
+/// Restore the readable active epoch after a focused fail-closed fixture.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn restore_active_direct_delivery_epoch_for_test(db: &Database) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "INSERT INTO direct_delivery_epochs (name, state, generation) \
+         VALUES ('direct_delivery_v1', 'active', 1) \
+         ON CONFLICT (name) DO UPDATE SET state = 'active', generation = 1",
+    )
+    .execute(db.pool())
+    .await
+    .expect("failed to restore active direct-delivery test epoch");
 }
 
 /// Persist an unknown epoch state after dropping the shipped check constraint.

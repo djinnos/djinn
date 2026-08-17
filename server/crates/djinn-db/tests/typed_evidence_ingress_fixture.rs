@@ -103,8 +103,43 @@ async fn canonical_typed_evidence_ingress_fixtures_persist_all_outcomes_and_hydr
                     snapshot.checks[0]["invocation_id"]
                 );
                 assert_eq!(snapshot.findings.len(), 1);
+                assert!(
+                    !snapshot.findings[0]["finding_id"]
+                        .as_str()
+                        .unwrap()
+                        .is_empty()
+                );
                 assert_eq!(snapshot.findings[0]["usable"], true);
-                assert_eq!(snapshot.finding_anchors, snapshot.check_anchors);
+                assert!(
+                    !snapshot.check_anchors[0]["anchor_id"]
+                        .as_str()
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(
+                    !snapshot.finding_anchors[0]["anchor_id"]
+                        .as_str()
+                        .unwrap()
+                        .is_empty()
+                );
+                assert_ne!(
+                    snapshot.finding_anchors[0]["anchor_id"],
+                    snapshot.check_anchors[0]["anchor_id"]
+                );
+                for field in [
+                    "check_id",
+                    "method",
+                    "locator",
+                    "health",
+                    "detail",
+                    "immutable_identity",
+                    "method_compatible",
+                ] {
+                    assert_eq!(
+                        snapshot.finding_anchors[0][field], snapshot.check_anchors[0][field],
+                        "finding anchor must preserve hydrated {field} provenance"
+                    );
+                }
             }
             "partial" => {
                 assert_eq!(snapshot.checks.len(), 2);

@@ -51,6 +51,9 @@ pub(crate) enum BoundaryOperation {
     TaskPrApproval,
     TaskPrSignoff,
     TaskPrCustomEnqueue,
+    /// The attempt-scoped draft-PR request was issued before its provider
+    /// response was awaited or classified.
+    AttemptPrCreateOrAdoptRequest,
 }
 
 #[cfg(test)]
@@ -91,6 +94,9 @@ pub(crate) fn observe_boundary_operation(operation: &'static str) {
             "task_pr_approval" => BoundaryOperation::TaskPrApproval,
             "task_pr_signoff" => BoundaryOperation::TaskPrSignoff,
             "task_pr_custom_enqueue" => BoundaryOperation::TaskPrCustomEnqueue,
+            "attempt_pr_create_or_adopt_request" => {
+                BoundaryOperation::AttemptPrCreateOrAdoptRequest
+            }
             _ => return,
         };
         BOUNDARY_OPERATIONS.lock().unwrap().push(operation);
