@@ -132,20 +132,20 @@ impl ProposalAttemptLifecycle {
             .branch_head_sha
             .clone()
             .ok_or_else(|| anyhow!("missing reconciled attempt head"))?;
-        let pr = match self
-            .github
-            .create_or_adopt_attempt_draft_pr(
-                &self.owner,
-                &self.repo,
-                CreateAttemptDraftPrParams {
-                    title: input.title,
-                    body: input.body,
-                    head: attempt.branch_name.clone(),
-                    expected_head_sha: head.clone(),
-                },
-            )
-            .await
-        {
+        // Emit adjacent to the real request, before its response can be
+        // classified as ProviderFailure. The recorder is a production no-op.
+        crate::direct_delivery::observe_boundary_operation("attempt_pr_create_or_adopt_request");
+        let attempt_pr_request = self.github.create_or_adopt_attempt_draft_pr(
+            &self.owner,
+            &self.repo,
+            CreateAttemptDraftPrParams {
+                title: input.title,
+                body: input.body,
+                head: attempt.branch_name.clone(),
+                expected_head_sha: head.clone(),
+            },
+        );
+        let pr = match attempt_pr_request.await {
             AttemptDraftPrResult::Created(pr) | AttemptDraftPrResult::AdoptedExact(pr) => pr,
             AttemptDraftPrResult::ProposalPrIdentityMismatch { .. } => {
                 return self
@@ -324,6 +324,9 @@ pub fn retirement_tag(branch: &str) -> String {
 mod tests {
     use super::{
         AttemptLifecycleOutcome, ProposalAttemptLifecycle, StartAttemptInput, retirement_tag,
+    };
+    use crate::direct_delivery::{
+        BoundaryOperation, clear_boundary_operations, take_boundary_operations,
     };
     use djinn_core::events::EventBus;
     use djinn_core::models::ProposalBuildAttemptLifecycle;
@@ -525,6 +528,53 @@ mod tests {
                 .expect("retry stop"),
             AttemptLifecycleOutcome::Retired(_)
         ));
+    }
+
+    /// A failed draft-PR POST still proves the attempt-scoped request boundary
+    /// was crossed because observation occurs before result classification.
+    #[tokio::test]
+    async fn attempt_pr_request_observation_survives_provider_failure() {
+        let (db, _proposals, proposal) = db_and_proposal().await;
+        let branch = format!("proposal/{}/failed", proposal.short_id);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/git/refs"))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/o/r/git/ref/heads/{branch}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"object":{"sha":SHA}})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls"))
+            .and(query_param("state", "open"))
+            .and(query_param("head", format!("o:{branch}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/pulls"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("provider unavailable"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        clear_boundary_operations();
+        assert!(
+            service(db, &server)
+                .start(input(&proposal, "attempt-failure", "failed"))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            take_boundary_operations(),
+            vec![BoundaryOperation::AttemptPrCreateOrAdoptRequest],
+            "the request observation must survive ProviderFailure classification"
+        );
     }
 
     #[test]
