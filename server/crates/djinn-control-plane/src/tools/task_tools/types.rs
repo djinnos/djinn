@@ -1421,6 +1421,47 @@ pub struct BoardHealthStrandedReadyFinding {
     pub severity: String,
     pub threshold: BoardHealthStrandedThreshold,
     pub dispatch_gate: BoardHealthDispatchGate,
+    /// Present when a visible dispatch gate has been explaining this task's
+    /// non-dispatch for longer than
+    /// `BoardHealthStrandedReady::gate_exclusion_bound_minutes`.
+    ///
+    /// Such a task would otherwise have been excluded from this section
+    /// entirely. It is reported instead, with the gate as evidence: a gate is
+    /// a claim about transience, and a claim that has held for hours is not
+    /// evidence of health. Absent on every task no gate is suppressing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_escalation: Option<BoardHealthGateEscalation>,
+}
+
+/// Why a stranded-ready finding was reported despite a gate that would
+/// ordinarily have excluded it.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthGateEscalation {
+    /// Always `true` when present. A block that says `false` is not an
+    /// escalation and must not be read as one.
+    pub escalated: bool,
+    /// Which gate(s) were overridden: `breaker_cooldown`,
+    /// `rate_limit_backoff`, `owner_credential`. A deliberate operator pause
+    /// (`manual_dispatch_pause`) is never bounded and never appears here.
+    #[serde(default)]
+    pub overridden_gates: Vec<String>,
+    /// The same strand clock as `elapsed_minutes` — there is only one.
+    pub suppressed_minutes: i64,
+    /// The bound the suppression exceeded.
+    pub bound_minutes: i64,
+    /// `bound_minutes` as a multiple of the base stranded threshold.
+    #[serde(default)]
+    pub bound_multiple: i64,
+    /// Row evidence supporting the escalation (`cooldown_until`,
+    /// `failure_streak`, `inflight_model_id`, `last_dispatched_role`,
+    /// `has_owner_credential`).
+    #[serde(default)]
+    pub evidence: serde_json::Value,
+    /// One human-readable line naming the gate, the model and the duration.
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub note: String,
 }
 
 /// Bounded rollup of stranded-ready findings on `board_health`.
@@ -1429,6 +1470,11 @@ pub struct BoardHealthStrandedReady {
     pub total: i64,
     /// Base threshold (30 minutes) used to derive severity.
     pub threshold_minutes: i64,
+    /// How long a visible dispatch gate may keep excusing a task before the
+    /// task is reported anyway with the gate as evidence (180 minutes = 6× the
+    /// base threshold). A manual operator pause is exempt.
+    #[serde(default)]
+    pub gate_exclusion_bound_minutes: i64,
     #[serde(default)]
     pub findings: Vec<BoardHealthStrandedReadyFinding>,
 }

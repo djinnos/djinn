@@ -6,9 +6,11 @@
 //!   * [`liveness_outcomes_section`]  — bounded recent liveness-classifier evidence.
 //!   * [`protocol_violations_section`] — bounded recent protocol-violation evidence.
 //!   * [`stranded_ready_section`]     — ready/dispatchable tasks that are not being
-//!     picked up, with dispatch-gate evidence and exclusion of tasks whose
-//!     non-dispatch is already explained by a visible gate (breaker cooldown,
-//!     rate-limit backoff, manual pause, or revoked owner credentials).
+//!     picked up, with dispatch-gate evidence and **time-bounded** exclusion of
+//!     tasks whose non-dispatch is already explained by a visible gate (breaker
+//!     cooldown, rate-limit backoff, manual pause, or revoked owner
+//!     credentials). See [`GATE_EXCLUSION_BOUND_MINUTES`] for why the bound
+//!     exists and what it costs.
 //!
 //! Every query here uses runtime `sqlx::query`/`query_scalar` (not the
 //! compile-time macros) so the sections stay resilient to schema evolution and
@@ -29,6 +31,66 @@ const ATTRIBUTION_FINDINGS_LIMIT: i64 = 100;
 /// Base stranded-ready threshold: a ready task unclaimed for this many minutes
 /// is `warning`; ≥2× is `error`; ≥6× is `critical`.
 const STRANDED_THRESHOLD_MINUTES: i64 = 30;
+
+/// How long a visible dispatch gate may go on excusing a task's non-dispatch
+/// before the task is reported anyway, with the gate carried as *evidence*
+/// rather than used as a *silencer*.
+///
+/// # Why a bound has to exist at all
+///
+/// Every gate this section excludes on is a claim about **transience**. A
+/// future `dispatch_state.cooldown_until` says "the dispatcher is backing off
+/// and will retry shortly". `failure_streak >= 3` says the backoff ladder has
+/// tripped. A revoked owner credential says the owner has no usable key *right
+/// now*. All three are perfectly good reasons to stay quiet for a few minutes,
+/// and none of them is evidence of health once it has held for hours.
+/// "Explained" is not "healthy", and an unbounded exclusion turns a monitor
+/// into a silencer with no expiry.
+///
+/// # The concrete failure mode (2026-08-12 → 2026-08-16)
+///
+/// A user's `implement` lane held exactly one model, that model was hard-
+/// disabled by the model-health breaker, and every coordinator tick resolved
+/// the only candidate → `breaker_open` → `failover_chain_exhausted` → a durable
+/// `cooldown_until` at the ladder's ceiling (`MAX_DISPATCH_COOLDOWN`, ~30 min).
+/// Because that path deliberately does NOT advance `dispatch_failure_streak`
+/// (the task is not at fault), the state was self-refreshing and permanent.
+///
+/// The `stranded_ready` check did still fire critical findings through that
+/// window — it saw the tasks in the gap after a cooldown lapsed and before the
+/// next tick re-armed it. That is the point: the exclusion left a **sawtooth
+/// blind window** covering most of every ~30-minute cycle, and it only failed
+/// to be a total blackout because the sampling cadence happened to beat the
+/// refresh cadence. Nothing guarantees that. A provider-stated `Retry-After` is
+/// explicitly allowed to exceed the ladder ceiling (up to
+/// `PROVIDER_RETRY_AFTER_MAX`, 6h), and under that shape the same code path is
+/// silent for the entire outage with no gap to sample.
+///
+/// # Why 6× the base threshold (3 hours)
+///
+/// * It is the point the severity ladder **already** calls `critical`. A gate
+///   that still claims to explain a task the same code has just classified as
+///   a critical strand is asserting that an outage is normal. One number, one
+///   meaning.
+/// * The escalating dispatch cooldown ceiling is 30 minutes, so 3 hours is six
+///   consecutive ceiling-length cooldowns — far past any transient blip, and
+///   inside a single working shift so an operator sees it the same day.
+/// * A provider `Retry-After` may legitimately run to 6h, so a genuine long
+///   quota window WILL escalate at the 3h mark. That is deliberate: the cost of
+///   the false positive is one operator glance at a finding that carries
+///   `cooldown_until` and names the model, and the cost of the false negative
+///   is an unattended stall. The asymmetry is not close.
+///
+/// Escalation is purely observational. It changes nothing about dispatch — it
+/// only stops this section from claiming the silence is fine.
+const GATE_EXCLUSION_BOUND_MINUTES: i64 = STRANDED_THRESHOLD_MINUTES * 6;
+
+/// Gate identities that may be overridden past [`GATE_EXCLUSION_BOUND_MINUTES`].
+/// These names match the entries in
+/// [`super::board_health_dispatch_gate::EVALUATED_GATES`].
+const GATE_BREAKER_COOLDOWN: &str = "breaker_cooldown";
+const GATE_RATE_LIMIT_BACKOFF: &str = "rate_limit_backoff";
+const GATE_OWNER_CREDENTIAL: &str = "owner_credential";
 
 /// Model-health statuses that indicate the chosen model is NOT dispatchable.
 /// Any other status (including the unprobed default `unknown`) is treated as
@@ -350,13 +412,31 @@ pub(super) async fn direct_delivery_section(pool: &sqlx::PgPool) -> serde_json::
 /// evidence.
 ///
 /// Tasks whose non-dispatch is already explained by a visible gate are
-/// **excluded** so the findings surface genuine dispatch starvation rather than
-/// intentionally-held work:
-///   * breaker-open (a future `cooldown_until`),
-///   * rate-limit backoff (`failure_streak >= 3`),
-///   * manual pause (a `paused` session or a project/user `dispatch_pauses` row),
+/// excluded so the findings surface genuine dispatch starvation rather than
+/// intentionally-held work — but, except where noted, only for
+/// [`GATE_EXCLUSION_BOUND_MINUTES`]:
+///   * breaker-open (a future `cooldown_until`) — **bounded**,
+///   * rate-limit backoff (`failure_streak >= 3`) — **bounded**,
 ///   * owner-credential-blocked (the creator has credentials but they are all
-///     revoked and no org-shared fallback credential is available).
+///     revoked and no org-shared fallback credential is available) —
+///     **bounded**,
+///   * manual pause (a `paused` session or a project/user `dispatch_pauses`
+///     row) — **unbounded**.
+///
+/// The manual pause is the one deliberate, human-authored gate in the list. A
+/// human decided this work should stop, that decision has its own operator
+/// surface (`dispatch_pause_status` / the paused session), and it is expected
+/// to outlive any threshold — a release freeze that alarms after three hours
+/// trains operators to ignore this check, which is how a monitor dies. The
+/// other three are *environmental*: nobody chose them, nobody owns them, and
+/// nobody is watching a per-task `cooldown_until`. A revoked credential in
+/// particular is exactly the same shape as the breaker hard-disable — a
+/// side effect of an expiry that no human will ever revisit — so it is bounded
+/// with the rest.
+///
+/// Past the bound the task is reported with a `gate_escalation` object naming
+/// which gate was overridden and carrying its evidence, and the gate's reason
+/// is added to `dispatch_gate.reasons`.
 ///
 /// Surviving findings carry a `dispatch_gate` object built by
 /// [`super::board_health_dispatch_gate`]. **Its verdict is `blocked` or
@@ -481,49 +561,12 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
             let task_status: String = row.get("status");
             let issue_type: String = row.get("issue_type");
 
-            // ── Exclusion gates ────────────────────────────────────────────
-            // Each of these explains, from visible DB state, why the task is
-            // (correctly) not being dispatched, so it is not "stranded".
-
-            // Breaker-open: a future cooldown deadline.
-            let cooldown_until: Option<String> = row.try_get("cooldown_until").ok().flatten();
-            let breaker_open = cooldown_until
-                .as_deref()
-                .is_some_and(|cd| cd > now_iso.as_str());
-            if breaker_open {
-                return None;
-            }
-
-            // Rate-limit backoff: the dispatch backoff ladder has tripped.
-            let failure_streak: i64 = row.try_get("failure_streak").unwrap_or(0);
-            let rate_limited = failure_streak >= 3;
-            if rate_limited {
-                return None;
-            }
-
-            // Manual pause: a paused session or a project/user dispatch pause.
-            let has_paused_session: bool = row.try_get("has_paused_session").unwrap_or(false);
-            let dispatch_paused: bool = row.try_get("dispatch_paused").unwrap_or(false);
-            let manually_paused = has_paused_session || dispatch_paused;
-            if manually_paused {
-                return None;
-            }
-
-            // Owner-credential-blocked: the creator's credentials are all
-            // revoked and no org-shared fallback is available. Task creators
-            // are required by the catalog contract.
-            let _created_by: String = row.get("created_by_user_id");
-            let has_active_credential: bool = row.try_get("has_active_credential").unwrap_or(false);
-            let has_owner_credential: bool = row.try_get("has_owner_credential").unwrap_or(false);
-            // An active credential is either the creator's private credential
-            // or an active org-shared credential (owner_user_id IS NULL).
-            let credential_available = has_active_credential;
-            let credential_blocked = !has_active_credential && has_owner_credential;
-            if credential_blocked {
-                return None;
-            }
-
             // ── Unclaimed-since / severity ─────────────────────────────────
+            // Computed BEFORE the exclusion gates, because the bound on how
+            // long a gate may go on excusing a task is measured on this same
+            // clock. There is exactly one notion of "how long has this been
+            // stuck" in this section and this is it.
+            //
             // The latest BECAME-DISPATCHABLE signal wins; `updated_at` is only
             // a fallback, never part of that comparison. See `strand_clock` for
             // why the distinction matters — folding `updated_at` into the max
@@ -559,9 +602,85 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
                 "warning"
             };
 
-            // ── Model / image readiness evidence ───────────────────────────
+            // ── Exclusion gates ────────────────────────────────────────────
+            // Each of these explains, from visible DB state, why the task is
+            // (correctly) not being dispatched — but only for as long as the
+            // explanation is plausibly transient. See
+            // `GATE_EXCLUSION_BOUND_MINUTES`.
+
+            // Breaker-open: a future cooldown deadline.
+            let cooldown_until: Option<String> = row.try_get("cooldown_until").ok().flatten();
+            let breaker_open = cooldown_until
+                .as_deref()
+                .is_some_and(|cd| cd > now_iso.as_str());
+
+            // Rate-limit backoff: the dispatch backoff ladder has tripped.
+            let failure_streak: i64 = row.try_get("failure_streak").unwrap_or(0);
+            let rate_limited = failure_streak >= 3;
+
+            // Manual pause: a paused session or a project/user dispatch pause.
+            let has_paused_session: bool = row.try_get("has_paused_session").unwrap_or(false);
+            let dispatch_paused: bool = row.try_get("dispatch_paused").unwrap_or(false);
+            let manually_paused = has_paused_session || dispatch_paused;
+
+            // Owner-credential-blocked: the creator's credentials are all
+            // revoked and no org-shared fallback is available. Task creators
+            // are required by the catalog contract.
+            let _created_by: String = row.get("created_by_user_id");
+            let has_active_credential: bool = row.try_get("has_active_credential").unwrap_or(false);
+            let has_owner_credential: bool = row.try_get("has_owner_credential").unwrap_or(false);
+            // An active credential is either the creator's private credential
+            // or an active org-shared credential (owner_user_id IS NULL).
+            let credential_available = has_active_credential;
+            let credential_blocked = !has_active_credential && has_owner_credential;
+
+            // A manual pause is a human decision with its own operator surface
+            // and no expiry this section is entitled to override. It silences
+            // the finding for as long as it is in force.
+            if manually_paused {
+                return None;
+            }
+
+            // Environmental gates. These suppress the finding only while the
+            // transience they assert is still credible.
+            let mut overridden_gates: Vec<&'static str> = Vec::new();
+            if breaker_open {
+                overridden_gates.push(GATE_BREAKER_COOLDOWN);
+            }
+            if rate_limited {
+                overridden_gates.push(GATE_RATE_LIMIT_BACKOFF);
+            }
+            if credential_blocked {
+                overridden_gates.push(GATE_OWNER_CREDENTIAL);
+            }
+
             let inflight_model_id: Option<String> = row.try_get("inflight_model_id").ok().flatten();
-            let mut reasons: Vec<&str> = Vec::new();
+            let last_dispatched_role: Option<String> =
+                row.try_get("last_dispatched_role").ok().flatten();
+
+            let mut reasons: Vec<&'static str> = Vec::new();
+            let gate_escalation = if overridden_gates.is_empty() {
+                serde_json::Value::Null
+            } else if elapsed < GATE_EXCLUSION_BOUND_MINUTES {
+                // Still plausibly transient: a 60-second blip and a 30-minute
+                // cooldown are both correctly silent here.
+                return None;
+            } else {
+                for gate in &overridden_gates {
+                    reasons.push(escalated_gate_reason(gate));
+                }
+                gate_escalation_json(
+                    &overridden_gates,
+                    elapsed,
+                    cooldown_until.as_deref(),
+                    failure_streak,
+                    inflight_model_id.as_deref(),
+                    last_dispatched_role.as_deref(),
+                    has_owner_credential,
+                )
+            };
+
+            // ── Model / image readiness evidence ───────────────────────────
             let image_ready = match inflight_model_id.as_deref() {
                 // No model chosen yet — nothing model-specific to block on.
                 None => true,
@@ -592,7 +711,7 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
                 manually_paused,
                 rate_limited,
                 credential_available,
-                row.get::<Option<String>, _>("last_dispatched_role"),
+                last_dispatched_role,
                 cooldown_until,
                 super::board_health_dispatch_gate::lease_gate(&lease_ledger, &task_id),
                 super::board_health_kueue_admission::kueue_gate(&kueue_projection, &task_id),
@@ -617,7 +736,8 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
                     "error_minutes":    error_threshold,
                     "critical_minutes": critical_threshold,
                 }),
-                "dispatch_gate": dispatch_gate,
+                "dispatch_gate":    dispatch_gate,
+                "gate_escalation":  gate_escalation,
             }))
         })
         .collect();
@@ -625,7 +745,88 @@ pub(super) async fn stranded_ready_section(pool: &sqlx::PgPool) -> serde_json::V
     serde_json::json!({
         "total":             findings.len(),
         "threshold_minutes": STRANDED_THRESHOLD_MINUTES,
+        "gate_exclusion_bound_minutes": GATE_EXCLUSION_BOUND_MINUTES,
         "findings":          findings,
+    })
+}
+
+/// The `dispatch_gate.reasons` entry contributed by an overridden gate.
+///
+/// These are distinct from the gate names themselves so a reader can tell
+/// "this gate is firing" from "this gate has been firing for longer than it
+/// can plausibly be transient".
+fn escalated_gate_reason(gate: &str) -> &'static str {
+    match gate {
+        GATE_BREAKER_COOLDOWN => "breaker_cooldown_sustained_past_bound",
+        GATE_RATE_LIMIT_BACKOFF => "rate_limit_backoff_sustained_past_bound",
+        GATE_OWNER_CREDENTIAL => "owner_credential_revoked_sustained_past_bound",
+        // Unreachable through the call site above, which only ever passes the
+        // three constants. Present so a fourth bounded gate cannot be added
+        // and silently lose its reason — the failure this whole section keeps
+        // relearning.
+        _ => "gate_suppression_sustained_past_bound",
+    }
+}
+
+/// Build the `gate_escalation` payload for a task whose gate has been
+/// suppressing the finding for longer than [`GATE_EXCLUSION_BOUND_MINUTES`].
+///
+/// Everything here is already on the row; nothing is re-queried and nothing is
+/// inferred. `summary` exists so the first line an operator reads names the
+/// gate, the model and the duration together.
+fn gate_escalation_json(
+    overridden_gates: &[&'static str],
+    elapsed_minutes: i64,
+    cooldown_until: Option<&str>,
+    failure_streak: i64,
+    inflight_model_id: Option<&str>,
+    last_dispatched_role: Option<&str>,
+    has_owner_credential: bool,
+) -> serde_json::Value {
+    let model = inflight_model_id.unwrap_or("<no model chosen>");
+    let summary = overridden_gates
+        .iter()
+        .map(|gate| match *gate {
+            GATE_BREAKER_COOLDOWN => format!(
+                "a breaker cooldown on model {model} (cooldown_until={}) has suppressed this \
+                 task for {elapsed_minutes} minutes",
+                cooldown_until.unwrap_or("<unset>")
+            ),
+            GATE_RATE_LIMIT_BACKOFF => format!(
+                "rate-limit backoff (failure_streak={failure_streak}) has suppressed this task \
+                 for {elapsed_minutes} minutes"
+            ),
+            GATE_OWNER_CREDENTIAL => format!(
+                "the owner's credentials are all revoked with no org-shared fallback, which has \
+                 suppressed this task for {elapsed_minutes} minutes"
+            ),
+            other => format!("gate {other} has suppressed this task for {elapsed_minutes} minutes"),
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    serde_json::json!({
+        "escalated":          true,
+        "overridden_gates":   overridden_gates,
+        "suppressed_minutes": elapsed_minutes,
+        "bound_minutes":      GATE_EXCLUSION_BOUND_MINUTES,
+        "bound_multiple":     GATE_EXCLUSION_BOUND_MINUTES / STRANDED_THRESHOLD_MINUTES,
+        "evidence": {
+            "cooldown_until":       cooldown_until,
+            "failure_streak":       failure_streak,
+            "inflight_model_id":    inflight_model_id,
+            "last_dispatched_role": last_dispatched_role,
+            "has_owner_credential": has_owner_credential,
+        },
+        "summary": summary,
+        "note": "This task WOULD have been excluded from stranded_ready because a visible \
+                 dispatch gate explained its non-dispatch. The gate has now been explaining it \
+                 for longer than `bound_minutes`, which is longer than any of these gates can \
+                 plausibly be transient, so the gate is reported as evidence instead of used to \
+                 suppress the finding. `suppressed_minutes` is the same strand clock as \
+                 `elapsed_minutes` — there is only one. Escalation is observational: it does not \
+                 change dispatch, it only stops this section asserting the silence is fine. A \
+                 deliberate operator pause is NOT bounded and never appears here.",
     })
 }
 
