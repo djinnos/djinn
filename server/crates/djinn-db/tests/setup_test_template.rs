@@ -22,11 +22,25 @@ async fn setup_test_template() {
     let mut conn = PgConnection::connect(&admin_url)
         .await
         .expect("connect admin");
+    // Clear `datistemplate` BEFORE dropping. A database still marked as a
+    // template refuses `DROP DATABASE` with 55006, and because the drop below
+    // used to be `let _ =`, that refusal was swallowed and only resurfaced as a
+    // baffling 42P04 "already exists" on the CREATE. That made this helper —
+    // the one AC that licenses `DJINN_TEST_TEMPLATE_PREBUILT` — fail on every
+    // machine that had already built a template once, i.e. every rerun.
+    let _ = sqlx::query(
+        "UPDATE pg_database SET datistemplate = FALSE WHERE datname = 'djinn_test_template'",
+    )
+    .execute(&mut conn)
+    .await;
     let _ = sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'djinn_test_template' AND pid <> pg_backend_pid()")
         .execute(&mut conn).await;
-    let _ = sqlx::query("DROP DATABASE IF EXISTS djinn_test_template")
+    // Not `let _ =`: a drop that cannot happen must fail here, where the error
+    // names the real cause, rather than being re-reported as a create conflict.
+    sqlx::query("DROP DATABASE IF EXISTS djinn_test_template")
         .execute(&mut conn)
-        .await;
+        .await
+        .expect("drop any pre-existing djinn_test_template before rebuilding it");
     sqlx::query("CREATE DATABASE djinn_test_template")
         .execute(&mut conn)
         .await
