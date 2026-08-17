@@ -702,14 +702,13 @@ impl ModelTurnAdmissionRepository {
             .transpose()
     }
 
-    /// Corrupt both correlated durable label copies for a fail-closed learner
+    /// Overwrite the durable pool label pair for a fail-closed learner
     /// regression. Raw mutation stays in DB test support so dependent crates do
     /// not acquire SQL access solely to model damaged rows.
     #[cfg(any(test, feature = "test-support"))]
-    pub async fn corrupt_controller_window_labels_for_test(
+    pub async fn set_pool_labels_for_test(
         &self,
         pool_id: i64,
-        window_sequence: i64,
         provider_id: &str,
         model_id: &str,
     ) -> Result<()> {
@@ -720,16 +719,35 @@ impl ModelTurnAdmissionRepository {
             .bind(model_id)
             .execute(self.db.pool())
             .await?;
-        let summary = ModelTurnControllerWindowSummary {
-            provider_id: provider_id.to_owned(),
-            model_id: model_id.to_owned(),
-            trainable: true,
-            diagnostics: Vec::new(),
-        };
-        sqlx::query("UPDATE model_turn_controller_windows SET summary = $3 WHERE pool_id = $1 AND window_sequence = $2")
+        Ok(())
+    }
+
+    /// Write a controller-window row verbatim, bypassing the typed write
+    /// validator, so fail-closed read regressions can model rows that a
+    /// corrupted or downlevel writer could leave behind. Raw mutation stays in
+    /// DB test support so dependent crates do not acquire SQL access solely to
+    /// model damaged rows.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_raw_controller_window_for_test(
+        &self,
+        pool_id: i64,
+        window_sequence: i64,
+        started_at: &str,
+        ended_at: &str,
+        admitted_turns: i64,
+        completed_turns: i64,
+        summary: &str,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("INSERT INTO model_turn_controller_windows (pool_id, window_sequence, started_at, ended_at, admitted_turns, completed_turns, summary) VALUES ($1, $2, $3::timestamptz, $4::timestamptz, $5, $6, $7) ON CONFLICT (pool_id, window_sequence) DO UPDATE SET started_at = EXCLUDED.started_at, ended_at = EXCLUDED.ended_at, admitted_turns = EXCLUDED.admitted_turns, completed_turns = EXCLUDED.completed_turns, summary = EXCLUDED.summary")
             .bind(pool_id)
             .bind(window_sequence)
-            .bind(serde_json::to_string(&summary).map_err(|error| crate::Error::InvalidData(error.to_string()))?)
+            .bind(started_at)
+            .bind(ended_at)
+            .bind(admitted_turns)
+            .bind(completed_turns)
+            .bind(summary)
             .execute(self.db.pool())
             .await?;
         Ok(())
@@ -748,49 +766,12 @@ impl ModelTurnAdmissionRepository {
         {
             return Ok(None);
         }
-        let row: Option<(i64,i64,String,String,i64,i64,String,String,String)> = sqlx::query_as("SELECT w.pool_id,w.window_sequence,w.started_at::text,w.ended_at::text,w.admitted_turns,w.completed_turns,w.summary,p.provider_id,p.model_id FROM model_turn_controller_windows w JOIN model_turn_pools p ON p.id=w.pool_id WHERE w.pool_id=$1 AND w.window_sequence=$2 AND w.started_at=$3::timestamptz AND w.ended_at=$4::timestamptz").bind(pool_id).bind(window_sequence).bind(started_at).bind(ended_at).fetch_optional(self.db.pool()).await?;
-        let Some((
-            pool_id,
-            window_sequence,
-            actual_start,
-            actual_end,
-            admitted_turns,
-            completed_turns,
-            summary,
-            pool_provider,
-            pool_model,
-        )) = row
-        else {
-            return Ok(None);
-        };
-        if admitted_turns < 0
-            || completed_turns < 0
-            || !valid_aligned_minute_bounds(&actual_start, &actual_end)
-            || !chrono::DateTime::parse_from_rfc3339(&actual_start)
-                .is_ok_and(|s| s.timestamp().div_euclid(60) == window_sequence)
-        {
-            return Ok(None);
-        }
-        let Ok(summary) = serde_json::from_str::<ModelTurnControllerWindowSummary>(&summary) else {
-            return Ok(None);
-        };
-        if !summary.trainable
-            || !summary.diagnostics.is_empty()
-            || summary.provider_id != pool_provider
-            || summary.model_id != pool_model
-        {
-            return Ok(None);
-        }
-        Ok(Some(ModelTurnLearnerWindow {
-            pool_id,
-            window_sequence,
-            started_at: actual_start,
-            ended_at: actual_end,
-            admitted_turns,
-            completed_turns,
-            provider_id: summary.provider_id,
-            model_id: summary.model_id,
-        }))
+        // `timestamptz::text` renders `1970-01-01 00:02:00+00`, which is not
+        // RFC 3339. Render an explicitly UTC, microsecond-precision RFC 3339
+        // string so the read-side alignment check sees the real stored instant
+        // instead of failing every row on a formatting artifact.
+        let row: Option<ControllerWindowRow> = sqlx::query_as("SELECT w.pool_id,w.window_sequence,to_char(w.started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),to_char(w.ended_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),w.admitted_turns,w.completed_turns,w.summary,p.provider_id,p.model_id FROM model_turn_controller_windows w JOIN model_turn_pools p ON p.id=w.pool_id WHERE w.pool_id=$1 AND w.window_sequence=$2 AND w.started_at=$3::timestamptz AND w.ended_at=$4::timestamptz").bind(pool_id).bind(window_sequence).bind(started_at).bind(ended_at).fetch_optional(self.db.pool()).await?;
+        Ok(row.and_then(project_learner_window))
     }
 
     /// Commit the pre-send fence before a caller sends provider network bytes.
@@ -1301,19 +1282,85 @@ fn is_sha256_fingerprint(value: &str) -> bool {
             .iter()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
 }
+/// Widest durable summary the `model_turn_controller_windows.summary` column
+/// accepts. Rejecting oversize summaries in Rust keeps a bounded-diagnostic
+/// window from failing as an opaque Postgres `22001` string-truncation error.
+const CONTROLLER_WINDOW_SUMMARY_MAX_BYTES: usize = 2048;
+
+/// Raw projection tuple of the exact-bound controller-window read.
+type ControllerWindowRow = (i64, i64, String, String, i64, i64, String, String, String);
+
+/// Canonical RFC 3339 rendering of an exact aligned 60-second half-open window,
+/// or `None` when the pair is not such a window.
+fn canonical_aligned_minute_bounds(started_at: &str, ended_at: &str) -> Option<(String, String)> {
+    let start = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
+    let end = chrono::DateTime::parse_from_rfc3339(ended_at).ok()?;
+    if start.timestamp_subsec_nanos() != 0
+        || end.timestamp_subsec_nanos() != 0
+        || start.timestamp().rem_euclid(60) != 0
+        || end.timestamp() != start.timestamp() + 60
+    {
+        return None;
+    }
+    Some((
+        start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    ))
+}
 fn valid_aligned_minute_bounds(started_at: &str, ended_at: &str) -> bool {
-    let Ok(start) = chrono::DateTime::parse_from_rfc3339(started_at) else {
-        return false;
-    };
-    let Ok(end) = chrono::DateTime::parse_from_rfc3339(ended_at) else {
-        return false;
-    };
-    start.timestamp_subsec_nanos() == 0
-        && end.timestamp_subsec_nanos() == 0
-        && start.timestamp().rem_euclid(60) == 0
-        && end.timestamp() == start.timestamp() + 60
+    canonical_aligned_minute_bounds(started_at, ended_at).is_some()
+}
+
+/// Fail-closed read-side projection. Every rejection path returns `None`, so a
+/// damaged, diagnostic, or downlevel durable row is simply invisible to the
+/// learner rather than surfacing as a partially trusted window.
+fn project_learner_window(row: ControllerWindowRow) -> Option<ModelTurnLearnerWindow> {
+    let (
+        pool_id,
+        window_sequence,
+        started_at,
+        ended_at,
+        admitted_turns,
+        completed_turns,
+        summary,
+        pool_provider,
+        pool_model,
+    ) = row;
+    if pool_id <= 0 || window_sequence < 0 || admitted_turns < 0 || completed_turns < 0 {
+        return None;
+    }
+    let (started_at, ended_at) = canonical_aligned_minute_bounds(&started_at, &ended_at)?;
+    if !chrono::DateTime::parse_from_rfc3339(&started_at)
+        .is_ok_and(|start| start.timestamp().div_euclid(60) == window_sequence)
+    {
+        return None;
+    }
+    if summary.len() > CONTROLLER_WINDOW_SUMMARY_MAX_BYTES {
+        return None;
+    }
+    let summary = serde_json::from_str::<ModelTurnControllerWindowSummary>(&summary).ok()?;
+    if !summary.trainable
+        || !summary.diagnostics.is_empty()
+        || summary.provider_id != pool_provider
+        || summary.model_id != pool_model
+    {
+        return None;
+    }
+    Some(ModelTurnLearnerWindow {
+        pool_id,
+        window_sequence,
+        started_at,
+        ended_at,
+        admitted_turns,
+        completed_turns,
+        provider_id: summary.provider_id,
+        model_id: summary.model_id,
+    })
 }
 fn validate_controller_window_input(input: &ModelTurnControllerWindowInput) -> Result<()> {
+    let oversize = serde_json::to_string(&input.summary)
+        .map(|summary| summary.len() > CONTROLLER_WINDOW_SUMMARY_MAX_BYTES)
+        .unwrap_or(true);
     if input.pool_id <= 0
         || input.window_sequence < 0
         || input.admitted_turns < 0
@@ -1332,6 +1379,7 @@ fn validate_controller_window_input(input: &ModelTurnControllerWindowInput) -> R
             .diagnostics
             .iter()
             .any(|d| d.pool_id != 0 && d.pool_id != input.pool_id)
+        || oversize
     {
         return Err(crate::Error::InvalidData(
             "invalid model-turn controller window".to_owned(),
@@ -1579,6 +1627,261 @@ mod tests {
             ..input
         };
         assert!(validate_controller_window_input(&unrelated).is_err());
+    }
+
+    #[test]
+    fn controller_window_write_rejects_every_out_of_contract_dimension() {
+        let valid = ModelTurnControllerWindowInput {
+            pool_id: 7,
+            window_sequence: 2,
+            started_at: "1970-01-01T00:02:00Z".into(),
+            ended_at: "1970-01-01T00:03:00Z".into(),
+            admitted_turns: 3,
+            completed_turns: 3,
+            summary: ModelTurnControllerWindowSummary {
+                provider_id: "provider".into(),
+                model_id: "model".into(),
+                trainable: true,
+                diagnostics: Vec::new(),
+            },
+        };
+        assert!(validate_controller_window_input(&valid).is_ok());
+
+        let mutate = |f: &dyn Fn(&mut ModelTurnControllerWindowInput)| {
+            let mut input = valid.clone();
+            f(&mut input);
+            input
+        };
+        let rejected: Vec<(&str, ModelTurnControllerWindowInput)> = vec![
+            ("nonpositive pool", mutate(&|i| i.pool_id = 0)),
+            ("negative pool", mutate(&|i| i.pool_id = -1)),
+            (
+                "negative sequence",
+                mutate(&|i| {
+                    i.window_sequence = -1;
+                }),
+            ),
+            (
+                "negative admitted count",
+                mutate(&|i| i.admitted_turns = -1),
+            ),
+            (
+                "negative completed count",
+                mutate(&|i| i.completed_turns = -1),
+            ),
+            (
+                "subsecond start",
+                mutate(&|i| {
+                    i.started_at = "1970-01-01T00:02:00.5Z".into();
+                }),
+            ),
+            (
+                "unaligned start",
+                mutate(&|i| {
+                    i.started_at = "1970-01-01T00:02:30Z".into();
+                    i.ended_at = "1970-01-01T00:03:30Z".into();
+                }),
+            ),
+            (
+                "ninety second span",
+                mutate(&|i| i.ended_at = "1970-01-01T00:03:30Z".into()),
+            ),
+            (
+                "thirty second span",
+                mutate(&|i| i.ended_at = "1970-01-01T00:02:30Z".into()),
+            ),
+            (
+                "reversed bounds",
+                mutate(&|i| i.ended_at = "1970-01-01T00:01:00Z".into()),
+            ),
+            (
+                "unparsable bounds",
+                mutate(&|i| i.started_at = "not-a-time".into()),
+            ),
+            (
+                "sequence disagrees with start",
+                mutate(&|i| i.window_sequence = 3),
+            ),
+            (
+                "blank provider",
+                mutate(&|i| i.summary.provider_id = "   ".into()),
+            ),
+            ("blank model", mutate(&|i| i.summary.model_id = String::new())),
+            (
+                "overlong provider",
+                mutate(&|i| i.summary.provider_id = "p".repeat(192)),
+            ),
+            (
+                "overlong model",
+                mutate(&|i| i.summary.model_id = "m".repeat(192)),
+            ),
+            (
+                "trainable with diagnostics",
+                mutate(&|i| {
+                    i.summary.diagnostics = vec![ModelTurnControllerWindowDiagnostic {
+                        pool_id: 7,
+                        code: ModelTurnControllerWindowDiagnosticCode::MissingUsage,
+                    }];
+                }),
+            ),
+            (
+                "unbounded diagnostics",
+                mutate(&|i| {
+                    i.summary.trainable = false;
+                    i.summary.diagnostics = (0..65)
+                        .map(|_| ModelTurnControllerWindowDiagnostic {
+                            pool_id: 7,
+                            code: ModelTurnControllerWindowDiagnosticCode::MissingUsage,
+                        })
+                        .collect();
+                }),
+            ),
+            (
+                "foreign pool diagnostic",
+                mutate(&|i| {
+                    i.summary.trainable = false;
+                    i.summary.diagnostics = vec![ModelTurnControllerWindowDiagnostic {
+                        pool_id: 8,
+                        code: ModelTurnControllerWindowDiagnosticCode::MissingUsage,
+                    }];
+                }),
+            ),
+            (
+                "summary wider than the durable column",
+                mutate(&|i| {
+                    i.summary.trainable = false;
+                    i.summary.diagnostics = (0..64)
+                        .map(|_| ModelTurnControllerWindowDiagnostic {
+                            pool_id: 7,
+                            code:
+                                ModelTurnControllerWindowDiagnosticCode::PartialCapabilityCoverage,
+                        })
+                        .collect();
+                }),
+            ),
+        ];
+        for (label, input) in rejected {
+            assert!(
+                validate_controller_window_input(&input).is_err(),
+                "{label} must be rejected by the typed storage boundary"
+            );
+        }
+        // Every accepted summary fits the durable column, so a bounded
+        // diagnostic window can never fail as a Postgres truncation error.
+        let bounded = mutate(&|i| {
+            i.summary.trainable = false;
+            i.summary.diagnostics = (0..30)
+                .map(|_| ModelTurnControllerWindowDiagnostic {
+                    pool_id: 7,
+                    code: ModelTurnControllerWindowDiagnosticCode::PartialCapabilityCoverage,
+                })
+                .collect();
+        });
+        assert!(validate_controller_window_input(&bounded).is_ok());
+        assert!(
+            serde_json::to_string(&bounded.summary).expect("serialize").len()
+                <= CONTROLLER_WINDOW_SUMMARY_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn learner_projection_fails_closed_on_every_damaged_durable_row() {
+        let trainable = serde_json::to_string(&ModelTurnControllerWindowSummary {
+            provider_id: "provider".into(),
+            model_id: "model".into(),
+            trainable: true,
+            diagnostics: Vec::new(),
+        })
+        .expect("serialize trainable summary");
+        let row = |summary: &str| -> ControllerWindowRow {
+            (
+                7,
+                2,
+                "1970-01-01T00:02:00.000000Z".into(),
+                "1970-01-01T00:03:00.000000Z".into(),
+                3,
+                3,
+                summary.to_owned(),
+                "provider".into(),
+                "model".into(),
+            )
+        };
+        let accepted = project_learner_window(row(&trainable)).expect("canonical row projects");
+        assert_eq!(accepted.started_at, "1970-01-01T00:02:00Z");
+        assert_eq!(accepted.ended_at, "1970-01-01T00:03:00Z");
+        assert_eq!(accepted.admitted_turns, 3);
+
+        let mutate = |f: &dyn Fn(&mut ControllerWindowRow)| {
+            let mut row = row(&trainable);
+            f(&mut row);
+            row
+        };
+        let rejected: Vec<(&str, ControllerWindowRow)> = vec![
+            ("nonpositive pool", mutate(&|r| r.0 = 0)),
+            ("negative sequence", mutate(&|r| r.1 = -1)),
+            ("negative admitted count", mutate(&|r| r.4 = -1)),
+            ("negative completed count", mutate(&|r| r.5 = -1)),
+            (
+                "subsecond start",
+                mutate(&|r| r.2 = "1970-01-01T00:02:00.000001Z".into()),
+            ),
+            (
+                "unaligned start",
+                mutate(&|r| {
+                    r.2 = "1970-01-01T00:02:30.000000Z".into();
+                    r.3 = "1970-01-01T00:03:30.000000Z".into();
+                }),
+            ),
+            (
+                "ninety second span",
+                mutate(&|r| r.3 = "1970-01-01T00:03:30.000000Z".into()),
+            ),
+            (
+                "sequence disagrees with start",
+                mutate(&|r| {
+                    r.2 = "1970-01-01T00:03:00.000000Z".into();
+                    r.3 = "1970-01-01T00:04:00.000000Z".into();
+                }),
+            ),
+            ("unparsable bounds", mutate(&|r| r.2 = "not-a-time".into())),
+            ("malformed summary json", mutate(&|r| r.6 = "{".into())),
+            (
+                "summary with an extra key",
+                mutate(&|r| {
+                    r.6 = r#"{"provider_id":"provider","model_id":"model","trainable":true,"diagnostics":[],"reporter_text":"leak"}"#.into();
+                }),
+            ),
+            (
+                "summary with an unknown reason code",
+                mutate(&|r| {
+                    r.6 = r#"{"provider_id":"provider","model_id":"model","trainable":false,"diagnostics":[{"pool_id":7,"code":"free_text"}]}"#.into();
+                }),
+            ),
+            (
+                "summary wider than the durable column",
+                mutate(&|r| r.6 = "x".repeat(CONTROLLER_WINDOW_SUMMARY_MAX_BYTES + 1)),
+            ),
+            (
+                "not trainable",
+                mutate(&|r| {
+                    r.6 = r#"{"provider_id":"provider","model_id":"model","trainable":false,"diagnostics":[]}"#.into();
+                }),
+            ),
+            (
+                "diagnostic window",
+                mutate(&|r| {
+                    r.6 = r#"{"provider_id":"provider","model_id":"model","trainable":true,"diagnostics":[{"pool_id":7,"code":"missing_usage"}]}"#.into();
+                }),
+            ),
+            ("provider label mismatch", mutate(&|r| r.7 = "other".into())),
+            ("model label mismatch", mutate(&|r| r.8 = "other".into())),
+        ];
+        for (label, row) in rejected {
+            assert!(
+                project_learner_window(row).is_none(),
+                "{label} must yield no learner window"
+            );
+        }
     }
 
     #[test]
