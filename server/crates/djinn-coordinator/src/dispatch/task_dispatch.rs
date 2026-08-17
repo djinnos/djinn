@@ -3,14 +3,12 @@ use super::super::*;
 use super::DispatchOutcome;
 #[cfg(test)]
 use super::admission::{DispatchCapObservation, DispatchCapObservationStage};
-#[cfg(test)]
-use super::admission::{
-    clear_dispatch_cap_observations, observe_dispatch_cap_count, take_dispatch_cap_observations,
-};
 use super::admission::{
     lane_under_user_cap, model_under_user_cap, overlay_inflight_lane_ledger,
     overlay_inflight_ledger,
 };
+#[cfg(test)]
+use super::admission::{observe_dispatch_cap_count, take_dispatch_cap_observations};
 use super::post_intervention_lane;
 use crate::dispatch_pause::{load_dispatch_pause_state, matching_task_dispatch_pause};
 use crate::roles::DispatchContext;
@@ -3797,13 +3795,17 @@ mod inflight_ledger_tests {
         }
     }
 
+    /// Release channels the settler uses to let a controlled runner return.
+    type Wnd1ReleaseMap = StdArc<StdMutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>;
+    /// The fixture-owned admission observer installed at the real runner
+    /// boundary, paired with the cap that run is proving.
+    type Wnd1AdmissionObserver = StdArc<StdMutex<Option<(StdArc<Wnd1DispatchRaceFixture>, u32)>>>;
+
     #[derive(Clone)]
     pub(super) struct Wnd1ControlledRuntime {
         started_tx: tokio::sync::mpsc::UnboundedSender<String>,
-        releases:
-            std::sync::Arc<std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
-        admission_observer:
-            std::sync::Arc<std::sync::Mutex<Option<(StdArc<Wnd1DispatchRaceFixture>, u32)>>>,
+        releases: Wnd1ReleaseMap,
+        admission_observer: Wnd1AdmissionObserver,
     }
 
     impl Wnd1ControlledRuntime {
@@ -3812,8 +3814,8 @@ mod inflight_ledger_tests {
             (
                 Self {
                     started_tx,
-                    releases: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-                    admission_observer: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                    releases: StdArc::new(StdMutex::new(HashMap::new())),
+                    admission_observer: StdArc::new(StdMutex::new(None)),
                 },
                 started_rx,
             )

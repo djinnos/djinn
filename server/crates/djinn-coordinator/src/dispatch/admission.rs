@@ -152,14 +152,6 @@ static DISPATCH_CAP_OBSERVATIONS: std::sync::Mutex<Vec<DispatchCapObservation>> 
     std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
-pub(crate) fn clear_dispatch_cap_observations() {
-    DISPATCH_CAP_OBSERVATIONS
-        .lock()
-        .expect("dispatch cap observations mutex poisoned")
-        .clear();
-}
-
-#[cfg(test)]
 pub(crate) fn take_dispatch_cap_observations() -> Vec<DispatchCapObservation> {
     std::mem::take(
         &mut *DISPATCH_CAP_OBSERVATIONS
