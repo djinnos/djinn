@@ -1837,6 +1837,12 @@ mod tests {
     }
 }
 
+/// Aggregate-throughput learning and the concurrency controller (task yh4d).
+/// A public child module so it can consume this module's catalog-qualified
+/// learner seam without widening the Phase-C boundary to a new crate.
+#[path = "model_turn_admission_subscription_learner.rs"]
+pub mod subscription_learner;
+
 /// Migration-backed Phase-C conformance (task hb3s). Kept as a child module
 /// so it can build `ExpectedAttemptPathV1` values the way production does,
 /// through this module's deliberately private route fields.
