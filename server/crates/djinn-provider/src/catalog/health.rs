@@ -84,6 +84,101 @@ const TRIP_RATE_CEILING: usize = 8;
 /// Rolling window over which [`TRIP_RATE_CEILING`] trips force a hard-disable.
 const TRIP_RATE_WINDOW: Duration = Duration::from_secs(6 * 60 * 60);
 
+/// Base **quarantine** for a hard-disabled bucket: how long after its most
+/// recent trip the breaker waits before admitting a single *half-open probe*.
+///
+/// ## Why this exists (incident, 2026-08-12 → 2026-08-16)
+///
+/// [`TRIP_RATE_CEILING`] is a rate-based trigger that used to have a permanent,
+/// never-re-evaluated consequence: `hard_disabled` was latched and
+/// `is_available` returned `false` forever, with no code path other than a human
+/// `model_health(enable)` able to clear it. `openai/gpt-5.6-terra` — the only
+/// candidate in a user's `implement` lane — latched during a transient provider
+/// incident on 08-12 and stayed latched for four days, so every dispatch went
+/// `breaker_open` → `failover_chain_exhausted` → cooldown, forever. The
+/// autonomous build loop was dead the entire time. When inspected the bucket
+/// read `hard_disabled: true` with **`trips_in_window: 0`**: every trip that
+/// justified the latch had already aged out of [`TRIP_RATE_WINDOW`], and nothing
+/// ever reconsidered. A manual reset showed 10/10 successes immediately.
+///
+/// A circuit breaker that can never probe is not a breaker, it is a fuse only a
+/// human can replace. This constant is the quarantine before the *one* probe.
+///
+/// ## Why exactly six hours
+///
+/// Three independent bounds pin this number, and the compile-time assertions
+/// below enforce two of them:
+///
+/// 1. **It must exceed [`MAX_COOLDOWN`] (4h).** The hard-disable exists because
+///    "even a 4h ceiling still lets a hopeless model flap a couple of times a
+///    day". A quarantine at or below the escalating ladder's own ceiling would
+///    make the hard-disable indistinguishable from an ordinary cooldown and
+///    reintroduce exactly the pathology it was added to stop.
+/// 2. **It equals [`TRIP_RATE_WINDOW`], and that equality is load-bearing.**
+///    The deadline is anchored at the bucket's *most recent trip*, so when the
+///    probe is finally admitted every trip that justified the latch is at least
+///    `TRIP_RATE_WINDOW` old and has therefore been pruned: `trips_in_window`
+///    is provably `0` at probe time. The probe asks "is this model healthy
+///    *now*" against a window that no longer contains a single piece of the
+///    evidence for the latch — which is precisely the state the incident bucket
+///    was sitting in, ignored, for four days. Shorter, and the probe fires while
+///    the latch is still justified by live evidence; longer, and the breaker
+///    keeps punishing a model for evidence it has already discarded.
+/// 3. **The exposure it buys is negligible.** At most ONE task is exposed per
+///    quarantine period (see [`HealthTracker::note_dispatch_accepted`]), so
+///    tier 0 costs at most 4 probe dispatches a day — against the ~50
+///    trips/night the original flap incident sustained, and against the 8
+///    consecutive 429 crashes that cost one production task 5.75h. Each failed
+///    probe then doubles the wait, so a genuinely-dead model converges on one
+///    probe a week.
+///
+/// This is deliberately *not* written as `TRIP_RATE_WINDOW` (an alias would let
+/// a future edit to the trip window silently move the quarantine); the
+/// relationship is asserted instead.
+const HARD_DISABLE_QUARANTINE_BASE: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Ceiling of the escalating quarantine ladder: **7 days**.
+///
+/// Each failed probe doubles the quarantine (6h → 12h → 24h → 48h → 96h → 7d),
+/// so a model whose backend is genuinely gone converges on one exposed task per
+/// week — cheap enough to be irrelevant to the fleet, while still guaranteeing
+/// that a model whose provider eventually comes back recovers *without* a human.
+/// A week is also comfortably past the point where an operator has noticed, so
+/// the ceiling is about not permanently giving up rather than about throughput.
+const HARD_DISABLE_QUARANTINE_MAX: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Highest quarantine tier, i.e. the number of doublings needed to reach
+/// [`HARD_DISABLE_QUARANTINE_MAX`]. Clamping the *tier* (rather than only the
+/// resulting `Duration`) keeps [`quarantine_for_tier`]'s loop bounded no matter
+/// how many probe failures accumulate.
+const HARD_DISABLE_MAX_PROBE_TIER: u32 = 5;
+
+const _: () = assert!(
+    HARD_DISABLE_QUARANTINE_BASE.as_secs() > MAX_COOLDOWN.as_secs(),
+    "the hard-disable quarantine must outlast the escalating cooldown ceiling, \
+     or the hard-disable adds nothing over an ordinary cooldown and the flap returns"
+);
+const _: () = assert!(
+    HARD_DISABLE_QUARANTINE_BASE.as_secs() == TRIP_RATE_WINDOW.as_secs(),
+    "the quarantine is anchored at the last trip so that `trips_in_window` is \
+     provably 0 when the half-open probe fires; that invariant requires equality"
+);
+const _: () = assert!(
+    HARD_DISABLE_QUARANTINE_BASE.as_secs() << HARD_DISABLE_MAX_PROBE_TIER
+        >= HARD_DISABLE_QUARANTINE_MAX.as_secs(),
+    "HARD_DISABLE_MAX_PROBE_TIER must be large enough to actually reach the ceiling"
+);
+
+/// Quarantine length for an escalation `tier`: [`HARD_DISABLE_QUARANTINE_BASE`]
+/// doubled once per prior failed probe, capped at [`HARD_DISABLE_QUARANTINE_MAX`].
+fn quarantine_for_tier(tier: u32) -> Duration {
+    let mut quarantine = HARD_DISABLE_QUARANTINE_BASE;
+    for _ in 0..tier.min(HARD_DISABLE_MAX_PROBE_TIER) {
+        quarantine = (quarantine * 2).min(HARD_DISABLE_QUARANTINE_MAX);
+    }
+    quarantine
+}
+
 /// Number of *consecutive* throttle trips (`record_stall(escalate=false)`) with
 /// no intervening success after which a throttle stops being treated as a
 /// clock-resetting quota blip and starts escalating like a genuine failure.
@@ -218,11 +313,21 @@ pub struct ModelHealth {
     /// **or when hard-disabled** (a hard-disable has no auto-expiry).
     pub cooldown_seconds_remaining: Option<u64>,
     /// Hard-disabled: the trip-rate ceiling ([`TRIP_RATE_CEILING`] trips within
-    /// [`TRIP_RATE_WINDOW`]) was hit, so the bucket is held unavailable with NO
-    /// auto-expiry until a human re-enables it. `#[serde(default)]` keeps older
-    /// persisted snapshots (which had no such field) loading as not-hard-disabled.
+    /// [`TRIP_RATE_WINDOW`]) was hit, so the bucket is **quarantined** — held
+    /// unavailable except for a single half-open probe dispatch admitted once
+    /// per (escalating) quarantine period, until either that probe succeeds or a
+    /// human re-enables it. `#[serde(default)]` keeps older persisted snapshots
+    /// (which had no such field) loading as not-hard-disabled.
     #[serde(default)]
     pub hard_disabled: bool,
+    /// Escalation tier of the hard-disable quarantine ladder: `0` at the moment
+    /// of the latch, incremented by every failed half-open probe, clamped at
+    /// [`HARD_DISABLE_MAX_PROBE_TIER`]. Persisted so a server restart cannot
+    /// demote a long-quarantined dead model back to the 6h base and start
+    /// probing it four times a day. `#[serde(default)]` for back-compat with
+    /// pre-half-open snapshots, which load at tier 0 (the base quarantine).
+    #[serde(default)]
+    pub hard_disable_probe_tier: u32,
     /// Number of breaker trips currently inside the rolling [`TRIP_RATE_WINDOW`].
     /// Surfaced so operators can see how close a bucket is to the hard-disable
     /// ceiling. `#[serde(default)]` for back-compat with pre-ceiling snapshots.
@@ -257,9 +362,38 @@ struct ModelState {
     total_failures: u32,
     total_successes: u32,
     disable_ttl_trips: u32,
-    /// Hard-disabled by the trip-rate ceiling — no auto-expiry, human re-enable
-    /// only. Distinct from `auto_disabled` (which self-heals on cooldown).
+    /// Hard-disabled (quarantined) by the trip-rate ceiling. Distinct from
+    /// `auto_disabled` (which self-heals on a cooldown deadline): while this is
+    /// set, availability is governed **solely** by `probe_available_at`, and the
+    /// only way back to `false` is a successful half-open probe or a human
+    /// re-enable.
     hard_disabled: bool,
+    /// Deadline after which a hard-disabled bucket admits exactly ONE half-open
+    /// probe dispatch. Anchored at the bucket's most recent trip (not at the
+    /// moment the latch was set), so a bucket that keeps failing its probes
+    /// keeps pushing its own deadline out. `None` whenever `hard_disabled` is
+    /// `false`; always `Some` while it is `true`.
+    ///
+    /// Consuming the probe (`note_dispatch_accepted`) pushes this forward by a
+    /// full quarantine *immediately*, before the probe's verdict is known. That
+    /// is what bounds exposure to at most one task per quarantine period even
+    /// when the verdict never arrives (task killed, leader failover, pod OOM):
+    /// the breaker fails closed rather than re-opening the lane.
+    probe_available_at: Option<Instant>,
+    /// Escalation tier for `probe_available_at`; see [`quarantine_for_tier`].
+    /// Incremented once per *failed* probe and clamped at
+    /// [`HARD_DISABLE_MAX_PROBE_TIER`]. Persisted (unlike the throttle streak)
+    /// because losing it across a restart would reset a week-long quarantine on
+    /// a dead model back to the 6h base.
+    hard_disable_probe_tier: u32,
+    /// Whether a half-open probe has been handed out and has not yet been
+    /// resolved. Set by `note_dispatch_accepted`, cleared by the first
+    /// failure/success that follows. Its only job is to make the tier escalate
+    /// **once per probe** rather than once per failure record — a single bad
+    /// session can produce both a stall and a failure. Runtime-only: a restart
+    /// drops it, which at worst costs one un-escalated quarantine, and
+    /// `restore_all` re-anchors the deadline anyway.
+    probe_outstanding: bool,
     /// Monotonic timestamps of recent breaker trips, pruned to
     /// [`TRIP_RATE_WINDOW`]. When its length reaches [`TRIP_RATE_CEILING`] the
     /// bucket is hard-disabled. Only genuine (escalating) trips are recorded —
@@ -289,9 +423,18 @@ struct ModelState {
 
 impl ModelState {
     fn is_available(&self, now: Instant) -> bool {
-        // Hard-disabled buckets never auto-recover — a human must re-enable.
+        // Hard-disabled (quarantined) buckets are unavailable EXCEPT inside the
+        // half-open probe window: once `HARD_DISABLE_QUARANTINE_BASE` (doubling
+        // per failed probe) has elapsed since the most recent trip, exactly one
+        // dispatch is admitted so the breaker can find out whether the model
+        // recovered. `note_dispatch_accepted` pushes the deadline forward the
+        // moment that dispatch is accepted, so this window closes again after a
+        // single task rather than re-opening the lane. This is the whole
+        // difference between a breaker and a fuse: the pre-2026-08-16 code
+        // returned a flat `false` here and a transient provider incident became
+        // permanent configuration state that outlived its cause by four days.
         if self.hard_disabled {
-            return false;
+            return matches!(self.probe_available_at, Some(at) if now >= at);
         }
         if !self.auto_disabled {
             return true;
@@ -318,12 +461,59 @@ impl ModelState {
         self.trip_times.push(now);
         if !self.hard_disabled && self.trip_times.len() >= TRIP_RATE_CEILING {
             self.hard_disabled = true;
-            // No auto-expiry: clear the cooldown deadline so `is_available`
-            // relies solely on the `hard_disabled` gate until a human re-enables.
+            // No ordinary cooldown: clear the deadline so `is_available` relies
+            // solely on the quarantine gate below.
             self.cooldown_until = None;
+            self.hard_disable_probe_tier = 0;
+            self.probe_available_at = Some(now + quarantine_for_tier(0));
+            self.probe_outstanding = false;
             return true;
         }
         false
+    }
+
+    /// Resolve a hard-disabled bucket's half-open probe as **failed**, or —
+    /// when no probe was outstanding — simply re-anchor the quarantine at this
+    /// fresh piece of bad evidence.
+    ///
+    /// Escalation is charged once per *probe*, not once per failure record: a
+    /// single doomed session can emit both a stall and a typed failure, and
+    /// double-charging would jump a model from the 6h base to the 7d ceiling on
+    /// one bad dispatch. Either way the deadline is pushed to
+    /// `now + quarantine_for_tier(tier)`, which is what "measured from the last
+    /// trip" means.
+    fn fail_probe(&mut self, now: Instant) {
+        if self.probe_outstanding {
+            self.probe_outstanding = false;
+            self.hard_disable_probe_tier = self
+                .hard_disable_probe_tier
+                .saturating_add(1)
+                .min(HARD_DISABLE_MAX_PROBE_TIER);
+        }
+        self.probe_available_at = Some(now + quarantine_for_tier(self.hard_disable_probe_tier));
+        // Stay latched, with no ordinary cooldown deadline: while hard-disabled,
+        // `is_available` reads `probe_available_at` and nothing else.
+        self.auto_disabled = true;
+        self.cooldown_until = None;
+        // `trip_times` is deliberately NOT touched here. It exists solely to
+        // detect the ceiling crossing, and once the bucket is latched that job
+        // is done — the quarantine ladder owns the bucket instead. Pushing
+        // probe failures into it would also miscount, because a single latching
+        // `trip_breaker` burst delivers several failure records in a row.
+    }
+
+    /// Release the hard-disable latch. Used by a successful half-open probe and
+    /// by the human `enable`/`reset` controls. Also clears the ordinary
+    /// auto-disable, because a quarantined bucket carries `auto_disabled: true`
+    /// with `cooldown_until: None` — a state `is_available` would otherwise read
+    /// as a never-expiring cooldown.
+    fn clear_hard_disable(&mut self) {
+        self.hard_disabled = false;
+        self.probe_available_at = None;
+        self.hard_disable_probe_tier = 0;
+        self.probe_outstanding = false;
+        self.auto_disabled = false;
+        self.cooldown_until = None;
     }
 
     fn cooldown_seconds_remaining(&self, now: Instant) -> Option<u64> {
@@ -349,6 +539,7 @@ impl ModelState {
             disable_ttl_trips: self.disable_ttl_trips,
             cooldown_seconds_remaining: self.cooldown_seconds_remaining(now),
             hard_disabled: self.hard_disabled,
+            hard_disable_probe_tier: self.hard_disable_probe_tier,
             trips_in_window: self.trips_in_window(now),
         }
     }
@@ -552,15 +743,33 @@ impl HealthTracker {
             return;
         };
 
+        state.breaker_eligible_consecutive_failures = state
+            .breaker_eligible_consecutive_failures
+            .saturating_add(1);
+
+        // Half-open probe verdict. While a bucket is hard-disabled the ONLY
+        // dispatch that can reach it is the single probe the quarantine
+        // admitted, so any failure here is that probe failing: re-latch, double
+        // the quarantine and return. Falling through to the ordinary ladder
+        // would be wrong twice over — it would need three strikes to react at
+        // all, and it would log a second, phantom "breaker tripped".
+        if state.hard_disabled {
+            state.fail_probe(now);
+            tracing::warn!(
+                model_id = %key.model_id,
+                scope = ?key.scope,
+                probe_tier = state.hard_disable_probe_tier,
+                next_probe_in_secs = quarantine_for_tier(state.hard_disable_probe_tier).as_secs(),
+                "half-open probe of a hard-disabled model failed — re-quarantined"
+            );
+            return;
+        }
+
         // If the previous cooldown expired, clear the flag so we can re-trip.
         if state.auto_disabled && state.is_available(now) {
             state.auto_disabled = false;
             state.cooldown_until = None;
         }
-
-        state.breaker_eligible_consecutive_failures = state
-            .breaker_eligible_consecutive_failures
-            .saturating_add(1);
 
         if !state.auto_disabled
             && state.breaker_eligible_consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD
@@ -618,10 +827,72 @@ impl HealthTracker {
         state.consecutive_throttle_trips = 0;
         state.throttle_streak_started_at = None;
         state.last_trip_throttle = false;
+        // A success on a quarantined bucket means the half-open probe came back
+        // clean: release the latch. This is the only automatic exit from a
+        // hard-disable, and it is deliberately not gated on `probe_outstanding`
+        // — a productive session is direct positive evidence about the model
+        // whichever path produced it, and a genuinely-dead model cannot
+        // manufacture one. `clear_hard_disable` also drops `auto_disabled` /
+        // `cooldown_until`, which the guard below could not: a quarantined
+        // bucket has `auto_disabled: true` with no cooldown deadline, so
+        // `is_available` reads `false` and the guard would never fire.
+        if state.hard_disabled {
+            state.clear_hard_disable();
+            tracing::info!(
+                model_id = %model_id,
+                scope = ?scope,
+                "half-open probe succeeded — hard-disable quarantine released"
+            );
+        }
         if state.auto_disabled && state.is_available(now) {
             state.auto_disabled = false;
             state.cooldown_until = None;
         }
+    }
+
+    /// Tell the breaker that a dispatch to this `(scope, model)` bucket was
+    /// **accepted** — a session is about to run on it.
+    ///
+    /// For a healthy bucket this is a no-op. For a *quarantined* one it consumes
+    /// the single half-open probe that [`ModelState::is_available`] just
+    /// admitted, pushing the next probe deadline a full quarantine into the
+    /// future before the probe's verdict is known.
+    ///
+    /// Consuming here rather than at the availability check is deliberate:
+    /// `is_available` is a pure predicate consulted several times per dispatch
+    /// decision (and by diagnostics), whereas this fires exactly once, at the
+    /// point a real task is actually exposed to the model. And pushing the
+    /// deadline *before* the verdict is what makes the bound unconditional — if
+    /// the probe's outcome never arrives (task killed, leader failover, pod
+    /// OOM) the bucket stays quarantined for another full period instead of
+    /// re-opening the lane. At most one task is exposed per quarantine period,
+    /// which is the property that keeps the 2026-07 flap (disable 5 min →
+    /// re-enable → grab a slot → crash in <10s → repeat, one production task
+    /// losing 5.75h to 8 consecutive 429 crashes) impossible.
+    pub fn note_dispatch_accepted(&self, scope: Option<&str>, model_id: &str) {
+        let now = self.now();
+        let mut map = self.inner.lock().unwrap();
+        let Some(state) = map.get_mut(&HealthKey::new(scope, model_id)) else {
+            return;
+        };
+        if !state.hard_disabled {
+            return;
+        }
+        if !state.probe_available_at.is_some_and(|at| now >= at) {
+            // Not the probe window — nothing to consume. Reachable only if a
+            // caller dispatched to a bucket the breaker said was unavailable.
+            return;
+        }
+        state.probe_outstanding = true;
+        state.probe_available_at = Some(now + quarantine_for_tier(state.hard_disable_probe_tier));
+        tracing::warn!(
+            model_id = %model_id,
+            scope = ?scope,
+            probe_tier = state.hard_disable_probe_tier,
+            trips_in_window = state.trips_in_window(now),
+            next_probe_in_secs = quarantine_for_tier(state.hard_disable_probe_tier).as_secs(),
+            "admitting a single half-open probe dispatch to a hard-disabled model"
+        );
     }
 
     /// Record a failed invocation.  Trips the circuit breaker when the
@@ -634,6 +905,19 @@ impl HealthTracker {
         state.consecutive_failures += 1;
         state.breaker_eligible_consecutive_failures += 1;
         state.total_failures += 1;
+
+        // Half-open probe verdict — see `apply_breaker_check_for`.
+        if state.hard_disabled {
+            state.fail_probe(now);
+            tracing::warn!(
+                model_id = %key.model_id,
+                scope = ?key.scope,
+                probe_tier = state.hard_disable_probe_tier,
+                next_probe_in_secs = quarantine_for_tier(state.hard_disable_probe_tier).as_secs(),
+                "half-open probe of a hard-disabled model failed — re-quarantined"
+            );
+            return;
+        }
 
         // If the previous cooldown expired, clear the flag so we can re-trip.
         if state.auto_disabled && state.is_available(now) {
@@ -713,6 +997,22 @@ impl HealthTracker {
         state.consecutive_failures += 1;
         state.transient_consecutive_failures += 1;
         state.total_failures += 1;
+
+        // Half-open probe verdict — see `apply_breaker_check_for`. A transient
+        // upstream fault is a weak signal in general, but a bucket that has
+        // already earned a hard-disable does not get the benefit of the doubt:
+        // its one probe produced nothing usable, so it waits again.
+        if state.hard_disabled {
+            state.fail_probe(now);
+            tracing::warn!(
+                model_id = %key.model_id,
+                scope = ?key.scope,
+                probe_tier = state.hard_disable_probe_tier,
+                next_probe_in_secs = quarantine_for_tier(state.hard_disable_probe_tier).as_secs(),
+                "half-open probe of a hard-disabled model failed (transient) — re-quarantined"
+            );
+            return;
+        }
 
         // If the previous cooldown expired, clear the flag so we can re-trip.
         if state.auto_disabled && state.is_available(now) {
@@ -795,6 +1095,23 @@ impl HealthTracker {
         let state = map.entry(key.clone()).or_default();
         state.consecutive_failures += 1;
         state.total_failures += 1;
+
+        // Half-open probe verdict — see `apply_breaker_check_for`. Note this
+        // runs BEFORE the throttle-streak bookkeeping below: while quarantined
+        // the model is not on the throttle ladder at all, it is on the
+        // hard-disable quarantine ladder, and only one of the two may own the
+        // bucket's next deadline.
+        if state.hard_disabled {
+            state.fail_probe(now);
+            tracing::warn!(
+                model_id = %key.model_id,
+                scope = ?key.scope,
+                probe_tier = state.hard_disable_probe_tier,
+                next_probe_in_secs = quarantine_for_tier(state.hard_disable_probe_tier).as_secs(),
+                "half-open probe of a hard-disabled model stalled — re-quarantined"
+            );
+            return;
+        }
 
         // If the previous cooldown expired, clear the flag so we can re-trip
         // (and so `disable_ttl_trips` keeps escalating across stalls).
@@ -921,7 +1238,17 @@ impl HealthTracker {
                         key.clone(),
                         state.auto_disabled,
                         state.hard_disabled,
-                        state.cooldown_until,
+                        // A quarantined bucket has no ordinary cooldown; its
+                        // deadline is the next half-open probe. Rendering that
+                        // as `until` is the point: a `hard_disabled` entry used
+                        // to show `until: null`, which is exactly why the
+                        // 4-day outage looked like a permanent, uninterpretable
+                        // state rather than a wait with an end.
+                        if state.hard_disabled {
+                            state.probe_available_at
+                        } else {
+                            state.cooldown_until
+                        },
                         state.consecutive_failures,
                     )
                 })
@@ -936,17 +1263,23 @@ impl HealthTracker {
         let mut snapshot: Vec<_> = entries
             .into_iter()
             .filter_map(
-                |(key, auto_disabled, hard_disabled, cooldown_until, consecutive_failures)| {
+                |(key, auto_disabled, hard_disabled, deadline_until, consecutive_failures)| {
                     let state = if hard_disabled {
-                        "hard_disabled"
+                        // Distinguish "quarantined, waiting" from "quarantined,
+                        // one probe dispatch is admissible right now".
+                        if deadline_until.is_some_and(|until| now >= until) {
+                            "hard_disabled_probe"
+                        } else {
+                            "hard_disabled"
+                        }
                     } else if !auto_disabled {
                         return None;
-                    } else if cooldown_until.is_some_and(|until| now >= until) {
+                    } else if deadline_until.is_some_and(|until| now >= until) {
                         "half_open"
                     } else {
                         "open"
                     };
-                    let until = cooldown_until.map(|deadline| {
+                    let until = deadline_until.map(|deadline| {
                         let wall = if deadline >= now {
                             wall_now + (deadline - now)
                         } else {
@@ -1035,10 +1368,35 @@ impl HealthTracker {
             };
 
             if health.hard_disabled {
-                // A hard-disable has no auto-expiry — keep it disabled with no
-                // cooldown deadline regardless of the persisted remaining seconds.
+                // A hard-disable has no ordinary cooldown — keep it disabled
+                // with no cooldown deadline regardless of the persisted
+                // remaining seconds; availability is the quarantine gate only.
                 state.auto_disabled = true;
                 state.cooldown_until = None;
+                // `Instant`s cannot cross the persist boundary, so the
+                // quarantine deadline is re-anchored at `now` using the
+                // PERSISTED escalation tier. Two properties fall out, and both
+                // matter:
+                //
+                // * A restart can only ever DELAY the next probe — it charges a
+                //   full fresh quarantine — never shorten one and never fire a
+                //   probe at boot. A crash-loop or a rapid deploy train
+                //   therefore cannot be turned into a probe loop, and a
+                //   genuinely-dead model cannot be resurrected into a flap by
+                //   restarting the server.
+                // * Because the tier survives, a model that has failed its way
+                //   out to the 7-day rung stays on the 7-day rung. Dropping the
+                //   tier would silently demote it to the 6h base and quadruple
+                //   its daily exposure across every deploy.
+                //
+                // The cost is that a long-quarantined model's remaining wait
+                // restarts. That is the safe direction, and at the ceiling it is
+                // bounded by one extra week.
+                state.hard_disable_probe_tier = health
+                    .hard_disable_probe_tier
+                    .min(HARD_DISABLE_MAX_PROBE_TIER);
+                state.probe_available_at =
+                    Some(now + quarantine_for_tier(state.hard_disable_probe_tier));
             } else if health.auto_disabled {
                 if let Some(seconds) = health.cooldown_seconds_remaining {
                     if seconds > 0 {
@@ -1077,6 +1435,7 @@ impl HealthTracker {
                 disable_ttl_trips: 0,
                 cooldown_seconds_remaining: None,
                 hard_disabled: false,
+                hard_disable_probe_tier: 0,
                 trips_in_window: 0,
             })
     }
@@ -1122,33 +1481,59 @@ impl HealthTracker {
         keys.len()
     }
 
-    /// Re-enable an auto-disabled (or **hard-disabled**) bucket without clearing
-    /// failure/success counters. This is the human re-enable path a hard-disable
-    /// requires, so it also clears the trip-rate window: otherwise the ceiling
-    /// would still be tripped and the very next failure would immediately
-    /// re-hard-disable the bucket.
+    /// Re-enable an auto-disabled (or **hard-disabled**/quarantined) bucket
+    /// without clearing its lifetime `total_failures` / `total_successes`.
+    ///
+    /// This is the human authority path and it takes effect **immediately** and
+    /// unconditionally: the quarantine deadline and escalation tier are dropped
+    /// along with both disable flags, so an operator never has to wait out a
+    /// half-open quarantine they have already overruled.
+    ///
+    /// It also clears the trip-rate window and every *streak* counter —
+    /// `consecutive_failures`, `breaker_eligible_consecutive_failures`,
+    /// `transient_consecutive_failures` and the throttle streak. Clearing the
+    /// streaks is a deliberate 2026-08-16 change, not the original behaviour:
+    /// `enable` used to clear only the disable flags, leaving
+    /// `breaker_eligible_consecutive_failures` at or above
+    /// [`CIRCUIT_BREAKER_THRESHOLD`], so the very next failure re-tripped the
+    /// breaker on the spot and operators had to follow every `enable` with a
+    /// `reset` to make it stick. A re-enable that cannot survive one failure is
+    /// not a re-enable. The streaks are transient evidence *about the state the
+    /// human just overruled*; the lifetime totals are the audit trail and are
+    /// preserved, which is what still distinguishes `enable` from `reset`.
+    ///
+    /// `disable_ttl_trips` is deliberately **kept**: the operator vouched that
+    /// the model is usable now, not that its history never happened, so if it
+    /// does trip again the escalating cooldown resumes where it left off. The
+    /// first successful session clears it (see [`Self::record_success`]).
     pub fn enable(&self, scope: Option<&str>, model_id: &str) {
         let mut map = self.inner.lock().unwrap();
         let state = map.entry(HealthKey::new(scope, model_id)).or_default();
-        state.auto_disabled = false;
-        state.hard_disabled = false;
-        state.cooldown_until = None;
-        state.trip_times.clear();
+        Self::apply_enable(state);
     }
 
-    /// Re-enable every scope's bucket for `model_id` without clearing failure
-    /// counters (ops convenience: "let everyone use this model again now"). Also
-    /// clears any hard-disable + the trip-rate window (see [`Self::enable`]).
-    /// Returns the number of buckets re-enabled.
+    /// Shared body of [`Self::enable`] / [`Self::enable_model_all_scopes`].
+    fn apply_enable(state: &mut ModelState) {
+        state.clear_hard_disable();
+        state.trip_times.clear();
+        state.consecutive_failures = 0;
+        state.breaker_eligible_consecutive_failures = 0;
+        state.transient_consecutive_failures = 0;
+        state.consecutive_throttle_trips = 0;
+        state.throttle_streak_started_at = None;
+        state.last_trip_throttle = false;
+    }
+
+    /// Re-enable every scope's bucket for `model_id` without clearing lifetime
+    /// totals (ops convenience: "let everyone use this model again now"). Also
+    /// clears any hard-disable quarantine, the trip-rate window and the failure
+    /// streaks (see [`Self::enable`]). Returns the number of buckets re-enabled.
     pub fn enable_model_all_scopes(&self, model_id: &str) -> usize {
         let mut map = self.inner.lock().unwrap();
         let mut n = 0;
         for (key, state) in map.iter_mut() {
             if key.model_id == model_id {
-                state.auto_disabled = false;
-                state.hard_disabled = false;
-                state.cooldown_until = None;
-                state.trip_times.clear();
+                Self::apply_enable(state);
                 n += 1;
             }
         }

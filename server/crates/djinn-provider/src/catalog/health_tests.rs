@@ -708,6 +708,7 @@ fn restore_all_rehydrates_disabled_state_without_new_trip() {
         disable_ttl_trips: 1,
         cooldown_seconds_remaining: Some(4),
         hard_disabled: false,
+        hard_disable_probe_tier: 0,
         trips_in_window: 1,
     }]);
 
@@ -729,8 +730,20 @@ fn restore_all_rehydrates_disabled_state_without_new_trip() {
     let enabled = ht.model_health(scope, "a/model");
     assert!(ht.is_available(scope, "a/model"));
     assert!(!enabled.auto_disabled);
+    // `enable` keeps the escalation tier (the operator vouched the model is
+    // usable now, not that its history never happened)…
     assert_eq!(enabled.disable_ttl_trips, 1);
-    assert_eq!(enabled.consecutive_failures, CIRCUIT_BREAKER_THRESHOLD);
+    // …but as of 2026-08-16 it DOES clear the failure streak. Leaving
+    // `consecutive_failures` at the threshold meant the very next failure
+    // re-tripped the breaker, so every `enable` had to be chased with a `reset`
+    // to make it stick. See `HealthTracker::enable`.
+    assert_eq!(enabled.consecutive_failures, 0);
+    assert_eq!(enabled.breaker_eligible_consecutive_failures, 0);
+    assert_eq!(
+        enabled.total_failures, 10,
+        "the lifetime audit trail still survives `enable` — that is what \
+         distinguishes it from `reset`"
+    );
 
     ht.record_success(scope, "a/model");
     let restored = ht.model_health(scope, "a/model");
@@ -763,6 +776,7 @@ fn restore_all_rehydrates_disabled_state_without_new_trip() {
         disable_ttl_trips: 1,
         cooldown_seconds_remaining: Some(2),
         hard_disabled: false,
+        hard_disable_probe_tier: 0,
         trips_in_window: 1,
     }]);
     assert!(!ht.is_available(scope, "a/model"));
@@ -1233,4 +1247,556 @@ fn clear_task_provider_failure_drops_the_signal() {
     );
     ht.clear_task_provider_failure("task-2");
     assert_eq!(ht.peek_task_provider_failure("task-2"), None);
+}
+
+// ---------------------------------------------------------------------------
+// Half-open recovery from a hard-disable (quarantine + single probe).
+//
+// Incident being fixed: 2026-08-12 → 2026-08-16. `openai/gpt-5.6-terra` — the
+// only candidate in a user's `implement` lane — hit the 8-trips/6h ceiling
+// during a transient provider incident and latched `hard_disabled: true`. Four
+// days later it still read `hard_disabled: true` with `trips_in_window: 0`:
+// every trip that justified the latch had aged out of the rolling window and
+// nothing ever reconsidered, so every dispatch went `breaker_open` →
+// `failover_chain_exhausted` → cooldown. The autonomous build loop was dead the
+// whole time; a manual reset produced 10/10 successes immediately.
+//
+// The counter-pressure these tests must also hold: the permanence was NOT
+// gratuitous. It exists to stop the flap where a hopeless model is re-enabled
+// on a clock, grabs a priority slot, crashes in <10s and repeats — one
+// production task lost 5.75h to 8 consecutive 429 crashes. So every test below
+// that proves recovery is paired with one that bounds exposure.
+// ---------------------------------------------------------------------------
+
+use djinn_core::clock::TestClock;
+use std::time::SystemTime;
+
+fn test_clock() -> Arc<TestClock> {
+    Arc::new(TestClock::new(SystemTime::UNIX_EPOCH, Instant::now()))
+}
+
+fn tracker_on(clock: &Arc<TestClock>) -> HealthTracker {
+    HealthTracker::with_clock(clock.clone() as Arc<dyn Clock>)
+}
+
+/// Drive a bucket to the trip-rate ceiling on the *test* clock, leaving `now`
+/// exactly at the instant of the latching trip (so quarantine deadlines can be
+/// reasoned about relative to it).
+///
+/// Each trip needs three breaker-eligible failures, and the escalating cooldown
+/// between trips must expire before the next trip can register. The cooldowns
+/// sum to ~1.5h, comfortably inside `TRIP_RATE_WINDOW`, so all eight trips land
+/// in one window — which is what the ceiling requires.
+fn hard_disable_via_trip_rate(ht: &HealthTracker, clock: &TestClock) {
+    for trip in 0..TRIP_RATE_CEILING {
+        if trip > 0 {
+            let remaining = ht
+                .model_health(S, TEST_MODEL)
+                .cooldown_seconds_remaining
+                .unwrap_or(0);
+            clock.advance_mono(Duration::from_secs(remaining + 1));
+        }
+        for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
+            ht.record_failure(S, TEST_MODEL);
+        }
+    }
+    let health = ht.model_health(S, TEST_MODEL);
+    assert!(
+        health.hard_disabled,
+        "fixture precondition: {TRIP_RATE_CEILING} trips inside the window must hard-disable"
+    );
+    assert_eq!(health.trips_in_window, TRIP_RATE_CEILING as u32);
+}
+
+#[test]
+fn quarantine_admits_exactly_one_probe_and_a_clean_probe_recovers_the_model() {
+    // THE INCIDENT, REPRODUCED. This is the test that fails against the
+    // pre-fix `is_available` (`if self.hard_disabled { return false; }`).
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    hard_disable_via_trip_rate(&ht, &clock);
+
+    // `now` is the latching trip. One second before the quarantine deadline the
+    // bucket is unavailable AND the latching trip is still inside the rolling
+    // window — the latch is still justified by live evidence.
+    clock.advance_mono(HARD_DISABLE_QUARANTINE_BASE - Duration::from_secs(1));
+    let health = ht.model_health(S, TEST_MODEL);
+    assert_eq!(
+        health.trips_in_window, 1,
+        "one second before the deadline the latching trip has not yet aged out"
+    );
+    assert!(
+        !ht.is_available(S, TEST_MODEL),
+        "no probe is admitted before the quarantine deadline"
+    );
+
+    // Exactly at the deadline the rolling window is provably empty — this is
+    // the `trips_in_window: 0, hard_disabled: true` state the incident bucket
+    // sat in for four days — and exactly one probe is admitted.
+    clock.advance_mono(Duration::from_secs(1));
+    let health = ht.model_health(S, TEST_MODEL);
+    assert_eq!(
+        health.trips_in_window, 0,
+        "the base quarantine equals TRIP_RATE_WINDOW precisely so that every trip \
+         justifying the latch has aged out by the time the probe fires"
+    );
+    assert!(
+        health.hard_disabled,
+        "the probe is not a re-enable: the bucket is still latched"
+    );
+    assert!(
+        ht.is_available(S, TEST_MODEL),
+        "REGRESSION GUARD (4-day outage): a decayed hard-disable must admit a probe"
+    );
+
+    // Consuming the probe closes the window again immediately — the lane does
+    // not re-open, one task is exposed.
+    ht.note_dispatch_accepted(S, TEST_MODEL);
+    assert!(
+        !ht.is_available(S, TEST_MODEL),
+        "the probe is consumed at dispatch acceptance; the lane does not re-open"
+    );
+
+    // The probe succeeds → latch released, window reset, model fully healthy.
+    ht.record_success(S, TEST_MODEL);
+    let health = ht.model_health(S, TEST_MODEL);
+    assert!(
+        !health.hard_disabled,
+        "a clean probe releases the quarantine"
+    );
+    assert!(!health.auto_disabled);
+    assert_eq!(health.hard_disable_probe_tier, 0);
+    assert_eq!(health.trips_in_window, 0);
+    assert_eq!(health.disable_ttl_trips, 0);
+    assert!(ht.is_available(S, TEST_MODEL));
+}
+
+/// Simulate a dispatch loop polling the breaker every minute for `days`,
+/// treating every admitted dispatch as a probe that crashes. Returns the
+/// elapsed-minute stamp of each admitted dispatch.
+fn simulate_dead_model_dispatch_loop(ht: &HealthTracker, clock: &TestClock, days: u64) -> Vec<u64> {
+    let mut admitted = Vec::new();
+    for minute in 0..(days * 24 * 60) {
+        if ht.is_available(S, TEST_MODEL) {
+            admitted.push(minute);
+            // Exactly the 2026-07 flap shape: the dispatch is accepted, the
+            // session grabs a slot and dies almost immediately.
+            ht.note_dispatch_accepted(S, TEST_MODEL);
+            ht.record_stall(S, TEST_MODEL, true);
+        }
+        clock.advance_mono(Duration::from_secs(60));
+    }
+    admitted
+}
+
+#[test]
+fn a_failing_probe_relatches_and_dispatch_exposure_stays_bounded_for_thirty_days() {
+    // THE FLAP MUST STAY IMPOSSIBLE. This is the assertion that protects the
+    // 5.75h/8-crash incident from recurring: over a month of continuous polling
+    // against a model that fails every single probe, the *count* of tasks
+    // actually exposed is single digits, and no two exposures are close
+    // together.
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    hard_disable_via_trip_rate(&ht, &clock);
+
+    let admitted = simulate_dead_model_dispatch_loop(&ht, &clock, 30);
+
+    assert!(
+        admitted.len() <= 8,
+        "30 days of polling a permanently-broken model exposed {} tasks; the \
+         quarantine ladder must keep this in single digits (the flap incident \
+         burned 8 tasks in 5.75 HOURS)",
+        admitted.len()
+    );
+    assert!(
+        !admitted.is_empty(),
+        "…but it must not be a fuse either: a breaker that can never probe is \
+         what caused the 4-day outage"
+    );
+
+    // No exposure inside the first 5.75h — the exact wall-clock the flap
+    // incident burned through 8 crashes.
+    let flap_incident_minutes = 345;
+    assert!(
+        admitted.iter().all(|m| *m >= flap_incident_minutes),
+        "a task was exposed inside the 5.75h window the original flap consumed: {admitted:?}"
+    );
+
+    // Every gap between consecutive exposures is at least the base quarantine.
+    for pair in admitted.windows(2) {
+        let gap_minutes = pair[1] - pair[0];
+        assert!(
+            gap_minutes >= HARD_DISABLE_QUARANTINE_BASE.as_secs() / 60,
+            "consecutive probes {} and {} are only {gap_minutes} minutes apart",
+            pair[0],
+            pair[1]
+        );
+    }
+
+    // And the model is still effectively disabled at the end of the month.
+    let health = ht.model_health(S, TEST_MODEL);
+    assert!(
+        health.hard_disabled,
+        "a model that fails every probe stays latched"
+    );
+    assert!(!ht.is_available(S, TEST_MODEL));
+}
+
+#[test]
+fn repeated_probe_failures_escalate_the_quarantine_to_the_ceiling() {
+    // GENUINELY-DEAD MODEL. The gap between successive probes must grow —
+    // 6h, 12h, 24h, 48h, 96h — and then pin at the 7-day ceiling rather than
+    // growing without bound (which would be a fuse again).
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    hard_disable_via_trip_rate(&ht, &clock);
+
+    let admitted = simulate_dead_model_dispatch_loop(&ht, &clock, 30);
+    let hour = 60u64;
+    let gaps: Vec<u64> = std::iter::once(admitted[0])
+        .chain(admitted.windows(2).map(|p| p[1] - p[0]))
+        .collect();
+
+    assert_eq!(
+        gaps,
+        vec![
+            6 * hour,
+            12 * hour,
+            24 * hour,
+            48 * hour,
+            96 * hour,
+            168 * hour,
+            168 * hour,
+            168 * hour,
+        ],
+        "quarantine must double per failed probe and then pin at the 7-day ceiling"
+    );
+
+    let health = ht.model_health(S, TEST_MODEL);
+    assert_eq!(
+        health.hard_disable_probe_tier, HARD_DISABLE_MAX_PROBE_TIER,
+        "the escalation tier saturates instead of overflowing"
+    );
+    assert_eq!(
+        quarantine_for_tier(health.hard_disable_probe_tier),
+        HARD_DISABLE_QUARANTINE_MAX
+    );
+    // The tier is clamped, so an absurd number of further failures cannot push
+    // the quarantine past the documented ceiling.
+    assert_eq!(
+        quarantine_for_tier(u32::MAX),
+        HARD_DISABLE_QUARANTINE_MAX,
+        "the ceiling is a real ceiling"
+    );
+}
+
+#[test]
+fn one_bad_probe_session_escalates_the_quarantine_exactly_one_tier() {
+    // A single doomed session can emit more than one failure record (a stall
+    // AND a typed failure). Escalation is charged per PROBE, not per record,
+    // so one bad probe must not jump the model from the 6h base to the ceiling.
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    hard_disable_via_trip_rate(&ht, &clock);
+    clock.advance_mono(HARD_DISABLE_QUARANTINE_BASE);
+    assert!(ht.is_available(S, TEST_MODEL));
+
+    ht.note_dispatch_accepted(S, TEST_MODEL);
+    ht.record_stall(S, TEST_MODEL, true);
+    ht.record_failure(S, TEST_MODEL);
+    ht.record_transient_failure(S, TEST_MODEL);
+    ht.apply_breaker_check_for(S, TEST_MODEL);
+    assert_eq!(
+        ht.model_health(S, TEST_MODEL).hard_disable_probe_tier,
+        1,
+        "four failure records from one probe must charge exactly one tier"
+    );
+
+    // The un-escalated records still re-anchor the deadline at the latest bad
+    // evidence, so the next probe is a full tier-1 quarantine away.
+    clock.advance_mono(quarantine_for_tier(1) - Duration::from_secs(1));
+    assert!(
+        !ht.is_available(S, TEST_MODEL),
+        "boundary: one second early"
+    );
+    clock.advance_mono(Duration::from_secs(1));
+    assert!(
+        ht.is_available(S, TEST_MODEL),
+        "boundary: exactly at the deadline"
+    );
+}
+
+#[test]
+fn an_unobserved_probe_still_closes_the_window_for_a_full_quarantine() {
+    // The probe's verdict may never arrive: the task is killed, the leader
+    // fails over, the pod OOMs. The bound must not depend on the verdict —
+    // consuming the probe re-arms the quarantine immediately, so the breaker
+    // fails CLOSED rather than leaving the lane open.
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    hard_disable_via_trip_rate(&ht, &clock);
+    clock.advance_mono(HARD_DISABLE_QUARANTINE_BASE);
+    assert!(ht.is_available(S, TEST_MODEL));
+    ht.note_dispatch_accepted(S, TEST_MODEL);
+
+    // No success, no failure — nothing at all is recorded afterwards.
+    for _ in 0..(HARD_DISABLE_QUARANTINE_BASE.as_secs() / 60) {
+        assert!(
+            !ht.is_available(S, TEST_MODEL),
+            "an unresolved probe must not leave the lane open"
+        );
+        clock.advance_mono(Duration::from_secs(60));
+    }
+    assert!(
+        ht.is_available(S, TEST_MODEL),
+        "…and the bucket is not wedged either: the next quarantine still elapses"
+    );
+}
+
+#[test]
+fn note_dispatch_accepted_is_inert_for_a_healthy_or_cooling_bucket() {
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    // Untracked bucket: no entry is created.
+    ht.note_dispatch_accepted(S, "never/seen");
+    assert!(ht.all_health().is_empty());
+
+    // Healthy bucket: counters untouched.
+    ht.record_success(S, TEST_MODEL);
+    ht.note_dispatch_accepted(S, TEST_MODEL);
+    let health = ht.model_health(S, TEST_MODEL);
+    assert!(!health.hard_disabled);
+    assert_eq!(health.hard_disable_probe_tier, 0);
+    assert!(ht.is_available(S, TEST_MODEL));
+
+    // Ordinary (non-hard) cooldown: consuming a probe is a no-op, the ordinary
+    // cooldown ladder still owns the bucket.
+    trip_breaker(&ht, TEST_MODEL);
+    ht.note_dispatch_accepted(S, TEST_MODEL);
+    assert!(!ht.is_available(S, TEST_MODEL));
+    clock.advance_mono(INITIAL_COOLDOWN + Duration::from_secs(1));
+    assert!(
+        ht.is_available(S, TEST_MODEL),
+        "the ordinary escalating cooldown is unchanged by the quarantine work"
+    );
+}
+
+#[test]
+fn human_enable_overrides_the_quarantine_immediately_and_survives_one_failure() {
+    // HUMAN CONTROLS STAY AUTHORITATIVE. `enable` must take effect at once,
+    // mid-quarantine, without waiting for any probe window.
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    hard_disable_via_trip_rate(&ht, &clock);
+    // Fail a probe first so there is a non-zero tier to clear.
+    clock.advance_mono(HARD_DISABLE_QUARANTINE_BASE);
+    ht.note_dispatch_accepted(S, TEST_MODEL);
+    ht.record_failure(S, TEST_MODEL);
+    assert_eq!(ht.model_health(S, TEST_MODEL).hard_disable_probe_tier, 1);
+    clock.advance_mono(Duration::from_secs(60 * 60));
+    assert!(!ht.is_available(S, TEST_MODEL), "mid-quarantine");
+
+    let total_failures_before = ht.model_health(S, TEST_MODEL).total_failures;
+    ht.enable(S, TEST_MODEL);
+    let health = ht.model_health(S, TEST_MODEL);
+    assert!(
+        ht.is_available(S, TEST_MODEL),
+        "a human re-enable takes effect immediately regardless of quarantine state"
+    );
+    assert!(!health.hard_disabled);
+    assert!(!health.auto_disabled);
+    assert_eq!(health.hard_disable_probe_tier, 0);
+    assert_eq!(health.trips_in_window, 0);
+    // Deliberate 2026-08-16 change: `enable` now clears the failure STREAKS, so
+    // the operator does not have to chase it with `reset` to stop the very next
+    // failure re-tripping the breaker.
+    assert_eq!(health.consecutive_failures, 0);
+    assert_eq!(health.breaker_eligible_consecutive_failures, 0);
+    ht.record_failure(S, TEST_MODEL);
+    assert!(
+        ht.is_available(S, TEST_MODEL),
+        "one failure after a human re-enable must not instantly re-trip the breaker"
+    );
+    // …but the lifetime audit trail is preserved — that is what still
+    // distinguishes `enable` from `reset`.
+    assert!(ht.model_health(S, TEST_MODEL).total_failures > total_failures_before);
+}
+
+#[test]
+fn human_reset_clears_the_quarantine_and_the_counters() {
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    hard_disable_via_trip_rate(&ht, &clock);
+    assert!(!ht.is_available(S, TEST_MODEL));
+
+    ht.reset(S, TEST_MODEL);
+    let health = ht.model_health(S, TEST_MODEL);
+    assert!(ht.is_available(S, TEST_MODEL));
+    assert!(!health.hard_disabled);
+    assert_eq!(health.hard_disable_probe_tier, 0);
+    assert_eq!(health.total_failures, 0, "reset also wipes the audit trail");
+
+    // `enable_model_all_scopes` (the `model_health(enable)` MCP path) behaves
+    // the same across every scope.
+    let ht = tracker_on(&clock);
+    for scope in [Some("user-a"), Some("user-b")] {
+        for _ in 0..(TRIP_RATE_CEILING * CIRCUIT_BREAKER_THRESHOLD as usize) {
+            ht.record_failure(scope, TEST_MODEL);
+            let remaining = ht
+                .model_health(scope, TEST_MODEL)
+                .cooldown_seconds_remaining
+                .unwrap_or(0);
+            clock.advance_mono(Duration::from_secs(remaining + 1));
+        }
+        assert!(ht.model_health(scope, TEST_MODEL).hard_disabled);
+    }
+    assert_eq!(ht.enable_model_all_scopes(TEST_MODEL), 2);
+    for scope in [Some("user-a"), Some("user-b")] {
+        assert!(ht.is_available(scope, TEST_MODEL));
+        assert!(!ht.model_health(scope, TEST_MODEL).hard_disabled);
+    }
+}
+
+#[test]
+fn a_restart_re_anchors_the_quarantine_and_can_never_probe_at_boot() {
+    // RESTART SEMANTICS. `Instant`s do not cross the persist boundary, so the
+    // deadline is re-anchored at `now` from the PERSISTED tier. A restart must
+    // therefore only ever delay the next probe — never fire one at boot, and
+    // never demote a long-quarantined dead model back to the 6h base.
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    hard_disable_via_trip_rate(&ht, &clock);
+    // Fail two probes to reach tier 2 (a 24h quarantine).
+    for _ in 0..2 {
+        clock.advance_mono(quarantine_for_tier(
+            ht.model_health(S, TEST_MODEL).hard_disable_probe_tier,
+        ));
+        assert!(ht.is_available(S, TEST_MODEL));
+        ht.note_dispatch_accepted(S, TEST_MODEL);
+        ht.record_failure(S, TEST_MODEL);
+    }
+    let snapshot = ht.all_health();
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].hard_disable_probe_tier, 2);
+
+    // A restart loop: 100 boots, each with an hour of uptime, admits nothing.
+    let restart_clock = test_clock();
+    let restarted = tracker_on(&restart_clock);
+    for _ in 0..100 {
+        restarted.restore_all(snapshot.clone());
+        for _ in 0..60 {
+            assert!(
+                !restarted.is_available(S, TEST_MODEL),
+                "a restart must never resurrect a quarantined model into a probe"
+            );
+            restart_clock.advance_mono(Duration::from_secs(60));
+        }
+    }
+
+    // After a single boot the wait is the persisted tier's quarantine (24h),
+    // not the 6h base — the escalation survived.
+    let boot_clock = test_clock();
+    let booted = tracker_on(&boot_clock);
+    booted.restore_all(snapshot);
+    assert_eq!(
+        booted.model_health(S, TEST_MODEL).hard_disable_probe_tier,
+        2
+    );
+    boot_clock.advance_mono(HARD_DISABLE_QUARANTINE_BASE);
+    assert!(
+        !booted.is_available(S, TEST_MODEL),
+        "the persisted tier survived the restart: 6h is not enough at tier 2"
+    );
+    boot_clock.advance_mono(quarantine_for_tier(2) - HARD_DISABLE_QUARANTINE_BASE);
+    assert!(
+        booted.is_available(S, TEST_MODEL),
+        "…and the quarantine still ends, so a restart cannot make a latch permanent"
+    );
+}
+
+#[test]
+fn pre_half_open_snapshots_load_as_quarantined_at_the_base_tier() {
+    // Back-compat: a snapshot persisted before this change has no
+    // `hard_disable_probe_tier`. It must deserialize, stay hard-disabled, and
+    // recover on the base quarantine — i.e. the very buckets stranded by the
+    // 4-day outage heal themselves after one deploy plus 6h.
+    let raw = r#"[{
+        "model_id": "openai/gpt-5.6-terra",
+        "scope": "user-a",
+        "auto_disabled": true,
+        "consecutive_failures": 3,
+        "total_failures": 24,
+        "total_successes": 1753,
+        "disable_ttl_trips": 8,
+        "cooldown_seconds_remaining": null,
+        "hard_disabled": true,
+        "trips_in_window": 0
+    }]"#;
+    let snapshot: Vec<ModelHealth> = serde_json::from_str(raw).expect("legacy snapshot parses");
+    assert_eq!(snapshot[0].hard_disable_probe_tier, 0);
+
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    ht.restore_all(snapshot);
+    let scope = Some("user-a");
+    let model = "openai/gpt-5.6-terra";
+    assert!(!ht.is_available(scope, model));
+    clock.advance_mono(HARD_DISABLE_QUARANTINE_BASE - Duration::from_secs(1));
+    assert!(!ht.is_available(scope, model));
+    clock.advance_mono(Duration::from_secs(1));
+    assert!(
+        ht.is_available(scope, model),
+        "a bucket stranded by the outage recovers on the base quarantine"
+    );
+    ht.note_dispatch_accepted(scope, model);
+    ht.record_success(scope, model);
+    assert!(!ht.model_health(scope, model).hard_disabled);
+}
+
+#[test]
+fn debug_snapshot_distinguishes_a_waiting_quarantine_from_an_admissible_probe() {
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    hard_disable_via_trip_rate(&ht, &clock);
+
+    let entry = ht.debug_snapshot().into_iter().next().unwrap();
+    assert_eq!(entry.state, "hard_disabled");
+    assert!(
+        entry.until.is_some(),
+        "a quarantined bucket now renders its next-probe deadline; it used to \
+         render `null`, which is why the outage read as an uninterpretable \
+         permanent state"
+    );
+
+    clock.advance_mono(HARD_DISABLE_QUARANTINE_BASE);
+    let entry = ht.debug_snapshot().into_iter().next().unwrap();
+    assert_eq!(entry.state, "hard_disabled_probe");
+    // The metrics gauge agrees: a bucket in its probe window is half-open.
+    let metric = ht.breaker_metric_snapshot().into_iter().next().unwrap();
+    assert_eq!(metric.state, BreakerState::HalfOpen);
+}
+
+#[test]
+fn throttle_cooling_deprioritization_is_unchanged_by_the_quarantine() {
+    // The throttle path (`PERSISTENT_THROTTLE_TRIP_THRESHOLD`,
+    // `last_trip_throttle`, `is_throttle_cooling`) must behave exactly as before
+    // for a bucket that is not hard-disabled.
+    let clock = test_clock();
+    let ht = tracker_on(&clock);
+    ht.record_stall(S, TEST_MODEL, false);
+    assert!(ht.is_throttle_cooling(S, TEST_MODEL));
+    assert!(!ht.model_health(S, TEST_MODEL).hard_disabled);
+    assert_eq!(
+        ht.model_health(S, TEST_MODEL).disable_ttl_trips,
+        0,
+        "a non-persistent throttle still does not ratchet the cap"
+    );
+    clock.advance_mono(STALL_MIN_COOLDOWN + Duration::from_secs(1));
+    assert!(
+        ht.is_available(S, TEST_MODEL),
+        "a one-off throttle still self-heals"
+    );
+    ht.record_success(S, TEST_MODEL);
+    assert!(!ht.is_throttle_cooling(S, TEST_MODEL));
 }

@@ -1090,6 +1090,15 @@ impl CoordinatorActor {
 
             match dispatch_fn(&self.pool, model_id).await {
                 Ok(()) => {
+                    // A dispatch was actually accepted onto this model. If the
+                    // bucket is hard-disabled this is the ONE half-open probe
+                    // its quarantine admitted, and consuming it here — at the
+                    // single point where a real task is exposed, not at the
+                    // `is_available` predicate above, which is a pure read
+                    // consulted several times per decision — re-arms the
+                    // quarantine before the probe's verdict is known. No-op for
+                    // a healthy bucket.
+                    self.health.note_dispatch_accepted(scope, model_id);
                     tracing::Span::current().record("outcome", "ok");
                     tracing::info!(outcome = "ok", model_id = %model_id, label);
                     super::lane_resolution_log::emit_failover_candidate_accepted(
