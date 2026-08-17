@@ -22409,6 +22409,17 @@ expression: signatures
               "description": "Whether the composed gate passes (DoR ready + tribunal conditions met).",
               "type": "boolean"
             },
+            "typed_evidence": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TypedEvidenceGateStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Typed evidence authority for this proposal.\n\nThis is the normalized `typed_evidence_findings` lifecycle, distinct\nfrom the legacy `needs_evidence` compatibility columns above — both are\nreported so a mixed-version reader can tell which authority is speaking.\n`None` when the rollout mode is `off`, when the proposal has no\nunresolved typed finding, and when typed/legacy authority agree."
+            },
             "unresolved_blocking_count": {
               "description": "Count of unresolved blocking debate-trail entries.",
               "format": "int32",
@@ -22982,6 +22993,90 @@ expression: signatures
             "errors",
             "warnings",
             "skipped_tiers"
+          ],
+          "type": "object"
+        },
+        "TypedEvidenceGateStatus": {
+          "description": "Typed evidence authority section of the composed gate status.\n\nEvery field is projected from `TypedEvidenceRepository`; nothing here is\nre-derived from tasks or debate rows.",
+          "properties": {
+            "attempt_seq": {
+              "description": "Sequence of the latest allocated spike attempt.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "blocking": {
+              "description": "Whether this section is currently refusing transitions.",
+              "type": "boolean"
+            },
+            "claim": {
+              "description": "The finding's claim, serialized as JSON text.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "demanded_revision_seq": {
+              "description": "Revision the demand was raised against. Provenance, not a filter — the\nfinding keeps blocking as the proposal head advances past it.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "evidence_outcome": {
+              "description": "Validated outcome of the latest durable return: `resolved`, `partial`,\nor `unresolved`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "failure_detail": {
+              "description": "Most specific persisted failure text for the finding.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "finding_id": {
+              "description": "Id of the unresolved typed finding.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "folding_revision": {
+              "description": "Folding revision of a recorded disposition that did not carry the\nfinding to a terminal lifecycle.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "lifecycle": {
+              "description": "`demanded`, `spike_active`, `evidence_received`, or `failed`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "mode": {
+              "description": "Rollout stage this evaluation ran under: `off`, `shadow`, or `enforce`.",
+              "type": "string"
+            },
+            "parity_mismatch_reason": {
+              "description": "Set when typed and legacy evidence authority disagree. The gate fails\nclosed on this in every mode, including `off`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "blocking"
           ],
           "type": "object"
         },

@@ -21,6 +21,7 @@ use crate::tools::proposal_ops::{
     ProposalRefinementStopResponse, VerdictOverrideResponse,
 };
 use crate::tools::proposal_tools::feedback::human_feedback_disposition_contract_available;
+use crate::tools::proposal_tools::typed_evidence_gate::typed_evidence_transition_refusal;
 use crate::tools::refinement_helpers::validate_demand_evidence;
 pub use crate::tools::refinement_helpers::{
     ProposalRefinementDemandEvidenceParams, build_refinement_status,
@@ -827,6 +828,24 @@ impl DjinnMcpServer {
             }
         };
 
+        // Structural gate: accepting a refined spec is a transition over the
+        // same evidence authority as sign-off. Rejecting reverts to the
+        // pre-refinement snapshot and settles nothing, so it is not gated.
+        if accept
+            && let Some(refusal) = typed_evidence_transition_refusal(
+                &repo,
+                &proposal.id,
+                self.state.typed_evidence_gate_mode(),
+            )
+            .await
+        {
+            return Json(ResolveReviewResponse {
+                proposal_id: Some(proposal.id),
+                resolved: false,
+                error: Some(format!("cannot accept refinement: {refusal}")),
+            });
+        }
+
         match self.state.coordinator().await {
             Some(handle) => {
                 if let Err(e) = handle
@@ -947,6 +966,26 @@ impl DjinnMcpServer {
                 overridden: false,
                 override_on_revision_seq: None,
                 error: Some("override reason must not be empty".to_string()),
+            });
+        }
+
+        // Structural gate: a verdict override suppresses the needs-work
+        // channel, so it must not be usable to walk past unresolved typed
+        // evidence. This is a direct call rather than the composed gate — an
+        // override is precisely the tool for a DoR-imperfect proposal, so it
+        // must not inherit DoR blocking.
+        if let Some(refusal) = typed_evidence_transition_refusal(
+            &repo,
+            &proposal.id,
+            self.state.typed_evidence_gate_mode(),
+        )
+        .await
+        {
+            return Json(VerdictOverrideResponse {
+                proposal_id: Some(proposal.id),
+                overridden: false,
+                override_on_revision_seq: None,
+                error: Some(format!("cannot override verdict: {refusal}")),
             });
         }
 

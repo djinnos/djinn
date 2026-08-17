@@ -405,9 +405,15 @@ impl DjinnMcpServer {
         // tribunal conditions block the transition, downgrade to `draft`
         // instead of blocking creation.
         let proposal = if effective_status == "in_review" {
-            let gate =
-                evaluate_composed_gate(&repo, &proposal, body, &ac_json, resolved_target_ids.len())
-                    .await;
+            let gate = evaluate_composed_gate(
+                &repo,
+                &proposal,
+                body,
+                &ac_json,
+                resolved_target_ids.len(),
+                self.state.typed_evidence_gate_mode(),
+            )
+            .await;
             if let Some(_err) = gate.to_error_string() {
                 // Tribunal blocked — downgrade to draft.
                 match repo
@@ -862,7 +868,17 @@ impl DjinnMcpServer {
                     .map(|t| t.len())
                     .unwrap_or(0),
             };
-            Some(build_gate_status(&repo, &proposal, &proposal.body, ac_json, target_count).await)
+            Some(
+                build_gate_status(
+                    &repo,
+                    &proposal,
+                    &proposal.body,
+                    ac_json,
+                    target_count,
+                    self.state.typed_evidence_gate_mode(),
+                )
+                .await,
+            )
         } else {
             None
         };
@@ -1151,7 +1167,15 @@ impl DjinnMcpServer {
                 .await
                 .map(|t| t.len())
                 .unwrap_or(0);
-            let gate = evaluate_composed_gate(&repo, &existing, body, &ac_json, target_count).await;
+            let gate = evaluate_composed_gate(
+                &repo,
+                &existing,
+                body,
+                &ac_json,
+                target_count,
+                self.state.typed_evidence_gate_mode(),
+            )
+            .await;
             if let Some(err) = gate.to_error_string() {
                 return Json(err_single(err));
             }

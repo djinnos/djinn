@@ -1,0 +1,15 @@
+{
+  "composed_failures": [],
+  "composed_error": null,
+  "gate_status": {
+    "ready": true,
+    "dor_ready": true,
+    "dor_failures": [],
+    "judge_needs_work": false,
+    "adversary_dry_count": 0,
+    "unresolved_blocking_count": 0,
+    "unresolved_blocking_ids": [],
+    "human_override_active": false,
+    "blocked_explanations": []
+  }
+}

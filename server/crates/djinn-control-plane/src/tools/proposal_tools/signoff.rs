@@ -35,7 +35,18 @@ use crate::tools::proposal_readiness::{
 };
 use djinn_db::ProposalRepository;
 
+use super::typed_evidence_gate::{TypedEvidenceGateMode, typed_evidence_transition_refusal};
 use super::{err_single, proposal_not_found_error};
+
+/// `blocked_explanations` are sentence-cased for the UI, while gate failure
+/// strings are lower-cased for the error channel. Both render the same refusal.
+fn capitalize_first(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
 
 // ── Param structs ───────────────────────────────────────────────────────────
 
@@ -59,12 +70,21 @@ pub(crate) fn parse_ac_items(ac_json: &str) -> Vec<AcceptanceCriterionItem> {
 // ── Composed gate: DoR + tribunal (task cuzf) ─────────────────────────────
 
 /// Result of the composed tribunal gate check.
-pub(crate) struct ComposedGateResult {
+///
+/// Public so contract tests can drive the gate itself rather than only the
+/// tools that wrap it — the matrix in `typed_evidence_gate_matrix` asserts on
+/// the exact failure strings this produces.
+pub struct ComposedGateResult {
     failures: Vec<String>,
 }
 
 impl ComposedGateResult {
-    pub(crate) fn to_error_string(&self) -> Option<String> {
+    /// Every collected failure, in evaluation order.
+    pub fn failures(&self) -> &[String] {
+        &self.failures
+    }
+
+    pub fn to_error_string(&self) -> Option<String> {
         if self.failures.is_empty() {
             return None;
         }
@@ -139,14 +159,26 @@ pub async fn current_human_gate_authority(
 /// Returns `ComposedGateResult` with all failures collected. Callers
 /// (proposal_create, proposal_update, proposal_signoff, proposal_graduate)
 /// convert failures into tool error responses.
-pub(crate) async fn evaluate_composed_gate(
+/// `typed_evidence_mode` is resolved once at the MCP tool boundary and passed
+/// in. It is never read from the environment here: `cargo test` runs a target's
+/// tests in one process, so a process-global toggle would leak one test's
+/// rollout stage into another's.
+pub async fn evaluate_composed_gate(
     repo: &ProposalRepository,
     proposal: &djinn_core::models::proposal::Proposal,
     body: &str,
     ac_json: &str,
     target_count: usize,
+    typed_evidence_mode: TypedEvidenceGateMode,
 ) -> ComposedGateResult {
     let mut failures: Vec<String> = Vec::new();
+
+    // 2e is evaluated up front but reported in place. Deferring the read until
+    // after the DoR early return would let a DoR-failing proposal skip the
+    // fail-closed parity check entirely, which is the one condition that must
+    // hold in every rollout mode.
+    let typed_evidence_failure =
+        typed_evidence_transition_refusal(repo, &proposal.id, typed_evidence_mode).await;
 
     // Update/import paths evaluate an unpersisted candidate. Keep their
     // candidate body/AC structural checks while obtaining current-head lint
@@ -169,7 +201,10 @@ pub(crate) async fn evaluate_composed_gate(
             failures.push(format!("proposal not ready for review: {details}"));
         }
         // Preserve the historical no-authority DoR blocking behavior: DoR-only
-        // failures stop the gate before tribunal diagnostics are appended.
+        // failures stop the gate before tribunal diagnostics are appended. The
+        // typed-evidence refusal is the one exception — it is a fail-closed
+        // condition, not a diagnostic.
+        failures.extend(typed_evidence_failure);
         return ComposedGateResult { failures };
     }
 
@@ -246,6 +281,10 @@ pub(crate) async fn evaluate_composed_gate(
         _ => {}
     }
 
+    // 2e. Typed evidence authority. The repository projection is the sole new
+    // input: this gate never re-derives lifecycle from tasks or debate rows.
+    failures.extend(typed_evidence_failure);
+
     ComposedGateResult { failures }
 }
 
@@ -253,12 +292,13 @@ pub(crate) async fn evaluate_composed_gate(
 ///
 /// Collects DoR failures, tribunal conditions, and human-readable explanations
 /// so the UI can render readiness without recomputing it client-side.
-pub(crate) async fn build_gate_status(
+pub async fn build_gate_status(
     repo: &ProposalRepository,
     proposal: &djinn_core::models::proposal::Proposal,
     _body: &str,
     _ac_json: &str,
     target_count: usize,
+    typed_evidence_mode: TypedEvidenceGateMode,
 ) -> crate::tools::proposal_ops::ProposalGateStatusModel {
     use crate::tools::proposal_ops::{GateFailureModel, ProposalGateStatusModel};
 
@@ -400,6 +440,37 @@ pub(crate) async fn build_gate_status(
         _ => None,
     };
 
+    // 2e. Typed evidence authority. `Off` reads nothing beyond the fail-closed
+    // parity probe, so a pre-rollout deployment renders exactly as before.
+    let typed_outcome =
+        crate::tools::proposal_tools::typed_evidence_gate::evaluate_typed_evidence_gate(
+            repo,
+            proposal_id,
+            typed_evidence_mode,
+        )
+        .await;
+    if let Some(failure) = typed_outcome.failure.as_deref() {
+        blocked_explanations.push(capitalize_first(failure));
+    }
+    let typed_evidence = typed_outcome.is_reportable().then(|| {
+        let projection = typed_outcome.projection.as_ref();
+        crate::tools::proposal_ops::TypedEvidenceGateStatus {
+            mode: typed_outcome.mode.as_str().to_string(),
+            blocking: typed_outcome.blocks(),
+            parity_mismatch_reason: typed_outcome.fail_closed_reason.clone(),
+            finding_id: projection.map(|p| p.finding_id.clone()),
+            claim: projection.map(|p| p.claim.to_string()),
+            lifecycle: projection.map(|p| p.lifecycle.as_str().to_string()),
+            demanded_revision_seq: projection.map(|p| p.demanded_revision_seq),
+            attempt_seq: projection.and_then(|p| p.attempt_seq),
+            evidence_outcome: projection
+                .and_then(|p| p.evidence_outcome)
+                .map(|outcome| format!("{outcome:?}").to_lowercase()),
+            folding_revision: projection.and_then(|p| p.folding_revision),
+            failure_detail: projection.and_then(|p| p.failure_detail.clone()),
+        }
+    });
+
     // Adversary dry count from refinement status (non-critical)
     let adversary_dry_count =
         match crate::tools::refinement_tools::build_refinement_status(repo, proposal_id).await {
@@ -410,6 +481,7 @@ pub(crate) async fn build_gate_status(
     let ready = blocked_explanations.is_empty();
 
     ProposalGateStatusModel {
+        typed_evidence,
         ready,
         dor_ready,
         dor_failures,
@@ -509,6 +581,7 @@ impl DjinnMcpServer {
                 &proposal.body,
                 &proposal.acceptance_criteria,
                 target_count,
+                self.state.typed_evidence_gate_mode(),
             )
             .await;
             if let Some(err) = gate.to_error_string() {

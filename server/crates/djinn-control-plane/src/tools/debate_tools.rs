@@ -297,6 +297,23 @@ impl DjinnMcpServer {
             return Json(err_debate(format!("round must be >= 1 (got {})", p.round)));
         }
 
+        // Structural gate: a Judge verdict is the tribunal's settlement of the
+        // spec, so it may not be issued while typed evidence the Judge itself
+        // demanded is still unresolved. Objections and rebuttals are argument,
+        // not settlement, and are deliberately ungated — as is a non-Judge
+        // verdict row, which does not drive the latest-verdict channel.
+        if kind == "verdict"
+            && p.agent_role.trim().eq_ignore_ascii_case("judge")
+            && let Some(refusal) = crate::tools::proposal_tools::typed_evidence_gate::typed_evidence_transition_refusal(
+                &repo,
+                &proposal.id,
+                self.state.typed_evidence_gate_mode(),
+            )
+            .await
+        {
+            return Json(err_debate(format!("cannot record judge verdict: {refusal}")));
+        }
+
         match repo
             .add_debate_trail_entry(ProposalDebateTrailCreateInput {
                 proposal_id: &proposal.id,

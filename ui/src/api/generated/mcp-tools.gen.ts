@@ -10462,6 +10462,16 @@ export namespace ProposalShowOutputSchema {
    */
   ready: boolean
   /**
+   * Typed evidence authority for this proposal.
+   * 
+   * This is the normalized `typed_evidence_findings` lifecycle, distinct
+   * from the legacy `needs_evidence` compatibility columns above — both are
+   * reported so a mixed-version reader can tell which authority is speaking.
+   * `None` when the rollout mode is `off`, when the proposal has no
+   * unresolved typed finding, and when typed/legacy authority agree.
+   */
+  typed_evidence?: (TypedEvidenceGateStatus | null)
+  /**
    * Count of unresolved blocking debate-trail entries.
    */
   unresolved_blocking_count: number
@@ -10556,6 +10566,63 @@ export namespace ProposalShowOutputSchema {
    * The subsystem or module under investigation.
    */
   target_subsystem?: string
+  [k: string]: any
+  }
+  /**
+   * Typed evidence authority section of the composed gate status.
+   * 
+   * Every field is projected from `TypedEvidenceRepository`; nothing here is
+   * re-derived from tasks or debate rows.
+   */
+  export interface TypedEvidenceGateStatus {
+  /**
+   * Sequence of the latest allocated spike attempt.
+   */
+  attempt_seq?: number
+  /**
+   * Whether this section is currently refusing transitions.
+   */
+  blocking: boolean
+  /**
+   * The finding's claim, serialized as JSON text.
+   */
+  claim?: string
+  /**
+   * Revision the demand was raised against. Provenance, not a filter — the
+   * finding keeps blocking as the proposal head advances past it.
+   */
+  demanded_revision_seq?: number
+  /**
+   * Validated outcome of the latest durable return: `resolved`, `partial`,
+   * or `unresolved`.
+   */
+  evidence_outcome?: string
+  /**
+   * Most specific persisted failure text for the finding.
+   */
+  failure_detail?: string
+  /**
+   * Id of the unresolved typed finding.
+   */
+  finding_id?: string
+  /**
+   * Folding revision of a recorded disposition that did not carry the
+   * finding to a terminal lifecycle.
+   */
+  folding_revision?: number
+  /**
+   * `demanded`, `spike_active`, `evidence_received`, or `failed`.
+   */
+  lifecycle?: string
+  /**
+   * Rollout stage this evaluation ran under: `off`, `shadow`, or `enforce`.
+   */
+  mode: string
+  /**
+   * Set when typed and legacy evidence authority disagree. The gate fails
+   * closed on this in every mode, including `off`.
+   */
+  parity_mismatch_reason?: string
   [k: string]: any
   }
   /**
