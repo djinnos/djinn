@@ -13,6 +13,14 @@ use djinn_core::models::task::{PRIORITY_CRITICAL, PROPOSAL_REVIEW_TITLE_PREFIX};
 use djinn_core::models::{IssueType, TribunalEvidenceLifecycle};
 use djinn_db::{EffectiveCreatorProvenance, EpicRepository, ProposalRepository};
 
+// The typed repository owns the atomic receipt/compatibility-link transaction.
+// This test seam models process death in the tiny gap after that transaction
+// commits but before this actor can re-drive the Advocate. It is deliberately
+// compiled out of production: normal ingress always proceeds to resume.
+#[cfg(test)]
+static INTERRUPT_AFTER_EVIDENCE_COMMIT_BEFORE_RESUME: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// Rolling window for throughput tracking.
@@ -26,6 +34,14 @@ pub(super) const PROPOSAL_RECONCILE_TITLE_PREFIX: &str = "Reconcile proposal";
 // ── Epic completion rules ─────────────────────────────────────────────────────
 
 impl CoordinatorActor {
+    /// Arm the one-shot commit-before-resume interruption used by cold-recovery
+    /// coverage. Production builds do not contain this seam.
+    #[cfg(test)]
+    pub(crate) fn set_interrupt_after_evidence_commit_before_resume_for_test(enabled: bool) {
+        INTERRUPT_AFTER_EVIDENCE_COMMIT_BEFORE_RESUME
+            .store(enabled, std::sync::atomic::Ordering::Release);
+    }
+
     /// Called when any task transitions to `closed`.
     ///
     /// Checks the two epic-level completion rules:
@@ -206,6 +222,17 @@ impl CoordinatorActor {
                 return None;
             }
         };
+        // Fault injection is intentionally *after* the repository's atomic
+        // validation, lifecycle transition, and compatibility-link cleanup,
+        // but before any in-memory Advocate continuation. Consuming the flag
+        // makes one live ingress resemble a process that dies at this boundary;
+        // the test then drops this actor and exercises cold recovery.
+        #[cfg(test)]
+        if INTERRUPT_AFTER_EVIDENCE_COMMIT_BEFORE_RESUME
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Some(result);
+        }
         // A duplicate returns the finding's current lifecycle. Only an
         // evidence-received finding may re-drive folding after a
         // commit-before-resume interruption; historical terminal returns must
