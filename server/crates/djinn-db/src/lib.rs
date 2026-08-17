@@ -248,7 +248,7 @@ pub use repositories::{
         ModelTurnAdmissionRepository, ModelTurnAdmissionSchemaReadiness, ModelTurnAdmissionWait,
         ModelTurnAuthoritativeUsage, ModelTurnBucketBinding, ModelTurnBucketDebit,
         ModelTurnBucketKind, ModelTurnCapabilityHeartbeatInput, ModelTurnCapabilityState,
-        ModelTurnControllerWindow, ModelTurnControllerWindowDiagnostic,
+        ModelTurnControllerFence, ModelTurnControllerWindow, ModelTurnControllerWindowDiagnostic,
         ModelTurnControllerWindowDiagnosticCode, ModelTurnControllerWindowInput,
         ModelTurnControllerWindowSummary, ModelTurnDecisionDiagnostic, ModelTurnDecisionKind,
         ModelTurnDecisionRecordInput, ModelTurnIdentityState, ModelTurnLearnerWindow,

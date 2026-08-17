@@ -7,10 +7,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use djinn_db::{
-    ModelTurnAdmissionRepository, ModelTurnCapabilityHeartbeatInput,
+    ModelTurnAdmissionRepository, ModelTurnCapabilityHeartbeatInput, ModelTurnControllerFence,
     ModelTurnControllerWindowDiagnostic, ModelTurnControllerWindowInput,
-    ModelTurnControllerWindowSummary, ModelTurnPhaseCEvidenceInput, ModelTurnPhaseCEvidenceOutcome,
-    ModelTurnPhaseCEvidenceStage, ModelTurnPool,
+    ModelTurnControllerWindowSummary, ModelTurnLeaseMutationOutcome, ModelTurnPhaseCEvidenceInput,
+    ModelTurnPhaseCEvidenceOutcome, ModelTurnPhaseCEvidenceStage, ModelTurnPool,
 };
 use djinn_k8s::{WorkloadObjectKind, WorkloadRecord};
 use djinn_provider::{ProviderAttemptPlanV1, ProviderOutcomeV1, catalog::CatalogService};
@@ -119,14 +119,16 @@ pub struct PhaseCWindowAccountingV1 {
     pub completed_turns: i64,
 }
 
-/// Resolve through the active catalog immediately before writing the typed DB row.
+/// Resolve through the active catalog immediately before writing the typed DB
+/// row, under the writer's own durable leadership fence.
 pub async fn persist_catalog_qualified_phase_c_window_v1(
     repository: &ModelTurnAdmissionRepository,
     catalog: &CatalogService,
     path: &ExpectedAttemptPathV1,
     accounting: PhaseCWindowAccountingV1,
     qualification: &PhaseCWindowQualificationV1,
-) -> djinn_db::Result<()> {
+    fence: &ModelTurnControllerFence,
+) -> djinn_db::Result<ModelTurnLeaseMutationOutcome> {
     let Some(model) = catalog.find_model(&format!("{}/{}", path.provider, path.model_scope)) else {
         return Err(djinn_db::Error::InvalidData(
             "unknown Phase-C catalog route".into(),
@@ -163,6 +165,7 @@ pub async fn persist_catalog_qualified_phase_c_window_v1(
                 trainable: qualification.admitted,
                 diagnostics,
             },
+            fence: fence.clone(),
         })
         .await
 }
@@ -366,7 +369,7 @@ async fn project_from_inventory(
     })
 }
 
-fn eligible_live_slot(record: &&WorkloadRecord) -> bool {
+pub(crate) fn eligible_live_slot(record: &&WorkloadRecord) -> bool {
     record.kind == WorkloadObjectKind::Pod && record.ready && !record.terminal
 }
 
@@ -495,7 +498,7 @@ pub struct PhaseCWindowDiagnosticV1 {
     pub code: PhaseCWindowDiagnosticCodeV1,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct PhaseCWindowQualificationV1 {
     pub admitted: bool,
     pub diagnostics: Vec<PhaseCWindowDiagnosticV1>,
@@ -732,6 +735,20 @@ mod tests {
             }],
             output_reservation_source: ProviderOutputReservationSourceV1::ExplicitLimit,
             abort: ProviderAttemptAbortHandleV1::new(),
+        }
+    }
+    /// Register a real coordinator-incarnation lease and fence writes on it.
+    /// The controller fence is the existing incarnation lease, never a new
+    /// leadership mechanism.
+    async fn live_fence(db: &Database) -> ModelTurnControllerFence {
+        let incarnation_id = uuid::Uuid::now_v7().to_string();
+        djinn_db::CoordinatorIncarnationRepository::new(db.clone())
+            .register(&incarnation_id)
+            .await
+            .expect("register coordinator incarnation");
+        ModelTurnControllerFence {
+            incarnation_id,
+            live_since_at: "1970-01-01T00:00:00Z".into(),
         }
     }
     async fn seed(db: &Database, credential: &str, provider: &str, model: &str) -> i64 {
@@ -1282,6 +1299,7 @@ mod tests {
     #[tokio::test]
     async fn catalog_qualified_persistence_keeps_diagnostics_pool_local() {
         let db = Database::ephemeral().await.expect("db");
+        let fence = live_fence(&db).await;
         let first = seed(&db, "window-a", "zai", "glm-5").await;
         let second = seed(&db, "window-b", "zai", "glm-5").await;
         let repository = ModelTurnAdmissionRepository::new(db);
@@ -1316,6 +1334,7 @@ mod tests {
                 },
                 accounting(2, 0, 0),
                 &qualification,
+                &fence,
             )
             .await
             .expect("catalog-qualified write");
@@ -1343,6 +1362,7 @@ mod tests {
     #[tokio::test]
     async fn learner_seam_admits_only_the_exact_active_catalog_qualified_window() {
         let db = Database::ephemeral().await.expect("db");
+        let fence = live_fence(&db).await;
         let pool_id = seed(
             &db,
             "window-canonical",
@@ -1385,6 +1405,7 @@ mod tests {
                 admitted: true,
                 diagnostics: Vec::new(),
             },
+            &fence,
         )
         .await
         .expect("canonical write");
@@ -1460,6 +1481,7 @@ mod tests {
                     code: PhaseCWindowDiagnosticCodeV1::MissingUsage,
                 }],
             },
+            &fence,
         )
         .await
         .expect("diagnostic write");
@@ -1479,6 +1501,7 @@ mod tests {
                     admitted: true,
                     diagnostics: Vec::new(),
                 },
+                &fence,
             )
             .await
             .expect("restore canonical write");
@@ -1648,6 +1671,7 @@ mod tests {
     #[tokio::test]
     async fn catalog_qualified_persistence_rejects_unknown_routes() {
         let db = Database::ephemeral().await.expect("db");
+        let fence = live_fence(&db).await;
         let pool_id = seed(&db, "window-unknown", "canonical-provider", "namespace/foo").await;
         let repository = ModelTurnAdmissionRepository::new(db);
         let catalog = custom_catalog("canonical-provider", "namespace/foo");
@@ -1671,6 +1695,7 @@ mod tests {
                     admitted: true,
                     diagnostics: Vec::new(),
                 },
+                &fence,
             )
             .await;
             assert!(
@@ -1837,6 +1862,10 @@ mod tests {
     }
 }
 
+/// The fenced controller cycle and persisted-timestamp lease reaper (wnrd).
+#[path = "model_turn_admission_controller.rs"]
+pub mod controller;
+
 /// Aggregate-throughput learning and the concurrency controller (task yh4d).
 /// A public child module so it can consume this module's catalog-qualified
 /// learner seam without widening the Phase-C boundary to a new crate.
@@ -1849,3 +1878,8 @@ pub mod subscription_learner;
 #[cfg(test)]
 #[path = "model_turn_admission_phase_c_postgres_tests.rs"]
 mod phase_c_postgres_tests;
+
+/// Proof that the Phase-C plane is reachable from a production tick (wnrd).
+#[cfg(test)]
+#[path = "model_turn_admission_tick_wiring_tests.rs"]
+mod tick_wiring_tests;
