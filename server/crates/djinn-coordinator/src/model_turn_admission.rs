@@ -1001,6 +1001,21 @@ mod tests {
             ),
             PhaseCWindowDiagnosticCodeV1::PartialCapabilityCoverage
         ));
+        let uncovered = PhaseCCapabilityEvidenceV1 {
+            covered: false,
+            ..capability(path.clone())
+        };
+        let uncovered_qualification = qualify_aligned_phase_c_window_v1(
+            window(),
+            std::slice::from_ref(&path),
+            &[uncovered],
+            &[],
+        );
+        assert!(!uncovered_qualification.admitted);
+        assert!(has(
+            &uncovered_qualification,
+            PhaseCWindowDiagnosticCodeV1::UncoveredCapability
+        ));
         assert!(has(
             &qualify_aligned_phase_c_window_v1(
                 window(),
