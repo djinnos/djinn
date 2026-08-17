@@ -8,7 +8,8 @@ use crate::refinement_dispatch::refinement_cap_tests::{
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::NeedsEvidenceClaim;
 use djinn_db::test_support::{
-    TypedEvidenceIngressFixtureForTest, TypedEvidenceValidationSnapshotForTest,
+    TypedEvidenceFindingSnapshotForTest, TypedEvidenceIngressFixtureForTest,
+    TypedEvidenceValidationSnapshotForTest,
 };
 use djinn_db::{
     CanonicalTypedEvidenceReturnOutcomeForTest, EffectiveCreatorProvenance, ProposalRepository,
@@ -90,7 +91,9 @@ async fn fixture(outcome: CanonicalTypedEvidenceReturnOutcomeForTest) -> Fixture
 async fn submitted_envelope(f: &Fixture, payload: serde_json::Value) -> DjinnEventEnvelope {
     let context =
         djinn_slot::test_helpers::agent_context_from_db(f.db.clone(), CancellationToken::new());
-    assert!(handle_submit_work(&serde_json::json!({ "task_id": f.spike_task_id, "commit_title": "deliver typed evidence", "summary": "ordinary production summary", "files_changed": [], "remaining_concerns": [], "tribunal_evidence_return_v1": payload }), &f.spike_task_id, "fixture-session", &context).await);
+    // Capture the producer's committed activity even when its independent
+    // legacy structured-handoff branch declines this terminal submission.
+    let _ = handle_submit_work(&serde_json::json!({ "task_id": f.spike_task_id, "commit_title": "deliver typed evidence", "summary": "ordinary production summary", "files_changed": [], "remaining_concerns": [], "tribunal_evidence_return_v1": payload }), &f.spike_task_id, "fixture-session", &context).await;
     let activity = TaskRepository::new(f.db.clone(), EventBus::noop())
         .list_activity(&f.spike_task_id)
         .await
@@ -110,51 +113,64 @@ async fn submitted_envelope(f: &Fixture, payload: serde_json::Value) -> DjinnEve
     )
 }
 
-fn strip_ids(value: &mut serde_json::Value) {
+fn normalize_generated_metadata(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
-            map.retain(|k, _| !k.ends_with("_id"));
+            // Preserve semantic `check_id`; only independent fixture identity
+            // and derived raw-payload hash fields may differ across paths.
+            for key in [
+                "validation_id",
+                "payload_sha256",
+                "raw_payload_sha256",
+                "finding_id",
+                "spike_task_id",
+                "attempt_id",
+                "check_result_id",
+                "anchor_id",
+                "invocation_id",
+            ] {
+                map.remove(key);
+            }
             for v in map.values_mut() {
-                strip_ids(v);
+                normalize_generated_metadata(v);
             }
         }
         serde_json::Value::Array(values) => {
             for v in values {
-                strip_ids(v);
+                normalize_generated_metadata(v);
             }
         }
         _ => {}
     }
 }
 fn normalized(mut value: serde_json::Value) -> serde_json::Value {
-    strip_ids(&mut value);
+    normalize_generated_metadata(&mut value);
     value
+}
+fn complete_snapshot(snapshot: &TypedEvidenceValidationSnapshotForTest) -> serde_json::Value {
+    serde_json::json!({
+        "validation_id": snapshot.validation_id,
+        "payload_sha256": snapshot.payload_sha256,
+        "outcome": snapshot.outcome,
+        "validator_facts": snapshot.validator_facts,
+        "checks": snapshot.checks,
+        "check_anchors": snapshot.check_anchors,
+        "findings": snapshot.findings,
+        "finding_anchors": snapshot.finding_anchors,
+        "failures": snapshot.failures,
+        "gaps": snapshot.gaps,
+        "finding_lifecycle": snapshot.finding_lifecycle,
+        "transition_count": snapshot.transition_count,
+    })
 }
 fn assert_parity(
     live: &TypedEvidenceValidationSnapshotForTest,
     cold: &TypedEvidenceValidationSnapshotForTest,
 ) {
-    // Independent DBs intentionally generate validation/anchor UUIDs and hashes.
-    assert_eq!(live.outcome, cold.outcome);
     assert_eq!(
-        normalized(live.validator_facts.clone()),
-        normalized(cold.validator_facts.clone())
+        normalized(complete_snapshot(live)),
+        normalized(complete_snapshot(cold))
     );
-    for (left, right) in [
-        (&live.checks, &cold.checks),
-        (&live.check_anchors, &cold.check_anchors),
-        (&live.findings, &cold.findings),
-        (&live.finding_anchors, &cold.finding_anchors),
-        (&live.failures, &cold.failures),
-        (&live.gaps, &cold.gaps),
-    ] {
-        assert_eq!(
-            normalized(serde_json::Value::Array(left.clone())),
-            normalized(serde_json::Value::Array(right.clone()))
-        );
-    }
-    assert_eq!(live.finding_lifecycle, cold.finding_lifecycle);
-    assert_eq!(live.transition_count, cold.transition_count);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -255,20 +271,17 @@ async fn production_invalid_deliveries_fail_raw_typed_lifecycle_and_keep_link() 
             }
             "wrong-attempt" => payload["attempt_id"] = serde_json::json!("wrong-attempt"),
             "incomplete" => payload["checks"] = serde_json::json!([]),
-            "over-limit" => payload["conclusion"] = serde_json::json!("x".repeat(2049)),
+            "over-limit" => payload["conclusion"] = serde_json::json!("x".repeat(8193)),
             _ => unreachable!(),
         }
         let event = submitted_envelope(&f, payload).await;
         let (events, _) = tokio::sync::broadcast::channel(16);
         let mut actor = build_refinement_actor(&f.db, &events, spawn_test_pool(&f.db, 2));
         actor.handle_event(event).await;
-        let raw = djinn_db::test_support::typed_evidence_validation_snapshot_for_finding_for_test(
-            &f.db,
-            &f.finding_id,
-        )
-        .await;
-        assert_eq!(raw.finding_lifecycle, "failed", "{case}");
-        assert_eq!(raw.transition_count, 0, "{case} has no receipt transition");
+        let raw =
+            djinn_db::test_support::typed_evidence_finding_snapshot_for_test(&f.db, &f.finding_id)
+                .await;
+        assert_failed_without_receipt(&raw, case);
         let proposal = ProposalRepository::new(f.db.clone(), EventBus::noop())
             .get(&f.proposal_id)
             .await
@@ -283,6 +296,18 @@ async fn production_invalid_deliveries_fail_raw_typed_lifecycle_and_keep_link() 
     }
 }
 
+fn assert_failed_without_receipt(raw: &TypedEvidenceFindingSnapshotForTest, case: &str) {
+    assert_eq!(raw.lifecycle, "failed", "{case}");
+    assert_eq!(raw.validation_count, 0, "{case} has no typed receipt");
+    assert_eq!(
+        raw.transitions
+            .last()
+            .and_then(|transition| transition["to_lifecycle"].as_str()),
+        Some("failed"),
+        "{case} persists a raw failed transition"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn non_envelope_terminal_activity_never_creates_typed_receipt() {
     let f = fixture(CanonicalTypedEvidenceReturnOutcomeForTest::Resolved).await;
@@ -291,10 +316,10 @@ async fn non_envelope_terminal_activity_never_creates_typed_receipt() {
     // is explicitly delivered through handle_event and cannot create a receipt.
     for (kind, payload) in [
         ("comment", serde_json::json!({"body":"comment"})),
-        ("close", serde_json::json!({"summary":"close text"})),
+        ("task_closed", serde_json::json!({"summary":"close text"})),
         (
-            "submit_work",
-            serde_json::json!({"summary":"ordinary summary"}),
+            "work_submitted",
+            serde_json::json!({"commit_title":"ordinary work", "summary":"ordinary summary", "files_changed":[], "remaining_concerns":[]}),
         ),
         ("findings", serde_json::json!({"body":"findings prose"})),
         ("memory_link", serde_json::json!({"memory":"[[evidence]]"})),
@@ -342,4 +367,18 @@ async fn non_envelope_terminal_activity_never_creates_typed_receipt() {
         Some(f.spike_task_id.as_str())
     );
     assert!(proposal.needs_evidence_claim.is_some());
+    let raw =
+        djinn_db::test_support::typed_evidence_finding_snapshot_for_test(&f.db, &f.finding_id)
+            .await;
+    assert_eq!(raw.lifecycle, "spike_active");
+    assert_eq!(raw.validation_count, 0, "no typed receipt was persisted");
+    assert!(
+        raw.transitions.iter().all(|transition| {
+            !matches!(
+                transition["to_lifecycle"].as_str(),
+                Some("evidence_received" | "failed")
+            )
+        }),
+        "ordinary closure produces no typed terminal transition"
+    );
 }

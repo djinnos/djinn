@@ -75,6 +75,57 @@ pub async fn typed_evidence_validation_snapshot_for_finding_for_test(
     typed_evidence_validation_snapshot_for_test(db, &validation_id).await
 }
 
+/// Read lifecycle state even when rejection created no validation result.
+/// **Not for production use.** Panics on SQL errors.
+pub async fn typed_evidence_finding_snapshot_for_test(
+    db: &Database,
+    finding_id: &str,
+) -> TypedEvidenceFindingSnapshotForTest {
+    let lifecycle: String =
+        sqlx::query_scalar("SELECT lifecycle FROM typed_evidence_findings WHERE id=$1")
+            .bind(finding_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    let attempt_id: String = sqlx::query_scalar(
+        "SELECT id FROM typed_evidence_attempts WHERE finding_id=$1 ORDER BY sequence DESC LIMIT 1",
+    )
+    .bind(finding_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    let validation_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM typed_evidence_validation_results WHERE attempt_id=$1",
+    )
+    .bind(&attempt_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    let transitions = sqlx::query(
+        "SELECT from_lifecycle,to_lifecycle,metadata FROM typed_evidence_transitions \
+         WHERE finding_id=$1 ORDER BY ordinal",
+    )
+    .bind(finding_id)
+    .fetch_all(db.pool())
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|row| {
+        serde_json::json!({
+            "from_lifecycle": row.get::<Option<String>, _>("from_lifecycle"),
+            "to_lifecycle": row.get::<String, _>("to_lifecycle"),
+            "metadata": row.get::<serde_json::Value, _>("metadata"),
+        })
+    })
+    .collect();
+    TypedEvidenceFindingSnapshotForTest {
+        lifecycle,
+        attempt_id,
+        validation_count,
+        transitions,
+    }
+}
+
 /// Exact finding/attempt identity and a repository-valid durable return.
 ///
 /// **Not for production use.** Panics on SQL errors.
@@ -83,6 +134,16 @@ pub struct TypedEvidenceIngressFixtureForTest {
     pub finding_id: String,
     pub attempt_id: String,
     pub return_payload: String,
+}
+
+/// Raw finding/attempt state, including rejection-only transitions that have
+/// no `typed_evidence_validation_results` row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedEvidenceFindingSnapshotForTest {
+    pub lifecycle: String,
+    pub attempt_id: String,
+    pub validation_count: i64,
+    pub transitions: Vec<serde_json::Value>,
 }
 
 /// A complete persisted validation contract for coordinator parity assertions.
