@@ -502,3 +502,121 @@ fn tamper_idempotency_key_is_deterministic() {
         "different gate key must produce different tamper key"
     );
 }
+
+// ── Gate ordering in `poll_pr_draft_tasks` (4vnt / 3kza regression) ────────
+
+/// Strip `//` line comments so a comment naming a symbol satisfies nothing
+/// below. Mirrors the helper the sibling `ci_routing` source guards use.
+fn strip_line_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    for line in source.lines() {
+        let bytes = line.as_bytes();
+        let mut quoted = false;
+        let mut index = 0usize;
+        let mut end = line.len();
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' if quoted => index += 1,
+                b'"' => quoted = !quoted,
+                b'/' if !quoted && bytes.get(index + 1) == Some(&b'/') => {
+                    end = index;
+                    break;
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        out.push_str(&line[..end]);
+        out.push('\n');
+    }
+    out
+}
+
+/// REGRESSION (`4vnt`/PR #3153, `3kza`/PR #3155): in `poll_pr_draft_tasks` the
+/// merged-PR branch MUST precede the tripwire active-hold gate.
+///
+/// This is the primary root cause. Both tasks carried a `tripwire.gate.held`
+/// activity event on their PR's *live* head (`d41958f6…`, `fef4a526…`), so
+/// `reconcile_tripwire_hold` returned `true` on every poll. The hold check used
+/// to sit ABOVE the merged check, so the loop `continue`d before ever reading
+/// `pr.merged`. Both PRs merged anyway, and the tasks sat in `pr_draft` with
+/// `closed_at: null` — 5 days for `4vnt` — holding dependents `296y` and `i58q`
+/// out of the build loop until an operator closed them by hand.
+/// `poll_pr_review_tasks` always had the correct order; only this loop was
+/// inverted.
+///
+/// SOURCE-LEVEL, and honestly labelled: this pins the *ordering* of two blocks,
+/// which no behavioural assertion states directly. It is a supplement, not a
+/// substitute — the behavioural proof of the same fix is
+/// `supervisor_impl::pr::tests::
+/// merged_pr_under_active_tripwire_hold_still_closes_its_pr_draft_task`, which
+/// drives the real `poll_pr_draft_tasks` against a wiremock GitHub through the
+/// `set_installation_client_base_url_for_test` seam and observes `pr_draft` vs
+/// `closed`. Prefer extending that test over adding assertions here.
+///
+/// NAMED FAILING MUTATIONS.
+/// (a) Move `reconcile_tripwire_hold` back above the merged arm — the exact
+///     production state before this fix: the ordering assertion fails.
+/// (b) Delete the terminal-state match (never terminalize from `pr_draft`):
+///     the `Merged` arm is not found.
+/// (c) Delete the tripwire hold call: the hold anchor is not found.
+/// (d) Gate the merged arm on a stored head SHA: the SHA-free assertion fails.
+/// (e) Hoist the closed-without-merge block above the hold: the
+///     force-close-stays-below assertion fails.
+#[test]
+fn a_merged_pr_is_observed_before_the_tripwire_hold_gate() {
+    let code = strip_line_comments(include_str!("pr_watcher.rs"));
+
+    let poll_start = code
+        .find("pub(crate) async fn poll_pr_draft_tasks(")
+        .expect("poll_pr_draft_tasks is in pr_watcher.rs");
+    let body = &code[poll_start..];
+
+    let merged_arm = body
+        .find("merged_reconcile::PrTerminalState::Merged => {")
+        .expect("the pr_draft loop must have a merged-PR terminalization arm");
+    let force_close = body
+        .find("TransitionAction::ForceClose,")
+        .expect("the pr_draft loop must still force-close a closed-unmerged PR");
+    let hold_gate = body
+        .find(".reconcile_tripwire_hold(")
+        .expect("the pr_draft loop must still evaluate the tripwire active hold");
+
+    assert!(
+        merged_arm < hold_gate,
+        "a merged PR is ground truth and must be observed BEFORE the tripwire \
+         active-hold gate; with the gate first, a held head that merges strands \
+         its task in pr_draft forever and never releases its dependents \
+         (incidents 4vnt/#3153 and 3kza/#3155)",
+    );
+    // The deliberate asymmetry. `ForceClose` is exempt from the blocks-others
+    // guard, so hoisting the closed-unmerged branch above the hold would let a
+    // reviewer who closes a held PR unmerged (intending a redo) release every
+    // dependent onto work that never landed. Merging is a fact Djinn records;
+    // force-closing is an action Djinn takes.
+    assert!(
+        hold_gate < force_close,
+        "the closed-without-merge force-close must stay BELOW the tripwire hold \
+         — unlike a merge it releases dependents, and releasing them onto work \
+         that never landed is a worse failure than the stranding this fixes",
+    );
+
+    let classify = body
+        .find("merged_reconcile::classify_pr_terminal_state(")
+        .expect("terminal state must come from the shared classifier");
+    assert!(
+        classify < merged_arm,
+        "the merged arm must be driven by the shared classifier, so the primary \
+         loop and the reconciliation safety net cannot disagree about `merged`",
+    );
+
+    let classify_args = &body[classify..merged_arm];
+    for sha_token in ["head_sha", "head.sha", "merge_commit_sha"] {
+        assert!(
+            !classify_args.contains(sha_token),
+            "merge detection must not consult `{sha_token}`: both incident \
+             branches were force-pushed during a rebase, leaving every stored \
+             head SHA stale against the merged head",
+        );
+    }
+}
