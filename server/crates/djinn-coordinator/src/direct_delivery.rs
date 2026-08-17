@@ -57,17 +57,21 @@ pub(crate) enum BoundaryOperation {
 }
 
 #[cfg(test)]
-static BOUNDARY_OPERATIONS: std::sync::Mutex<Option<Vec<BoundaryOperation>>> =
-    std::sync::Mutex::new(None);
+static BOUNDARY_OPERATIONS: std::sync::Mutex<
+    Option<(std::thread::ThreadId, Vec<BoundaryOperation>)>,
+> = std::sync::Mutex::new(None);
 
 // The recorder follows real production calls, but observation is enabled only
-// while a test owns this lock. This keeps unrelated concurrently running tests
-// from adding to (or consuming) another test's assertion buffer.
+// while the owning test thread holds this lock. The owner thread ID travels
+// with the buffer so another concurrently running test cannot add effects to
+// this scope. Tokio's default test runtime is current-thread, so effects from
+// the test's production calls retain that owner identity across awaits.
 #[cfg(test)]
 static BOUNDARY_OPERATIONS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
 pub(crate) struct BoundaryOperationsScope {
+    owner: std::thread::ThreadId,
     _guard: tokio::sync::MutexGuard<'static, ()>,
 }
 
@@ -75,12 +79,34 @@ pub(crate) struct BoundaryOperationsScope {
 impl BoundaryOperationsScope {
     /// Marks a point in this scope's ordered production-effect stream.
     pub(crate) fn checkpoint(&self) -> usize {
-        BOUNDARY_OPERATIONS.lock().unwrap().as_ref().unwrap().len()
+        assert_eq!(
+            std::thread::current().id(),
+            self.owner,
+            "boundary recorder used outside its owner thread"
+        );
+        let operations = BOUNDARY_OPERATIONS.lock().unwrap();
+        let (owner, operations) = operations.as_ref().unwrap();
+        assert_eq!(
+            *owner, self.owner,
+            "boundary recorder used outside its owner thread"
+        );
+        operations.len()
     }
 
     /// Returns effects observed after `checkpoint` without consuming them.
     pub(crate) fn operations_since(&self, checkpoint: usize) -> Vec<BoundaryOperation> {
-        BOUNDARY_OPERATIONS.lock().unwrap().as_ref().unwrap()[checkpoint..].to_vec()
+        assert_eq!(
+            std::thread::current().id(),
+            self.owner,
+            "boundary recorder used outside its owner thread"
+        );
+        let operations = BOUNDARY_OPERATIONS.lock().unwrap();
+        let (owner, operations) = operations.as_ref().unwrap();
+        assert_eq!(
+            *owner, self.owner,
+            "boundary recorder used outside its owner thread"
+        );
+        operations[checkpoint..].to_vec()
     }
 }
 
@@ -95,8 +121,12 @@ impl Drop for BoundaryOperationsScope {
 #[cfg(test)]
 pub(crate) async fn boundary_operations_scope() -> BoundaryOperationsScope {
     let guard = BOUNDARY_OPERATIONS_TEST_LOCK.lock().await;
-    *BOUNDARY_OPERATIONS.lock().unwrap() = Some(Vec::new());
-    BoundaryOperationsScope { _guard: guard }
+    let owner = std::thread::current().id();
+    *BOUNDARY_OPERATIONS.lock().unwrap() = Some((owner, Vec::new()));
+    BoundaryOperationsScope {
+        owner,
+        _guard: guard,
+    }
 }
 
 /// A no-op outside tests, preserving production behavior and the disabled epoch.
@@ -128,7 +158,9 @@ pub(crate) fn observe_boundary_operation(operation: &'static str) {
             }
             _ => return,
         };
-        if let Some(operations) = BOUNDARY_OPERATIONS.lock().unwrap().as_mut() {
+        if let Some((scope_owner, operations)) = BOUNDARY_OPERATIONS.lock().unwrap().as_mut()
+            && *scope_owner == std::thread::current().id()
+        {
             operations.push(operation);
         }
     }
@@ -1535,6 +1567,23 @@ mod tests {
         assert_eq!(
             boundary_operations.operations_since(boundary_checkpoint),
             [BoundaryOperation::DirectAppend]
+        );
+    }
+
+    #[tokio::test]
+    async fn boundary_recorder_ignores_operations_from_an_unowned_test_thread() {
+        let boundary_operations = boundary_operations_scope().await;
+        let boundary_checkpoint = boundary_operations.checkpoint();
+
+        std::thread::spawn(|| observe_boundary_operation("direct_append"))
+            .join()
+            .unwrap();
+        observe_boundary_operation("simple_close");
+
+        assert_eq!(
+            boundary_operations.operations_since(boundary_checkpoint),
+            [BoundaryOperation::SimpleClose],
+            "an unscoped concurrent test thread must not write this scope's buffer"
         );
     }
 
