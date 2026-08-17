@@ -849,6 +849,15 @@ async fn typed_evidence_failed_retry_v1() {
     valid["spike_task_id"] = serde_json::json!(first.allocation.spike_task_id);
     let valid_event =
         submitted_envelope_for_task(&f.db, &first.allocation.spike_task_id, valid).await;
+    // `submit_work` durably emits the typed activity but deliberately does not
+    // close its task. The coordinator's production ingress accepts terminal
+    // evidence only from a closed spike, so finish this exact allocated retry
+    // through the repository status transition before consuming its committed
+    // envelope. This is the production terminal task action, not fixture repair.
+    TaskRepository::new(f.db.clone(), EventBus::noop())
+        .set_status_with_reason(&first.allocation.spike_task_id, "closed", Some("completed"))
+        .await
+        .expect("terminally close the exact allocated retry task");
     restarted.handle_event(valid_event).await;
     let receipt = djinn_db::test_support::typed_evidence_validation_snapshot_for_finding_for_test(
         &f.db,
