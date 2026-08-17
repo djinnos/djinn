@@ -1,0 +1,82 @@
+{
+  "fixture": "typed_evidence_rollout_matrix",
+  "note": "Each phase is a program, not a verdict. `program` names the operations the matrix executor performs against real coordinator and repository state, and `writers`/`readers` name the deployment eras those operations exercise. The executor records an entry only after the operation ran and its persisted-state assertions passed, so a row cannot be satisfied by inspecting this file.",
+  "phases": [
+    {
+      "phase": "legacy_only",
+      "writers": ["old"],
+      "readers": ["old", "new"],
+      "program": [
+        "old_writer_sets_legacy_only_authority",
+        "old_reader_resolves_link_and_recovery_candidate",
+        "new_reader_fails_closed_on_absent_typed_authority",
+        "coordinator_redrive_dispatches_nothing",
+        "refinement_dispatch_stays_blocked",
+        "fail_closed_reads_mutated_nothing"
+      ]
+    },
+    {
+      "phase": "dual_write_legacy_read",
+      "writers": ["old", "new"],
+      "readers": ["old", "new"],
+      "program": [
+        "backfill_dual_writes_typed_authority",
+        "legacy_authority_survives_dual_write",
+        "old_reader_still_resolves_link_and_recovery_candidate",
+        "old_writer_rewrite_during_dual_write_keeps_parity",
+        "backfill_rerun_is_idempotent"
+      ]
+    },
+    {
+      "phase": "dual_write_dual_read",
+      "writers": ["old"],
+      "readers": ["old", "new"],
+      "program": [
+        "dual_read_binds_exact_finding_attempt_and_task",
+        "old_reader_agrees_with_new_reader",
+        "induced_task_mismatch_fails_closed_without_dispatch",
+        "restored_link_restores_parity",
+        "fail_closed_reads_mutated_nothing"
+      ]
+    },
+    {
+      "phase": "typed_write_dual_read",
+      "writers": ["old", "new"],
+      "readers": ["old", "new"],
+      "program": [
+        "new_writer_dual_writes_typed_and_legacy",
+        "old_reader_resolves_new_writer_authority",
+        "new_reader_binds_exact_finding_attempt_and_task",
+        "induced_claim_mismatch_fails_closed_without_dispatch",
+        "restored_claim_restores_parity",
+        "fail_closed_reads_mutated_nothing"
+      ]
+    },
+    {
+      "phase": "typed_only",
+      "writers": ["old", "new"],
+      "readers": ["old", "new"],
+      "program": [
+        "typed_writer_clears_legacy_on_receipt",
+        "old_reader_has_no_legacy_authority_left",
+        "new_reader_is_sole_authority",
+        "reintroduced_legacy_authority_fails_closed_and_blocks_dispatch",
+        "typed_only_authority_admits_advocate_dispatch"
+      ]
+    },
+    {
+      "phase": "reverse_rollback",
+      "writers": ["new"],
+      "readers": ["old", "new"],
+      "program": [
+        "new_writer_dual_writes_active_demand",
+        "rollback_keeps_old_reader_legacy_availability",
+        "rollback_keeps_exact_active_attempt_binding",
+        "rollback_keeps_immutable_evidence_plan_invocation",
+        "restart_redrive_strands_nothing_and_replaces_nothing",
+        "new_reader_hydrates_immutable_anchors_after_rollback",
+        "demanded_allocation_redrives_exact_task_without_replacement"
+      ]
+    }
+  ]
+}

@@ -175,6 +175,8 @@ mod refinement_outcome;
 mod refinement_recovery;
 pub mod rules;
 mod tripwire_hold_release;
+#[cfg(test)]
+mod typed_evidence_rollout_matrix_tests;
 mod types;
 mod wave;
 mod worker_lifecycle;
