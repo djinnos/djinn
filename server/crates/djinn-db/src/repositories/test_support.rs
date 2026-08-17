@@ -1,10 +1,14 @@
 use std::path::Path;
 
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_core::models::Project;
+use djinn_core::models::{Project, ProposalBuildAttemptLifecycle, TaskDeliveryIdentity};
 use tokio::sync::broadcast;
 
 use crate::database::Database;
+use crate::{
+    ActivateProposalBuildAttemptInput, DeliveryFinalizeInput, DeliveryPrepareInput,
+    ProposalBuildAttemptRepository, ReserveProposalBuildAttemptInput, TaskRepository,
+};
 
 /// Activate the dormant direct-delivery epoch for focused cross-crate tests.
 ///
@@ -82,6 +86,115 @@ pub async fn direct_delivery_matrix_counts_for_test(
         build_attempts,
         attempt_pr_identities,
         deliveries,
+    }
+}
+
+/// Canonical ownership and immutable-generation identity for liveness tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectDeliveryLivenessFixtureForTest {
+    pub proposal_id: String,
+    pub build_attempt_id: String,
+    pub delivery_generation: Option<i64>,
+}
+
+/// Attach canonical proposal ownership, an active build attempt, and optionally
+/// an immutable delivery generation to an existing task. `delivery_state` is
+/// one of `prepared`, `applying`, `applied`, or `conflict`.
+///
+/// **Not for production use.** Panics on fixture failures.
+pub async fn seed_direct_delivery_liveness_fixture_for_test(
+    db: &Database,
+    epic_id: &str,
+    task_id: &str,
+    delivery_state: Option<&str>,
+) -> DirectDeliveryLivenessFixtureForTest {
+    activate_direct_delivery_epoch_for_test(db).await;
+    let proposal_id = task_id.to_owned();
+    let attempt_id = format!("a{}", &task_id[1..]);
+    let proposal_short_id = task_id[..8].to_owned();
+    let attempt_short_id = format!("a{}", &task_id[1..8]);
+    seed_direct_delivery_proposal_owner_for_test(db, epic_id, &proposal_id, &proposal_short_id)
+        .await;
+    let attempts = ProposalBuildAttemptRepository::new(db.clone());
+    attempts
+        .reserve(&ReserveProposalBuildAttemptInput {
+            proposal_id: proposal_id.clone(),
+            proposal_short_id,
+            build_attempt_id: attempt_id.clone(),
+            build_attempt_short_id: attempt_short_id,
+            observed_base_sha: "fixture-base".into(),
+        })
+        .await
+        .expect("reserve direct-delivery fixture attempt");
+    attempts
+        .activate(&ActivateProposalBuildAttemptInput {
+            build_attempt_id: attempt_id.clone(),
+            expected_lifecycle: ProposalBuildAttemptLifecycle::Reserved,
+            expected_branch_head_sha: None,
+            branch_head_sha: "fixture-base".into(),
+        })
+        .await
+        .expect("activate direct-delivery fixture attempt");
+
+    let Some(state) = delivery_state else {
+        return DirectDeliveryLivenessFixtureForTest {
+            proposal_id,
+            build_attempt_id: attempt_id,
+            delivery_generation: None,
+        };
+    };
+    let tasks = TaskRepository::new(db.clone(), EventBus::noop());
+    let identity = TaskDeliveryIdentity::new(&attempt_id, task_id, 1)
+        .expect("construct direct-delivery fixture identity");
+    tasks
+        .prepare_delivery(&DeliveryPrepareInput {
+            identity: identity.clone(),
+            transition_id: "fixture-prepare".into(),
+            source_sha: "fixture-source".into(),
+            patch_digest: "fixture-patch".into(),
+            selected_parent_sha: "fixture-base".into(),
+            candidate_sha: "fixture-candidate".into(),
+        })
+        .await
+        .expect("prepare direct-delivery fixture generation");
+    if state != "prepared" {
+        tasks
+            .begin_delivery_apply(&DeliveryFinalizeInput {
+                identity: identity.clone(),
+                transition_id: "fixture-prepare".into(),
+                conflict_reason: None,
+            })
+            .await
+            .expect("begin direct-delivery fixture apply");
+    }
+    match state {
+        "prepared" | "applying" => {}
+        "applied" => {
+            tasks
+                .finalize_delivery_applied(&DeliveryFinalizeInput {
+                    identity,
+                    transition_id: "fixture-applied".into(),
+                    conflict_reason: None,
+                })
+                .await
+                .expect("finalize applied direct-delivery fixture generation");
+        }
+        "conflict" => {
+            tasks
+                .finalize_delivery_conflict(&DeliveryFinalizeInput {
+                    identity,
+                    transition_id: "fixture-conflict".into(),
+                    conflict_reason: Some("fixture conflict".into()),
+                })
+                .await
+                .expect("finalize conflicting direct-delivery fixture generation");
+        }
+        other => panic!("unsupported direct-delivery fixture state: {other}"),
+    }
+    DirectDeliveryLivenessFixtureForTest {
+        proposal_id,
+        build_attempt_id: attempt_id,
+        delivery_generation: Some(1),
     }
 }
 
