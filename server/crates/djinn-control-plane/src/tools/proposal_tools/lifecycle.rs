@@ -183,6 +183,7 @@ impl DjinnMcpServer {
                 &proposal.body,
                 &proposal.acceptance_criteria,
                 targets.len(),
+                self.state.typed_evidence_gate_mode(),
             )
             .await;
             if let Some(err) = gate.to_error_string() {

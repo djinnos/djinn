@@ -16,6 +16,7 @@ use crate::bridge::{
     CoordinatorOps, ExtensionDiagnosticsProbeOps, GitOps, LspOps, MemoryEnrichmentOps,
     RepoGraphOps, RuntimeOps, SemanticQueryEmbedding, SlotPoolOps, TaskrunJobRef,
 };
+use crate::tools::proposal_tools::TypedEvidenceGateMode;
 
 /// Independent controls for feedback-derived tribunal work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +79,14 @@ pub struct McpState {
     /// every caller, including the ones bound to a different database.
     doctor_registry: Option<Arc<DoctorRegistry>>,
     feedback_refinement_controls: FeedbackRefinementControls,
+    /// Rollout stage for the typed-evidence structural gate, resolved **once**
+    /// here and passed down as a parameter by every tool that gates on it.
+    ///
+    /// It lives on the state rather than being read from the environment at
+    /// each call site because `cargo test` runs a target's tests in one
+    /// process: a process-global toggle would leak one test's rollout stage
+    /// into another's and flake under parallel execution.
+    typed_evidence_gate_mode: TypedEvidenceGateMode,
 }
 
 impl McpState {
@@ -156,6 +165,7 @@ impl McpState {
             extension_diagnostics_probe: None,
             doctor_registry: None,
             feedback_refinement_controls: FeedbackRefinementControls::default(),
+            typed_evidence_gate_mode: TypedEvidenceGateMode::from_env(),
         }
     }
 
@@ -191,6 +201,19 @@ impl McpState {
 
     pub fn feedback_refinement_controls(&self) -> FeedbackRefinementControls {
         self.feedback_refinement_controls
+    }
+
+    /// Pin the typed-evidence rollout stage instead of taking it from the
+    /// environment. Production composition never calls this; tests do, so a
+    /// stage is chosen per-`McpState` rather than per-process.
+    pub fn with_typed_evidence_gate_mode(mut self, mode: TypedEvidenceGateMode) -> Self {
+        self.typed_evidence_gate_mode = mode;
+        self
+    }
+
+    /// The rollout stage every gating tool must pass into the gate.
+    pub fn typed_evidence_gate_mode(&self) -> TypedEvidenceGateMode {
+        self.typed_evidence_gate_mode
     }
 
     /// The doctor check registry `doctor_run` / `doctor_fix` must consult.

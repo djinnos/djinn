@@ -872,6 +872,7 @@ What happens if D fails?
             &proposal.body,
             &proposal.acceptance_criteria,
             1,
+            crate::tools::proposal_tools::TypedEvidenceGateMode::Off,
         )
         .await;
         assert!(

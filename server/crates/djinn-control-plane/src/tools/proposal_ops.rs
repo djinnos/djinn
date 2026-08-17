@@ -974,11 +974,63 @@ pub struct ProposalGateStatusModel {
     /// Needs-evidence spike parking state. `None` when not parked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub needs_evidence: Option<NeedsEvidenceStatus>,
+    /// Typed evidence authority for this proposal.
+    ///
+    /// This is the normalized `typed_evidence_findings` lifecycle, distinct
+    /// from the legacy `needs_evidence` compatibility columns above — both are
+    /// reported so a mixed-version reader can tell which authority is speaking.
+    /// `None` when the rollout mode is `off`, when the proposal has no
+    /// unresolved typed finding, and when typed/legacy authority agree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub typed_evidence: Option<TypedEvidenceGateStatus>,
     /// Whether a current human override exists for this revision.
     pub human_override_active: bool,
     /// Human-readable explanations of all gate failures, each naming the
     /// exact blocking condition. Empty when `ready` is true.
     pub blocked_explanations: Vec<String>,
+}
+
+/// Typed evidence authority section of the composed gate status.
+///
+/// Every field is projected from `TypedEvidenceRepository`; nothing here is
+/// re-derived from tasks or debate rows.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct TypedEvidenceGateStatus {
+    /// Rollout stage this evaluation ran under: `off`, `shadow`, or `enforce`.
+    pub mode: String,
+    /// Whether this section is currently refusing transitions.
+    pub blocking: bool,
+    /// Set when typed and legacy evidence authority disagree. The gate fails
+    /// closed on this in every mode, including `off`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parity_mismatch_reason: Option<String>,
+    /// Id of the unresolved typed finding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding_id: Option<String>,
+    /// The finding's claim, serialized as JSON text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim: Option<String>,
+    /// `demanded`, `spike_active`, `evidence_received`, or `failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<String>,
+    /// Revision the demand was raised against. Provenance, not a filter — the
+    /// finding keeps blocking as the proposal head advances past it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub demanded_revision_seq: Option<i32>,
+    /// Sequence of the latest allocated spike attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_seq: Option<i32>,
+    /// Validated outcome of the latest durable return: `resolved`, `partial`,
+    /// or `unresolved`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_outcome: Option<String>,
+    /// Folding revision of a recorded disposition that did not carry the
+    /// finding to a terminal lifecycle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folding_revision: Option<i32>,
+    /// Most specific persisted failure text for the finding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_detail: Option<String>,
 }
 
 /// One DoR failure in the gate status.

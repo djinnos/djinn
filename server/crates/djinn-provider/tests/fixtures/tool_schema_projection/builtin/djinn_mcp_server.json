@@ -23116,6 +23116,17 @@
                 }
               ]
             },
+            "typed_evidence": {
+              "description": "Typed evidence authority for this proposal.\n\nThis is the normalized `typed_evidence_findings` lifecycle, distinct\nfrom the legacy `needs_evidence` compatibility columns above — both are\nreported so a mixed-version reader can tell which authority is speaking.\n`None` when the rollout mode is `off`, when the proposal has no\nunresolved typed finding, and when typed/legacy authority agree.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TypedEvidenceGateStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "human_override_active": {
               "description": "Whether a current human override exists for this revision.",
               "type": "boolean"
@@ -23156,6 +23167,90 @@
           "required": [
             "check",
             "message"
+          ]
+        },
+        "TypedEvidenceGateStatus": {
+          "description": "Typed evidence authority section of the composed gate status.\n\nEvery field is projected from `TypedEvidenceRepository`; nothing here is\nre-derived from tasks or debate rows.",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "description": "Rollout stage this evaluation ran under: `off`, `shadow`, or `enforce`.",
+              "type": "string"
+            },
+            "blocking": {
+              "description": "Whether this section is currently refusing transitions.",
+              "type": "boolean"
+            },
+            "parity_mismatch_reason": {
+              "description": "Set when typed and legacy evidence authority disagree. The gate fails\nclosed on this in every mode, including `off`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "finding_id": {
+              "description": "Id of the unresolved typed finding.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "claim": {
+              "description": "The finding's claim, serialized as JSON text.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "lifecycle": {
+              "description": "`demanded`, `spike_active`, `evidence_received`, or `failed`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "demanded_revision_seq": {
+              "description": "Revision the demand was raised against. Provenance, not a filter — the\nfinding keeps blocking as the proposal head advances past it.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "attempt_seq": {
+              "description": "Sequence of the latest allocated spike attempt.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "evidence_outcome": {
+              "description": "Validated outcome of the latest durable return: `resolved`, `partial`,\nor `unresolved`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "folding_revision": {
+              "description": "Folding revision of a recorded disposition that did not carry the\nfinding to a terminal lifecycle.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "failure_detail": {
+              "description": "Most specific persisted failure text for the finding.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "blocking"
           ]
         }
       },
