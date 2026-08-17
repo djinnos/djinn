@@ -60,6 +60,7 @@ tempfile = { version = "3", optional = true }
 workspace-hack.workspace = true
 
 [dev-dependencies]
+tempfile = "3"
 djinn-agent = { path = "../djinn-agent", features = ["test-support"] }
 djinn-db = { path = "../djinn-db", features = ["test-support"] }
 # `pod_resize_fixture` — a stored `Pod` driven through the PRODUCTION observation,

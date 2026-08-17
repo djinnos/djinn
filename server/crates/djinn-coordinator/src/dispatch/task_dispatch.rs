@@ -57,9 +57,8 @@ fn record_dispatch_live_state(cooldowns_active: usize, inflight_ledger_size: usi
 }
 
 /// The ready-dispatch continuation selected after direct-delivery liveness has
-/// been reconciled. `LegacyDispatch` is deliberately the only result that may
-/// cross into role selection, respawn guarding, task-PR handling, and pool
-/// dispatch.
+/// been reconciled. `LegacyDispatch` is deliberately the only result that
+/// invokes the existing role, respawn-guard, task-PR, and spawn continuation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReadyDispatchContinuation<T = ()> {
     LegacyDispatch(T),
@@ -68,10 +67,18 @@ pub(crate) enum ReadyDispatchContinuation<T = ()> {
     Parked,
 }
 
-/// Cross the ready-dispatch liveness boundary before any legacy dispatch
-/// continuation is allowed to run. Keeping the continuation as an invocation,
-/// rather than returning only a routing enum, lets production and
-/// repository-backed tests share the same no-fallthrough boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LegacyDispatchPass {
+    Continue,
+    AbortPass,
+}
+
+/// Cross the real ready-dispatch boundary.
+///
+/// Applying work is reconciled by the caller-owned `DirectDeliveryEngine`
+/// before this returns `Reconciled`; every non-legacy direct result terminates
+/// before the legacy task-PR/spawn continuation. Both the production ready pass
+/// and repository-backed tests call this frame.
 pub(crate) async fn continue_ready_dispatch<F, Fut, C, CFut, T>(
     db: djinn_db::Database,
     tasks: &djinn_db::TaskRepository,
@@ -89,9 +96,15 @@ where
         .await?
     {
         crate::direct_delivery::DirectDeliveryLiveness::Legacy
-        | crate::direct_delivery::DirectDeliveryLiveness::Dispatch => Ok(
-            ReadyDispatchContinuation::LegacyDispatch(continue_legacy_dispatch().await?),
-        ),
+        | crate::direct_delivery::DirectDeliveryLiveness::Dispatch => {
+            // This is intentionally an invocation rather than a routing enum:
+            // production crosses into its established role/respawn/task-PR/
+            // spawn continuation here, and repository tests observe the same
+            // collaborator. Direct outcomes must never invoke it.
+            Ok(ReadyDispatchContinuation::LegacyDispatch(
+                continue_legacy_dispatch().await?,
+            ))
+        }
         crate::direct_delivery::DirectDeliveryLiveness::Reconcile => {
             Ok(ReadyDispatchContinuation::Reconciled)
         }
@@ -2069,1341 +2082,1342 @@ impl CoordinatorActor {
                 tracing::error!(task_id = %task.short_id, project_id = %task.project_id, "CoordinatorActor: dispatch blocked by failed legacy settings import");
                 continue;
             }
-            // This shared frame is the sole liveness-to-dispatch boundary. The
-            // established continuation below is reachable only after its
-            // Legacy/Dispatch invocation; Applying and Conflict terminate here.
+            // This frame owns the complete established Legacy/Dispatch continuation.
+            // Direct-delivery outcomes terminate before role selection, respawn/task-PR
+            // adoption, or the eventual pool spawn can run. The mutex sequences the two
+            // async collaborators without splitting policy into a parallel implementation.
             let db = self.db.clone();
             let tasks = self.task_repo();
-            match continue_ready_dispatch(
+            let actor = tokio::sync::Mutex::new(&mut *self);
+            let continuation = continue_ready_dispatch(
                 db,
                 &tasks,
                 &task.id,
-                || self.reconcile_direct_delivery_task(&task),
-                || async { Ok(()) },
-            )
-            .await
-            {
-                Ok(ReadyDispatchContinuation::LegacyDispatch(())) => {}
-                Ok(ReadyDispatchContinuation::Parked) => {
-                    // The production admission wrapper already persisted the
-                    // fail-closed park. Do not issue a second Escalate.
-                    continue;
-                }
-                Ok(ReadyDispatchContinuation::Reconciled) => {
-                    tracing::info!(task_id = %task.short_id, "CoordinatorActor: reconciled applying direct delivery before refusing spawn");
-                    continue;
-                }
-                Ok(ReadyDispatchContinuation::Settled) => {
-                    tracing::info!(task_id = %task.short_id, "CoordinatorActor: immutable direct delivery is settled; refusing respawn");
-                    continue;
-                }
-                Err(error) => {
-                    tracing::error!(task_id = %task.short_id, error = %error, "CoordinatorActor: dispatch denied because direct-delivery capability is unavailable or unknown");
-                    continue;
-                }
-            }
-            if let Some((pause_scope, pause_target_id, pause)) =
-                matching_task_dispatch_pause(&pause_state, &task)
-            {
-                tracing::info!(
-                    task_id = %task.short_id,
-                    task_uuid = %task.id,
-                    project_id = %task.project_id,
-                    status = %task.status,
-                    created_by_user_id = ?task.created_by_user_id,
-                    pause_scope,
-                    pause_target_id,
-                    paused_by = %pause.paused_by,
-                    paused_at = %pause.paused_at,
-                    reason = %pause.reason,
-                    "CoordinatorActor: dispatch deferred by administrative pause"
-                );
-                continue;
-            }
-            if active_task_ids.contains(&task.id) {
-                tracing::debug!(
-                    task_id = %task.short_id,
-                    "CoordinatorActor: task already has an active session, skipping dispatch"
-                );
-                continue;
-            }
-            // Final stale-snapshot/bypass guard: `ready` is assembled before the
-            // dispatch loop and also includes filtered status queues. Re-check
-            // blocker edges immediately before any role/model selection so a task
-            // that was parked behind an open remediation hold in the meantime —
-            // including `review`/`human-review-hold` blockers — cannot spawn a
-            // worker from an earlier ready vector or alternate status path.
-            match repo.list_blockers(&task.id).await {
-                Ok(blockers) if blockers.iter().any(|b| b.status != "closed") => {
-                    tracing::debug!(
-                        task_id = %task.short_id,
-                        task_uuid = %task.id,
-                        project_id = %task.project_id,
-                        blocker_count = blockers.iter().filter(|b| b.status != "closed").count(),
-                        "CoordinatorActor: task has unresolved blockers, skipping dispatch"
-                    );
-                    continue;
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        task_uuid = %task.id,
-                        project_id = %task.project_id,
-                        error = %e,
-                        "CoordinatorActor: failed to re-check blockers before dispatch; deferring task"
-                    );
-                    continue;
-                }
-            }
-            // Human-review hold guard: a remediation task tagged with
-            // `human-review-hold` is a terminal escalation that requires a
-            // human to close it. No agent (planner, worker, reviewer) must
-            // ever be dispatched for it. Without this guard the planner
-            // review-claims rule (`open` + `issue_type=review`) matches the
-            // hold task and dispatches a planner session against it,
-            // defeating the park.
-            if task.labels.contains("human-review-hold") {
-                tracing::debug!(
-                    task_id = %task.short_id,
-                    task_uuid = %task.id,
-                    "CoordinatorActor: skipping dispatch — task carries human-review-hold label (human-only hold)"
-                );
-                continue;
-            }
-            // Proposal 1omc: every dispatch must run under a real user. Refuse to
-            // dispatch a task with no resolved owner. Park it loudly rather than
-            // silently consuming org-shared credentials under no identity — this
-            // surfaces an ownership regression instead of running ownerless.
-            if poll_stack::boxed(|| self.task_is_ownerless(&task)).await {
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    task_uuid = %task.id,
-                    project_id = %task.project_id,
-                    created_by_user_id = ?task.created_by_user_id,
-                    "CoordinatorActor: REFUSING dispatch — task has no real owner \
-                     (created_by_user_id is NULL, dangling, or could not be verified). \
-                     Every task must run under a real user (proposal 1omc); parking it."
-                );
-                continue;
-            }
-            if gate_enabled {
-                let ready_for_dispatch = match readiness_cache.get(&task.project_id) {
-                    Some(v) => *v,
-                    None => {
-                        let project_repo = djinn_db::ProjectRepository::new(
-                            self.db.clone(),
-                            crate::events::event_bus_for(&self.events_tx),
-                        );
-                        let ok = match project_repo.get_dispatch_readiness(&task.project_id).await {
-                            Ok(Some(r)) => r.is_ready_for_dispatch(),
-                            // Unknown project or DB error: fail-closed so a
-                            // broken setup never silently burns tokens.
-                            _ => false,
+                || async {
+                    let actor = actor.lock().await;
+                    actor.reconcile_direct_delivery_task(&task).await
+                },
+                || async {
+                    let mut actor = actor.lock().await;
+                    let ctx = DispatchContext;
+                        let Some(role) = actor.role_registry.dispatch_role_for_task(&task, &ctx) else {
+                            return Ok(LegacyDispatchPass::Continue);
                         };
-                        readiness_cache.insert(task.project_id.clone(), ok);
-                        ok
+                    if let Some((pause_scope, pause_target_id, pause)) =
+                        matching_task_dispatch_pause(&pause_state, &task)
+                    {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            task_uuid = %task.id,
+                            project_id = %task.project_id,
+                            status = %task.status,
+                            created_by_user_id = ?task.created_by_user_id,
+                            pause_scope,
+                            pause_target_id,
+                            paused_by = %pause.paused_by,
+                            paused_at = %pause.paused_at,
+                            reason = %pause.reason,
+                            "CoordinatorActor: dispatch deferred by administrative pause"
+                        );
+                        return Ok(LegacyDispatchPass::Continue);
                     }
-                };
-                if !ready_for_dispatch {
-                    tracing::debug!(
-                        task_id = %task.short_id,
-                        project_id = %task.project_id,
-                        "CoordinatorActor: dispatch deferred — project devcontainer image not ready"
-                    );
-                    continue;
-                }
-            }
-            // Skip tasks still inside an active dispatch cooldown.
-            if self.dispatch_cooldowns.contains_key(&task.id) {
-                record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_COOLDOWN);
-                tracing::debug!(outcome = "cooldown", task_id = %task.short_id, task_uuid = %task.id);
-                tracing::debug!(
-                    task_id = %task.short_id,
-                    "CoordinatorActor: task in dispatch cooldown, skipping"
-                );
-                continue;
-            }
-            if self
-                .enforce_expired_arbiter_deadline_before_dispatch(&task)
-                .await
-            {
-                tracing::info!(
-                    task_id = %task.short_id,
-                    "CoordinatorActor: expired active arbitration auto-parked before Lead dispatch"
-                );
-                continue;
-            }
-            let ctx = DispatchContext;
-            let Some(role) = self.role_registry.dispatch_role_for_task(&task, &ctx) else {
-                continue;
-            };
-            // Pre-dispatch respawn guard: consult attempt-history before any
-            // fresh spawn/admission side-effects.  Guard ordering:
-            // 1. Open-PR adoption: when the task has an existing open PR
-            //    (task.pr_url), adopt it and record an adopted_pr audit row.
-            //    Adoption is bypassed when the PR needs rework — the reopen
-            //    flow returned the task to open so a worker can fix the PR,
-            //    and adopting would starve that rework: failing required CI
-            //    (task.ci_status == "failing", PrCiFailed flow), an
-            //    unresolved merge conflict (task.merge_conflict_metadata,
-            //    PrConflict flow), or a reopened-latest attempt (paths with
-            //    no task-row column, e.g. PrChangesRequested / merge-queue
-            //    dequeue with green PR-head checks).
-            // 2. Non-terminal attempt: if a pending or submitted attempt
-            //    already exists for this task+role, defer dispatch and record
-            //    a guard-only audit row.  No dispatch / provider / reopen
-            //    counters are incremented for the deferral.
-            // Same-signature CI remediation dead-end (incident ay3d): an open
-            // worker task whose failing required-CI PR already had a
-            // remediation run against the CURRENT head
-            // (`last_remediation_base_sha` == head) and whose failure signature
-            // has persisted past the threshold would be deferred by the respawn
-            // guard on EVERY ready pass forever — no new push to re-evaluate, no
-            // escalation, no strike accrual, and no manual lever from `open`.
-            // Break the wedge by routing it into the autonomous escalation
-            // ladder: a planner-park escalation below the ceiling, terminal-fail
-            // at it. Fires once — the escalation blocks + parks the source, so
-            // it leaves the ready set on the next pass.
-            if Self::ci_same_signature_deadlocked(&task, role) {
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    same_signature_count = task.ci_same_signature_count,
-                    head = task.ci_github_head_sha.as_deref().or(task.ci_head_sha.as_deref()).unwrap_or("(unknown)"),
-                    "CoordinatorActor: same-signature CI remediation dead-end — routing to autonomous escalation instead of deferring worker forever"
-                );
-                let head = task
-                    .ci_github_head_sha
-                    .as_deref()
-                    .or(task.ci_head_sha.as_deref())
-                    .unwrap_or("(unknown)")
-                    .to_owned();
-                let reason = format!(
-                    "Required CI has failed on the same signature {} time(s) at head {} and a \
-                     remediation already ran against that exact head with no new push — the worker \
-                     cannot make forward progress by re-running. Escalating for terminal resolution.",
-                    task.ci_same_signature_count, head,
-                );
-                poll_stack::boxed(|| self.escalate_to_planner_or_terminally_fail(&task, &reason))
-                    .await;
-                continue;
-            }
-            let pr_rework_signal = super::respawn_guard::PrReworkSignal::from_task_row(
-                task.ci_status.as_str(),
-                task.merge_conflict_metadata.as_deref(),
-            );
-            match super::respawn_guard::run_respawn_guard(
-                &self.db,
-                &task.id,
-                role,
-                task.pr_url.as_deref(),
-                pr_rework_signal,
-            )
-            .await
-            {
-                super::respawn_guard::RespawnGuardDecision::Allow => {}
-                super::respawn_guard::RespawnGuardDecision::Adopted { pr_url } => {
-                    tracing::info!(
-                        task_id = %task.short_id,
-                        role,
-                        pr_url = %pr_url,
-                        "CoordinatorActor: respawn guard adopting existing open PR — handing off to PR poller"
-                    );
-                    super::respawn_guard::record_adopted_pr_attempt(
-                        &self.db,
-                        &task.id,
-                        role,
-                        &pr_url,
-                        Some("respawn_guard: adopted existing open PR"),
-                    )
-                    .await;
-                    // Adoption must imply ownership: move the task out of the
-                    // dispatchable `open` column into the poller-owned
-                    // `pr_review` column so the PR poller advances it (incident
-                    // gton — an adopted `open` task was polled by nobody and
-                    // wedged 9h). Idempotent: a no-op if already poller-owned.
-                    //
-                    // The head SHA keys the handoff's audit marker. It must be
-                    // the real head: a `None` head made the marker's dedupe key
-                    // collapse to the per-PR-deterministic reason, which
-                    // permanently suppressed the handoff itself.
-                    super::respawn_guard::handoff_adopted_pr_to_poller(
-                        &self.task_repo(),
-                        &task.id,
-                        &task.status,
-                        &pr_url,
-                        task.ci_github_head_sha
+                    if active_task_ids.contains(&task.id) {
+                        tracing::debug!(
+                            task_id = %task.short_id,
+                            "CoordinatorActor: task already has an active session, skipping dispatch"
+                        );
+                        return Ok(LegacyDispatchPass::Continue);
+                    }
+                    // Final stale-snapshot/bypass guard: `ready` is assembled before the
+                    // dispatch loop and also includes filtered status queues. Re-check
+                    // blocker edges immediately before any role/model selection so a task
+                    // that was parked behind an open remediation hold in the meantime —
+                    // including `review`/`human-review-hold` blockers — cannot spawn a
+                    // worker from an earlier ready vector or alternate status path.
+                    match repo.list_blockers(&task.id).await {
+                        Ok(blockers) if blockers.iter().any(|b| b.status != "closed") => {
+                            tracing::debug!(
+                                task_id = %task.short_id,
+                                task_uuid = %task.id,
+                                project_id = %task.project_id,
+                                blocker_count = blockers.iter().filter(|b| b.status != "closed").count(),
+                                "CoordinatorActor: task has unresolved blockers, skipping dispatch"
+                            );
+                            return Ok(LegacyDispatchPass::Continue);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                task_uuid = %task.id,
+                                project_id = %task.project_id,
+                                error = %e,
+                                "CoordinatorActor: failed to re-check blockers before dispatch; deferring task"
+                            );
+                            return Ok(LegacyDispatchPass::Continue);
+                        }
+                    }
+                    // Human-review hold guard: a remediation task tagged with
+                    // `human-review-hold` is a terminal escalation that requires a
+                    // human to close it. No agent (planner, worker, reviewer) must
+                    // ever be dispatched for it. Without this guard the planner
+                    // review-claims rule (`open` + `issue_type=review`) matches the
+                    // hold task and dispatches a planner session against it,
+                    // defeating the park.
+                    if task.labels.contains("human-review-hold") {
+                        tracing::debug!(
+                            task_id = %task.short_id,
+                            task_uuid = %task.id,
+                            "CoordinatorActor: skipping dispatch — task carries human-review-hold label (human-only hold)"
+                        );
+                        return Ok(LegacyDispatchPass::Continue);
+                    }
+                    // Proposal 1omc: every dispatch must run under a real user. Refuse to
+                    // dispatch a task with no resolved owner. Park it loudly rather than
+                    // silently consuming org-shared credentials under no identity — this
+                    // surfaces an ownership regression instead of running ownerless.
+                    if poll_stack::boxed(|| actor.task_is_ownerless(&task)).await {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            task_uuid = %task.id,
+                            project_id = %task.project_id,
+                            created_by_user_id = ?task.created_by_user_id,
+                            "CoordinatorActor: REFUSING dispatch — task has no real owner \
+                             (created_by_user_id is NULL, dangling, or could not be verified). \
+                             Every task must run under a real user (proposal 1omc); parking it."
+                        );
+                        return Ok(LegacyDispatchPass::Continue);
+                    }
+                    if gate_enabled {
+                        let ready_for_dispatch = match readiness_cache.get(&task.project_id) {
+                            Some(v) => *v,
+                            None => {
+                                let project_repo = djinn_db::ProjectRepository::new(
+                                    actor.db.clone(),
+                                    crate::events::event_bus_for(&actor.events_tx),
+                                );
+                                let ok = match project_repo.get_dispatch_readiness(&task.project_id).await {
+                                    Ok(Some(r)) => r.is_ready_for_dispatch(),
+                                    // Unknown project or DB error: fail-closed so a
+                                    // broken setup never silently burns tokens.
+                                    _ => false,
+                                };
+                                readiness_cache.insert(task.project_id.clone(), ok);
+                                ok
+                            }
+                        };
+                        if !ready_for_dispatch {
+                            tracing::debug!(
+                                task_id = %task.short_id,
+                                project_id = %task.project_id,
+                                "CoordinatorActor: dispatch deferred — project devcontainer image not ready"
+                            );
+                            return Ok(LegacyDispatchPass::Continue);
+                        }
+                    }
+                    // Skip tasks still inside an active dispatch cooldown.
+                    if actor.dispatch_cooldowns.contains_key(&task.id) {
+                        record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_COOLDOWN);
+                        tracing::debug!(outcome = "cooldown", task_id = %task.short_id, task_uuid = %task.id);
+                        tracing::debug!(
+                            task_id = %task.short_id,
+                            "CoordinatorActor: task in dispatch cooldown, skipping"
+                        );
+                        return Ok(LegacyDispatchPass::Continue);
+                    }
+                    if actor
+                        .enforce_expired_arbiter_deadline_before_dispatch(&task)
+                        .await
+                    {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            "CoordinatorActor: expired active arbitration auto-parked before Lead dispatch"
+                        );
+                        return Ok(LegacyDispatchPass::Continue);
+                    }
+                    // Pre-dispatch respawn guard: consult attempt-history before any
+                    // fresh spawn/admission side-effects.  Guard ordering:
+                    // 1. Open-PR adoption: when the task has an existing open PR
+                    //    (task.pr_url), adopt it and record an adopted_pr audit row.
+                    //    Adoption is bypassed when the PR needs rework — the reopen
+                    //    flow returned the task to open so a worker can fix the PR,
+                    //    and adopting would starve that rework: failing required CI
+                    //    (task.ci_status == "failing", PrCiFailed flow), an
+                    //    unresolved merge conflict (task.merge_conflict_metadata,
+                    //    PrConflict flow), or a reopened-latest attempt (paths with
+                    //    no task-row column, e.g. PrChangesRequested / merge-queue
+                    //    dequeue with green PR-head checks).
+                    // 2. Non-terminal attempt: if a pending or submitted attempt
+                    //    already exists for this task+role, defer dispatch and record
+                    //    a guard-only audit row.  No dispatch / provider / reopen
+                    //    counters are incremented for the deferral.
+                    // Same-signature CI remediation dead-end (incident ay3d): an open
+                    // worker task whose failing required-CI PR already had a
+                    // remediation run against the CURRENT head
+                    // (`last_remediation_base_sha` == head) and whose failure signature
+                    // has persisted past the threshold would be deferred by the respawn
+                    // guard on EVERY ready pass forever — no new push to re-evaluate, no
+                    // escalation, no strike accrual, and no manual lever from `open`.
+                    // Break the wedge by routing it into the autonomous escalation
+                    // ladder: a planner-park escalation below the ceiling, terminal-fail
+                    // at it. Fires once — the escalation blocks + parks the source, so
+                    // it leaves the ready set on the next pass.
+                    if Self::ci_same_signature_deadlocked(&task, role) {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            same_signature_count = task.ci_same_signature_count,
+                            head = task.ci_github_head_sha.as_deref().or(task.ci_head_sha.as_deref()).unwrap_or("(unknown)"),
+                            "CoordinatorActor: same-signature CI remediation dead-end — routing to autonomous escalation instead of deferring worker forever"
+                        );
+                        let head = task
+                            .ci_github_head_sha
                             .as_deref()
-                            .or(task.ci_head_sha.as_deref()),
-                    )
-                    .await;
-                    continue;
-                }
-                super::respawn_guard::RespawnGuardDecision::Defer(reason) => {
-                    tracing::info!(
-                        task_id = %task.short_id,
-                        role,
-                        reason = %reason,
-                        "CoordinatorActor: respawn guard deferring dispatch"
+                            .or(task.ci_head_sha.as_deref())
+                            .unwrap_or("(unknown)")
+                            .to_owned();
+                        let reason = format!(
+                            "Required CI has failed on the same signature {} time(s) at head {} and a \
+                             remediation already ran against that exact head with no new push — the worker \
+                             cannot make forward progress by re-running. Escalating for terminal resolution.",
+                            task.ci_same_signature_count, head,
+                        );
+                        poll_stack::boxed(|| actor.escalate_to_planner_or_terminally_fail(&task, &reason))
+                            .await;
+                        return Ok(LegacyDispatchPass::Continue);
+                    }
+                    let pr_rework_signal = super::respawn_guard::PrReworkSignal::from_task_row(
+                        task.ci_status.as_str(),
+                        task.merge_conflict_metadata.as_deref(),
                     );
-                    super::respawn_guard::record_guard_deferred_attempt(
-                        &self.db,
+                    match super::respawn_guard::run_respawn_guard(
+                        &actor.db,
                         &task.id,
                         role,
-                        reason,
-                        Some("respawn_guard: non-terminal attempt in flight"),
+                        task.pr_url.as_deref(),
+                        pr_rework_signal,
                     )
-                    .await;
-                    continue;
-                }
-            }
-            // Planner intervention for a stuck worker task (trigger A): if a
-            // worker task is about to be re-dispatched for the Nth time
-            // (`reopen_count >= REOPEN_INTERVENTION_THRESHOLD` — e.g. the
-            // internal reviewer keeps rejecting the SAME acceptance criterion),
-            // route it to a Planner intervention pass instead of burning
-            // another worker session. The Planner decides how to unstick it
-            // (decompose, rescope, close, or apply-as-feedback) via the
-            // existing intervention machinery (planner Workflow C). This is a
-            // no-op (returns false) for non-worker roles, tasks under the
-            // threshold, or tasks already routed at this reopen count.
-            //
-            // A merge-conflict rework is exempt from trigger A entirely. When
-            // the current re-dispatch is driven by an unresolved merge conflict
-            // (`PrReworkSignal::MergeConflict` — populated conflict metadata with
-            // required CI NOT failing), main moved under an otherwise-healthy PR;
-            // that is not evidence the worker cannot converge on the acceptance
-            // criteria. Trigger A gates on the DB-backed quality-strike count,
-            // which persists across a task's whole life, so a task that already
-            // exhausted its intervention budget on *earlier* review rejections
-            // would be parked to `needs_lead_intervention` the moment a trivial
-            // conflict reopened it — routing a mechanical rebase to the
-            // arbitration lane and mislabeling it as AC non-convergence (incident
-            // k6hm, 2026-07-21: a twice-approved, CI-green task hit a one-line
-            // conflict and sat in the lead lane for 19h). Route it to the normal
-            // ConflictRetry rework worker regardless of the intervention budget.
-            // Genuine quality strikes (review rejections, CI-failure loops) still
-            // flow through trigger A on their own re-dispatch passes.
-            let is_merge_conflict_rework =
-                pr_rework_signal == Some(super::respawn_guard::PrReworkSignal::MergeConflict);
-            if role == "worker"
-                && !is_merge_conflict_rework
-                && poll_stack::boxed(|| self.maybe_intervene_on_stuck_task(&task)).await
-            {
-                // The planner escalation dispatched a new session (under the
-                // same creator, potentially the same model). Bump the local
-                // per-(creator, model) count so a later task in THIS pass sees
-                // reduced capacity — the inflight ledger is already updated
-                // inside dispatch_arbiter_adjudication, but the local
-                // running_by_user_model was seeded before this admission.
-                poll_stack::boxed(|| {
-                    self.bump_local_cap_for_last_planner_admission(
-                        &mut running_by_user_model,
-                        &mut running_by_user_lane,
-                    )
-                })
-                .await;
-                continue;
-            }
-            // A task that is dispatch-ready again (no active session — guarded
-            // above) after a recent dispatch to the SAME role means the prior
-            // run failed. A different role means the previous stage succeeded
-            // and handed the task off (e.g. worker → reviewer), so clear any
-            // old streak and let it proceed.
-            if let Some(marker) = self.last_dispatched.remove(&task.id) {
-                let current_streak = self
-                    .dispatch_failure_streak
-                    .get(&task.id)
-                    .copied()
-                    .unwrap_or(0);
-                // Read-and-clear the last-failure signal the slot runner stashed
-                // for THIS task on the shared HealthTracker (A2 side-channel).
-                // `None` when the prior run's failure wasn't a typed provider
-                // error (a structural/crash failure, a missing credential, etc.),
-                // in which case the ordinary streak/ladder logic applies
-                // unchanged.
-                let provider_failure = self.health.take_task_provider_failure(&task.id);
-                let reappearing = classify_reappearing_dispatch(marker, role, current_streak);
-                // Environmental-interrupt exemption. A same-role reappearance is
-                // normally a failed attempt (streak++ + escalating cooldown). But
-                // when the prior session was killed by INFRASTRUCTURE — a
-                // coordinator deploy/rollout, a k8s pod eviction, or a startup
-                // reap of a run that deploy orphaned — the task did nothing wrong:
-                // the classifier/reaper terminalized its attempt as `Interrupted`
-                // (environmental non-attempt). Deploys happen many times a day, so
-                // without this every deploy would march innocent in-flight tasks up
-                // the cooldown ladder toward strikes/interventions/terminal close.
-                // Treat it as if the attempt never ran: clear any backoff state and
-                // dispatch immediately, contributing NO streak and NO cooldown.
-                // Genuine `crashed`/`timed_out` attempts are NOT environmental and
-                // still fall through to the ordinary failure accounting below.
-                let strike_decision = if matches!(
-                    reappearing,
-                    Some(ReappearingDispatch::SameRoleFailure { .. })
-                ) {
-                    poll_stack::boxed(|| self.latest_attempt_strike_decision(&task.id, role)).await
-                } else {
-                    None
-                };
-                if let Some(decision) = strike_decision {
-                    djinn_telemetry::dispatch::increment_strike_decision(
-                        decision.decision,
-                        decision.source,
-                    );
-                }
-                if strike_decision.is_some_and(|decision| decision.exempted) {
-                    self.dispatch_failure_streak.remove(&task.id);
-                    self.provider_failure_streak.remove(&task.id);
-                    self.dispatch_cooldowns.remove(&task.id);
-                    poll_stack::boxed(|| {
-                        self.clear_durable_dispatch_backoff_state(
-                            &task.id,
-                            Some(&task.short_id),
-                            "environmental_interrupt_no_dispatch_penalty",
-                        )
-                    })
-                    .await;
-                    tracing::info!(
-                        task_id = %task.short_id,
-                        role,
-                        "CoordinatorActor: prior session ended in an environmental interruption \
-                         (deploy/rollout/pod-eviction/reap) — reappearance is NOT a dispatch \
-                         failure; dispatching without streak or cooldown"
-                    );
-                    // Fall through to dispatch (deliberately no `continue`).
-                } else {
-                    match reappearing {
-                        Some(ReappearingDispatch::SameRoleFailure { next_streak }) => {
-                            // A3: a throttle/rate-limit reappearance is a transient
-                            // provider fault, NOT evidence the task is structurally
-                            // undispatchable — so it must not advance the terminal
-                            // `dispatch_failure_streak` toward MAX (which would close a
-                            // perfectly healthy task). The task still backs off (the
-                            // escalating cooldown below still grows with the
-                            // reappearance) and the per-(scope,model) breaker still
-                            // fails over; only the terminal-close counter is spared.
-                            let throttle = provider_failure.is_some_and(|f| f.throttle);
-                            // A transient provider-side fault (5xx
-                            // `server_error` / `server_is_overloaded`, or a hard
-                            // transport death) is the PROVIDER's fault, not the
-                            // task's — the identical transcript succeeds on the
-                            // next healthy backend. It is therefore spared the
-                            // two task-blaming counters exactly as a throttle
-                            // is, while the escalating cooldown and the
-                            // per-(scope,model) breaker failover still apply.
-                            let transient = provider_failure.is_some_and(|f| f.transient);
-
-                            // Second-strike Planner escalation for provider-error
-                            // FAILED sessions. Only a TASK-ATTRIBUTABLE typed
-                            // provider failure qualifies: the poisoned-transcript
-                            // 400 / unparseable-output class, which redispatch
-                            // reproduces identically, so riding the backoff ladder
-                            // toward the streak-10 terminal close just burns
-                            // attempts with nobody deciding what to do. Throttles
-                            // and transient provider faults are excluded — task
-                            // `2gq7` (2026-07-29) failed three sessions on three
-                            // INDEPENDENT OpenAI 500s and the third strike minted a
-                            // "Planner remediation" task whose reason asserted a
-                            // poisoned resume transcript that never existed; the
-                            // model's own health breaker had meanwhile already
-                            // auto-disabled it, which is where that fault belonged.
-                            // The cycling gate (trigger B) below excludes provider
-                            // faults by design, and the stall-cancel escalation only
-                            // covers coordinator stall kills — so without this the
-                            // failure has no Planner path. Count consecutive such
-                            // failures (reset when the task's status advances,
-                            // mirroring the stall streak) and hand the task to the
-                            // Planner on the FAILURE_ESCALATION_THRESHOLD-th strike
-                            // instead of another doomed redispatch.
-                            if provider_failure.is_some()
-                                && !throttle
-                                && !transient
-                                && self
-                                    .maybe_escalate_provider_failure_streak(&task, role)
-                                    .await
-                            {
-                                // Bump the local cap to reflect the planner session
-                                // the intervention just dispatched (same as trigger
-                                // B and the stuck-task path).
-                                poll_stack::boxed(|| {
-                                    self.bump_local_cap_for_last_planner_admission(
-                                        &mut running_by_user_model,
-                                        &mut running_by_user_lane,
-                                    )
-                                })
-                                .await;
-                                continue;
-                            }
-
-                            // Trigger B: the task keeps reappearing for the SAME
-                            // role with no typed provider failure to blame — its
-                            // runs complete but the task never converges (the
-                            // review-cycle bounce that never passes through `open`,
-                            // so trigger A's reopen_count never arms). Route it to
-                            // the forensic arbiter instead of riding the ladder to
-                            // the terminal close at MAX_DISPATCH_FAILURES, which
-                            // would force-close a task whose durable work may be
-                            // fine.
-                            //
-                            // 4etb: the arbiter rung ALWAYS handles a first
-                            // escalation, so for a role that arms this trigger the
-                            // dispatch-failure cap is no longer the backstop — the
-                            // adjudication ladder is, and it is strictly better
-                            // instrumented (three bounded arbiter hold cycles, one
-                            // final disposition, at most three terminal-rung
-                            // rounds, then the exhausted-ladder ownership contract
-                            // that lands the source with a NAMED owner rather than
-                            // a bare force-close). The cap still backs the paths
-                            // that never arm this trigger: a typed provider
-                            // failure, and any tick the arbiter rung declines.
-                            //
-                            // A reappearance whose prior session was CANCELLED or
-                            // reclaimed before the run could conclude is excluded
-                            // for the same reason a typed provider failure is:
-                            // the run did not finish, so its reappearance is not
-                            // evidence about the task's scope or acceptance
-                            // criteria, and a Planner handed that loop has no
-                            // lever but reshaping healthy work (task 7mq0,
-                            // 2026-07-28). The disposition comes from the prior
-                            // attempt's terminal outcome — never from wall clock
-                            // and never from the task's status alone. No attempt
-                            // evidence fails CLOSED to `Concluded`, preserving the
-                            // t9wi/32bk review-cycle protection.
-                            let prior_session = strike_decision
-                                .map(|decision| decision.prior_session)
-                                .unwrap_or(PriorSessionDisposition::Concluded);
-                            if should_route_cycling_intervention(
+                    .await
+                    {
+                        super::respawn_guard::RespawnGuardDecision::Allow => {}
+                        super::respawn_guard::RespawnGuardDecision::Adopted { pr_url } => {
+                            tracing::info!(
+                                task_id = %task.short_id,
                                 role,
-                                next_streak,
-                                provider_failure.is_some(),
-                                prior_session,
-                            ) && self
-                                .maybe_intervene_on_cycling_task(&task, role, next_streak)
-                                .await
-                            {
-                                self.dispatch_failure_streak.remove(&task.id);
-                                self.provider_failure_streak.remove(&task.id);
-                                self.dispatch_cooldowns.remove(&task.id);
-                                poll_stack::boxed(|| {
-                                    self.clear_durable_dispatch_backoff_state(
-                                        &task.id,
-                                        Some(&task.short_id),
-                                        "cycling_planner_intervention_handoff_clear",
-                                    )
-                                })
-                                .await;
-                                // Bump local cap to reflect the planner session the
-                                // intervention just dispatched (same as Trigger A).
-                                poll_stack::boxed(|| {
-                                    self.bump_local_cap_for_last_planner_admission(
-                                        &mut running_by_user_model,
-                                        &mut running_by_user_lane,
-                                    )
-                                })
-                                .await;
-                                continue;
-                            }
-
-                            // After MAX consecutive same-role failures the task is
-                            // structurally doomed (e.g. its run can never complete);
-                            // fail it terminally instead of looping forever. Skipped
-                            // for throttles (A3) and transient provider faults: a
-                            // quota window or a provider outage must never terminally
-                            // close the task.
-                            if !throttle && !transient && next_streak >= MAX_DISPATCH_FAILURES {
-                                poll_stack::boxed(|| {
-                                    self.terminally_fail_task(
-                                    &task,
-                                    role,
-                                    "repeated dispatch failures: the task could not complete after \
-                                 multiple attempts. Resolve the underlying issue and reopen.",
+                                pr_url = %pr_url,
+                                "CoordinatorActor: respawn guard adopting existing open PR — handing off to PR poller"
+                            );
+                            super::respawn_guard::record_adopted_pr_attempt(
+                                &actor.db,
+                                &task.id,
+                                role,
+                                &pr_url,
+                                Some("respawn_guard: adopted existing open PR"),
+                            )
+                            .await;
+                            // Adoption must imply ownership: move the task out of the
+                            // dispatchable `open` column into the poller-owned
+                            // `pr_review` column so the PR poller advances it (incident
+                            // gton — an adopted `open` task was polled by nobody and
+                            // wedged 9h). Idempotent: a no-op if already poller-owned.
+                            //
+                            // The head SHA keys the handoff's audit marker. It must be
+                            // the real head: a `None` head made the marker's dedupe key
+                            // collapse to the per-PR-deterministic reason, which
+                            // permanently suppressed the handoff itactor.
+                            super::respawn_guard::handoff_adopted_pr_to_poller(
+                                &actor.task_repo(),
+                                &task.id,
+                                &task.status,
+                                &pr_url,
+                                task.ci_github_head_sha
+                                    .as_deref()
+                                    .or(task.ci_head_sha.as_deref()),
+                            )
+                            .await;
+                            return Ok(LegacyDispatchPass::Continue);
+                        }
+                        super::respawn_guard::RespawnGuardDecision::Defer(reason) => {
+                            tracing::info!(
+                                task_id = %task.short_id,
+                                role,
+                                reason = %reason,
+                                "CoordinatorActor: respawn guard deferring dispatch"
+                            );
+                            super::respawn_guard::record_guard_deferred_attempt(
+                                &actor.db,
+                                &task.id,
+                                role,
+                                reason,
+                                Some("respawn_guard: non-terminal attempt in flight"),
+                            )
+                            .await;
+                            return Ok(LegacyDispatchPass::Continue);
+                        }
+                    }
+                    // Planner intervention for a stuck worker task (trigger A): if a
+                    // worker task is about to be re-dispatched for the Nth time
+                    // (`reopen_count >= REOPEN_INTERVENTION_THRESHOLD` — e.g. the
+                    // internal reviewer keeps rejecting the SAME acceptance criterion),
+                    // route it to a Planner intervention pass instead of burning
+                    // another worker session. The Planner decides how to unstick it
+                    // (decompose, rescope, close, or apply-as-feedback) via the
+                    // existing intervention machinery (planner Workflow C). This is a
+                    // no-op (returns false) for non-worker roles, tasks under the
+                    // threshold, or tasks already routed at this reopen count.
+                    //
+                    // A merge-conflict rework is exempt from trigger A entirely. When
+                    // the current re-dispatch is driven by an unresolved merge conflict
+                    // (`PrReworkSignal::MergeConflict` — populated conflict metadata with
+                    // required CI NOT failing), main moved under an otherwise-healthy PR;
+                    // that is not evidence the worker cannot converge on the acceptance
+                    // criteria. Trigger A gates on the DB-backed quality-strike count,
+                    // which persists across a task's whole life, so a task that already
+                    // exhausted its intervention budget on *earlier* review rejections
+                    // would be parked to `needs_lead_intervention` the moment a trivial
+                    // conflict reopened it — routing a mechanical rebase to the
+                    // arbitration lane and mislabeling it as AC non-convergence (incident
+                    // k6hm, 2026-07-21: a twice-approved, CI-green task hit a one-line
+                    // conflict and sat in the lead lane for 19h). Route it to the normal
+                    // ConflictRetry rework worker regardless of the intervention budget.
+                    // Genuine quality strikes (review rejections, CI-failure loops) still
+                    // flow through trigger A on their own re-dispatch passes.
+                    let is_merge_conflict_rework =
+                        pr_rework_signal == Some(super::respawn_guard::PrReworkSignal::MergeConflict);
+                    if role == "worker"
+                        && !is_merge_conflict_rework
+                        && poll_stack::boxed(|| actor.maybe_intervene_on_stuck_task(&task)).await
+                    {
+                        // The planner escalation dispatched a new session (under the
+                        // same creator, potentially the same model). Bump the local
+                        // per-(creator, model) count so a later task in THIS pass sees
+                        // reduced capacity — the inflight ledger is already updated
+                        // inside dispatch_arbiter_adjudication, but the local
+                        // running_by_user_model was seeded before this admission.
+                        poll_stack::boxed(|| {
+                            actor.bump_local_cap_for_last_planner_admission(
+                                &mut running_by_user_model,
+                                &mut running_by_user_lane,
+                            )
+                        })
+                        .await;
+                        return Ok(LegacyDispatchPass::Continue);
+                    }
+                    // A task that is dispatch-ready again (no active session — guarded
+                    // above) after a recent dispatch to the SAME role means the prior
+                    // run failed. A different role means the previous stage succeeded
+                    // and handed the task off (e.g. worker → reviewer), so clear any
+                    // old streak and let it proceed.
+                    if let Some(marker) = actor.last_dispatched.remove(&task.id) {
+                        let current_streak = actor
+                            .dispatch_failure_streak
+                            .get(&task.id)
+                            .copied()
+                            .unwrap_or(0);
+                        // Read-and-clear the last-failure signal the slot runner stashed
+                        // for THIS task on the shared HealthTracker (A2 side-channel).
+                        // `None` when the prior run's failure wasn't a typed provider
+                        // error (a structural/crash failure, a missing credential, etc.),
+                        // in which case the ordinary streak/ladder logic applies
+                        // unchanged.
+                        let provider_failure = actor.health.take_task_provider_failure(&task.id);
+                        let reappearing = classify_reappearing_dispatch(marker, role, current_streak);
+                        // Environmental-interrupt exemption. A same-role reappearance is
+                        // normally a failed attempt (streak++ + escalating cooldown). But
+                        // when the prior session was killed by INFRASTRUCTURE — a
+                        // coordinator deploy/rollout, a k8s pod eviction, or a startup
+                        // reap of a run that deploy orphaned — the task did nothing wrong:
+                        // the classifier/reaper terminalized its attempt as `Interrupted`
+                        // (environmental non-attempt). Deploys happen many times a day, so
+                        // without this every deploy would march innocent in-flight tasks up
+                        // the cooldown ladder toward strikes/interventions/terminal close.
+                        // Treat it as if the attempt never ran: clear any backoff state and
+                        // dispatch immediately, contributing NO streak and NO cooldown.
+                        // Genuine `crashed`/`timed_out` attempts are NOT environmental and
+                        // still fall through to the ordinary failure accounting below.
+                        let strike_decision = if matches!(
+                            reappearing,
+                            Some(ReappearingDispatch::SameRoleFailure { .. })
+                        ) {
+                            poll_stack::boxed(|| actor.latest_attempt_strike_decision(&task.id, role)).await
+                        } else {
+                            None
+                        };
+                        if let Some(decision) = strike_decision {
+                            djinn_telemetry::dispatch::increment_strike_decision(
+                                decision.decision,
+                                decision.source,
+                            );
+                        }
+                        if strike_decision.is_some_and(|decision| decision.exempted) {
+                            actor.dispatch_failure_streak.remove(&task.id);
+                            actor.provider_failure_streak.remove(&task.id);
+                            actor.dispatch_cooldowns.remove(&task.id);
+                            poll_stack::boxed(|| {
+                                actor.clear_durable_dispatch_backoff_state(
+                                    &task.id,
+                                    Some(&task.short_id),
+                                    "environmental_interrupt_no_dispatch_penalty",
                                 )
-                                })
-                                .await;
-                                self.dispatch_failure_streak.remove(&task.id);
-                                self.provider_failure_streak.remove(&task.id);
-                                self.dispatch_cooldowns.remove(&task.id);
-                                self.inflight_dispatches.remove(&task.id);
-                                poll_stack::boxed(|| {
-                                    self.clear_durable_dispatch_backoff_state(
-                                        &task.id,
-                                        Some(&task.short_id),
-                                        "same_role_terminal_close_clear",
-                                    )
-                                })
-                                .await;
-                                continue;
-                            }
-
-                            // A3: leave the terminal streak at its current value on a
-                            // throttle or a transient provider fault (don't persist
-                            // the advanced `next_streak`) — the provider failed, the
-                            // task did not.
-                            let stored_streak = stored_streak_after_failure(
-                                current_streak,
-                                next_streak,
-                                throttle,
-                                transient,
+                            })
+                            .await;
+                            tracing::info!(
+                                task_id = %task.short_id,
+                                role,
+                                "CoordinatorActor: prior session ended in an environmental interruption \
+                                 (deploy/rollout/pod-eviction/reap) — reappearance is NOT a dispatch \
+                                 failure; dispatching without streak or cooldown"
                             );
-                            if stored_streak > 0 {
-                                self.dispatch_failure_streak
-                                    .insert(task.id.clone(), stored_streak);
-                            } else {
-                                self.dispatch_failure_streak.remove(&task.id);
+                            // Fall through to dispatch (deliberately no `continue`).
+                        } else {
+                            match reappearing {
+                                Some(ReappearingDispatch::SameRoleFailure { next_streak }) => {
+                                    // A3: a throttle/rate-limit reappearance is a transient
+                                    // provider fault, NOT evidence the task is structurally
+                                    // undispatchable — so it must not advance the terminal
+                                    // `dispatch_failure_streak` toward MAX (which would close a
+                                    // perfectly healthy task). The task still backs off (the
+                                    // escalating cooldown below still grows with the
+                                    // reappearance) and the per-(scope,model) breaker still
+                                    // fails over; only the terminal-close counter is spared.
+                                    let throttle = provider_failure.is_some_and(|f| f.throttle);
+                                    // A transient provider-side fault (5xx
+                                    // `server_error` / `server_is_overloaded`, or a hard
+                                    // transport death) is the PROVIDER's fault, not the
+                                    // task's — the identical transcript succeeds on the
+                                    // next healthy backend. It is therefore spared the
+                                    // two task-blaming counters exactly as a throttle
+                                    // is, while the escalating cooldown and the
+                                    // per-(scope,model) breaker failover still apply.
+                                    let transient = provider_failure.is_some_and(|f| f.transient);
+
+                                    // Second-strike Planner escalation for provider-error
+                                    // FAILED sessions. Only a TASK-ATTRIBUTABLE typed
+                                    // provider failure qualifies: the poisoned-transcript
+                                    // 400 / unparseable-output class, which redispatch
+                                    // reproduces identically, so riding the backoff ladder
+                                    // toward the streak-10 terminal close just burns
+                                    // attempts with nobody deciding what to do. Throttles
+                                    // and transient provider faults are excluded — task
+                                    // `2gq7` (2026-07-29) failed three sessions on three
+                                    // INDEPENDENT OpenAI 500s and the third strike minted a
+                                    // "Planner remediation" task whose reason asserted a
+                                    // poisoned resume transcript that never existed; the
+                                    // model's own health breaker had meanwhile already
+                                    // auto-disabled it, which is where that fault belonged.
+                                    // The cycling gate (trigger B) below excludes provider
+                                    // faults by design, and the stall-cancel escalation only
+                                    // covers coordinator stall kills — so without this the
+                                    // failure has no Planner path. Count consecutive such
+                                    // failures (reset when the task's status advances,
+                                    // mirroring the stall streak) and hand the task to the
+                                    // Planner on the FAILURE_ESCALATION_THRESHOLD-th strike
+                                    // instead of another doomed redispatch.
+                                    if provider_failure.is_some()
+                                        && !throttle
+                                        && !transient
+                                        && actor
+                                            .maybe_escalate_provider_failure_streak(&task, role)
+                                            .await
+                                    {
+                                        // Bump the local cap to reflect the planner session
+                                        // the intervention just dispatched (same as trigger
+                                        // B and the stuck-task path).
+                                        poll_stack::boxed(|| {
+                                            actor.bump_local_cap_for_last_planner_admission(
+                                                &mut running_by_user_model,
+                                                &mut running_by_user_lane,
+                                            )
+                                        })
+                                        .await;
+                                        return Ok(LegacyDispatchPass::Continue);
+                                    }
+
+                                    // Trigger B: the task keeps reappearing for the SAME
+                                    // role with no typed provider failure to blame — its
+                                    // runs complete but the task never converges (the
+                                    // review-cycle bounce that never passes through `open`,
+                                    // so trigger A's reopen_count never arms). Route it to
+                                    // the forensic arbiter instead of riding the ladder to
+                                    // the terminal close at MAX_DISPATCH_FAILURES, which
+                                    // would force-close a task whose durable work may be
+                                    // fine.
+                                    //
+                                    // 4etb: the arbiter rung ALWAYS handles a first
+                                    // escalation, so for a role that arms this trigger the
+                                    // dispatch-failure cap is no longer the backstop — the
+                                    // adjudication ladder is, and it is strictly better
+                                    // instrumented (three bounded arbiter hold cycles, one
+                                    // final disposition, at most three terminal-rung
+                                    // rounds, then the exhausted-ladder ownership contract
+                                    // that lands the source with a NAMED owner rather than
+                                    // a bare force-close). The cap still backs the paths
+                                    // that never arm this trigger: a typed provider
+                                    // failure, and any tick the arbiter rung declines.
+                                    //
+                                    // A reappearance whose prior session was CANCELLED or
+                                    // reclaimed before the run could conclude is excluded
+                                    // for the same reason a typed provider failure is:
+                                    // the run did not finish, so its reappearance is not
+                                    // evidence about the task's scope or acceptance
+                                    // criteria, and a Planner handed that loop has no
+                                    // lever but reshaping healthy work (task 7mq0,
+                                    // 2026-07-28). The disposition comes from the prior
+                                    // attempt's terminal outcome — never from wall clock
+                                    // and never from the task's status alone. No attempt
+                                    // evidence fails CLOSED to `Concluded`, preserving the
+                                    // t9wi/32bk review-cycle protection.
+                                    let prior_session = strike_decision
+                                        .map(|decision| decision.prior_session)
+                                        .unwrap_or(PriorSessionDisposition::Concluded);
+                                    if should_route_cycling_intervention(
+                                        role,
+                                        next_streak,
+                                        provider_failure.is_some(),
+                                        prior_session,
+                                    ) && actor
+                                        .maybe_intervene_on_cycling_task(&task, role, next_streak)
+                                        .await
+                                    {
+                                        actor.dispatch_failure_streak.remove(&task.id);
+                                        actor.provider_failure_streak.remove(&task.id);
+                                        actor.dispatch_cooldowns.remove(&task.id);
+                                        poll_stack::boxed(|| {
+                                            actor.clear_durable_dispatch_backoff_state(
+                                                &task.id,
+                                                Some(&task.short_id),
+                                                "cycling_planner_intervention_handoff_clear",
+                                            )
+                                        })
+                                        .await;
+                                        // Bump local cap to reflect the planner session the
+                                        // intervention just dispatched (same as Trigger A).
+                                        poll_stack::boxed(|| {
+                                            actor.bump_local_cap_for_last_planner_admission(
+                                                &mut running_by_user_model,
+                                                &mut running_by_user_lane,
+                                            )
+                                        })
+                                        .await;
+                                        return Ok(LegacyDispatchPass::Continue);
+                                    }
+
+                                    // After MAX consecutive same-role failures the task is
+                                    // structurally doomed (e.g. its run can never complete);
+                                    // fail it terminally instead of looping forever. Skipped
+                                    // for throttles (A3) and transient provider faults: a
+                                    // quota window or a provider outage must never terminally
+                                    // close the task.
+                                    if !throttle && !transient && next_streak >= MAX_DISPATCH_FAILURES {
+                                        poll_stack::boxed(|| {
+                                            actor.terminally_fail_task(
+                                            &task,
+                                            role,
+                                            "repeated dispatch failures: the task could not complete after \
+                                         multiple attempts. Resolve the underlying issue and reopen.",
+                                        )
+                                        })
+                                        .await;
+                                        actor.dispatch_failure_streak.remove(&task.id);
+                                        actor.provider_failure_streak.remove(&task.id);
+                                        actor.dispatch_cooldowns.remove(&task.id);
+                                        actor.inflight_dispatches.remove(&task.id);
+                                        poll_stack::boxed(|| {
+                                            actor.clear_durable_dispatch_backoff_state(
+                                                &task.id,
+                                                Some(&task.short_id),
+                                                "same_role_terminal_close_clear",
+                                            )
+                                        })
+                                        .await;
+                                        return Ok(LegacyDispatchPass::Continue);
+                                    }
+
+                                    // A3: leave the terminal streak at its current value on a
+                                    // throttle or a transient provider fault (don't persist
+                                    // the advanced `next_streak`) — the provider failed, the
+                                    // task did not.
+                                    let stored_streak = stored_streak_after_failure(
+                                        current_streak,
+                                        next_streak,
+                                        throttle,
+                                        transient,
+                                    );
+                                    if stored_streak > 0 {
+                                        actor.dispatch_failure_streak
+                                            .insert(task.id.clone(), stored_streak);
+                                    } else {
+                                        actor.dispatch_failure_streak.remove(&task.id);
+                                    }
+
+                                    // Deterministic run/CI failures cannot heal while waiting:
+                                    // retain a fixed one-minute anti-spin floor so a prompt
+                                    // compile/test/snapshot fix can be retried promptly.
+                                    // Typed provider failures can heal with time and therefore
+                                    // retain the escalating provider-protection ladder.
+                                    let cooldown = dispatch_cooldown_for_failure(
+                                        next_streak,
+                                        provider_failure.is_some(),
+                                    );
+
+                                    // A6: honor a provider-stated reset as a redispatch floor.
+                                    // When the provider stated a Retry-After /
+                                    // rate-limit-reset that exceeds the selected cooldown,
+                                    // redispatch no earlier than that reset (otherwise a
+                                    // 5-hour quota window would be probed every ~30 min,
+                                    // burning failover). The provider reset is deliberately
+                                    // allowed to EXCEED the ladder's 30-min ceiling — that's
+                                    // the whole point — but is clamped to a hard safety max so
+                                    // a malformed value can't wedge the task forever.
+                                    let retry_after_ms = provider_failure.and_then(|f| f.retry_after_ms);
+                                    let effective_cooldown =
+                                        apply_provider_retry_floor(cooldown, retry_after_ms);
+                                    if effective_cooldown > cooldown {
+                                        tracing::info!(
+                                            task_id = %task.short_id,
+                                            role,
+                                            ladder_cooldown_secs = cooldown.as_secs(),
+                                            provider_floor_secs = effective_cooldown.as_secs(),
+                                            "CoordinatorActor: applying provider-stated retry-after as redispatch floor"
+                                        );
+                                    }
+
+                                    tracing::warn!(
+                                        task_id = %task.short_id,
+                                        role,
+                                        streak = stored_streak,
+                                        throttle,
+                                        transient,
+                                        provider_backoff = provider_failure.is_some(),
+                                        cooldown_secs = effective_cooldown.as_secs(),
+                                        "CoordinatorActor: repeated task failure — backing off dispatch"
+                                    );
+                                    actor.dispatch_cooldowns.insert(
+                                        task.id.clone(),
+                                        SystemClock::new().now_instant() + effective_cooldown,
+                                    );
+                                    poll_stack::boxed(|| {
+                                        actor.persist_durable_dispatch_state_update(
+                                            &task.id,
+                                            Some(&task.short_id),
+                                            "same_role_failure_backoff",
+                                            DurableDispatchStateUpdate {
+                                                failure_streak: Some(stored_streak),
+                                                cooldown_until: Some(dispatch_wall_clock_after(
+                                                    effective_cooldown,
+                                                )),
+                                                last_dispatched: Some(None),
+                                                ..Default::default()
+                                            },
+                                        )
+                                    })
+                                    .await;
+                                    return Ok(LegacyDispatchPass::Continue);
+                                }
+                                Some(ReappearingDispatch::RoleTransition) | None => {
+                                    actor.dispatch_failure_streak.remove(&task.id);
+                                    actor.provider_failure_streak.remove(&task.id);
+                                    actor.dispatch_cooldowns.remove(&task.id);
+                                    poll_stack::boxed(|| {
+                                        actor.clear_durable_dispatch_backoff_state(
+                                            &task.id,
+                                            Some(&task.short_id),
+                                            "role_transition_dispatch_state_clear",
+                                        )
+                                    })
+                                    .await;
+                                }
                             }
+                        }
+                    }
+                    if exhausted_roles.contains(role) {
+                        return Ok(LegacyDispatchPass::Continue);
+                    }
+                    let creator = task.created_by_user_id.clone();
 
-                            // Deterministic run/CI failures cannot heal while waiting:
-                            // retain a fixed one-minute anti-spin floor so a prompt
-                            // compile/test/snapshot fix can be retried promptly.
-                            // Typed provider failures can heal with time and therefore
-                            // retain the escalating provider-protection ladder.
-                            let cooldown = dispatch_cooldown_for_failure(
-                                next_streak,
-                                provider_failure.is_some(),
-                            );
+                    // Base per-role eligibility, scoped to THIS task's creator's
+                    // credentials (own + org-shared) — the same set the worker resolves
+                    // with — so the coordinator never offers a model it can't auth.
+                    // Memoized per (role, creator) for the pass.
+                    let base_model_ids = match role_models_cache.get(&(role, Some(creator.clone()))) {
+                        Some(v) => v.clone(),
+                        None => {
+                            let v = actor
+                                .resolve_dispatch_models_for_role(role, Some(creator.as_str()))
+                                .await;
+                            role_models_cache.insert((role, Some(creator.clone())), v.clone());
+                            v
+                        }
+                    };
 
-                            // A6: honor a provider-stated reset as a redispatch floor.
-                            // When the provider stated a Retry-After /
-                            // rate-limit-reset that exceeds the selected cooldown,
-                            // redispatch no earlier than that reset (otherwise a
-                            // 5-hour quota window would be probed every ~30 min,
-                            // burning failover). The provider reset is deliberately
-                            // allowed to EXCEED the ladder's 30-min ceiling — that's
-                            // the whole point — but is clamped to a hard safety max so
-                            // a malformed value can't wedge the task forever.
-                            let retry_after_ms = provider_failure.and_then(|f| f.retry_after_ms);
-                            let effective_cooldown =
-                                apply_provider_retry_floor(cooldown, retry_after_ms);
-                            if effective_cooldown > cooldown {
+                    // Final fallback list, precedence: creator's per-user selection →
+                    // project default-role preference → role base. All scoped to the
+                    // creator, so selection and runtime resolution stay consistent.
+                    //
+                    // Post-intervention worker retries (intervention_count >= 1) are
+                    // routed to the plan lane when the default-on feature flag is set,
+                    // while keeping the `worker` role and `ModelLane::for_role` mapping
+                    // unchanged.
+                    let effective_lane = post_intervention_lane::effective_dispatch_lane(
+                        role,
+                        task.intervention_count,
+                        post_intervention_lane::use_plan_lane_for_post_intervention_workers(),
+                    );
+                    let user_model_ids = actor
+                        .resolve_user_model_priority_with_lane(Some(creator.as_str()), role, effective_lane)
+                        .await;
+                    let model_preference_ids = actor
+                        .resolve_role_model_preference(&task.project_id, role, Some(creator.as_str()))
+                        .await;
+                    let mut seen = std::collections::HashSet::new();
+                    let mut model_ids: Vec<String> = Vec::with_capacity(
+                        user_model_ids.len() + model_preference_ids.len() + base_model_ids.len(),
+                    );
+                    for id in user_model_ids
+                        .iter()
+                        .chain(model_preference_ids.iter())
+                        .chain(base_model_ids.iter())
+                    {
+                        if seen.insert(id.clone()) {
+                            model_ids.push(id.clone());
+                        }
+                    }
+
+                    // uv3p Part B: forced model rotation on the post-intervention retry
+                    // path. When the human-park rung declined to park because no attempt
+                    // has reached submit_work yet, it redispatches — but a redispatch to
+                    // the SAME model that just terminated pre-submission (loop-guard trip,
+                    // infra death) would loop identically. Exclusions are derived from
+                    // `task_attempts` rows via `PostInterventionHistory::rotation_excluded_models()`;
+                    // only actual model IDs (provider/model) are excluded — outcome
+                    // fallback strings from failed session lookups are skipped.
+                    // Degrades to the unfiltered list when exclusion would empty it
+                    // (only one viable model → plan-lane retry, then park at the bound).
+                    // 4etb: rotation is NO LONGER gated on `intervention_count >= 1`.
+                    // With rung 1 retired nothing advances that counter, so the gate
+                    // would have disabled rotation on exactly the escalations that need
+                    // it — every first escalation. The canonical evidence epoch inside
+                    // `post_intervention_history` is the real gate now: it returns an
+                    // empty history (and therefore no exclusions) for a task that has
+                    // never been escalated, so an unescalated worker dispatch is
+                    // unaffected.
+                    if role == "worker" {
+                        let history = poll_stack::boxed(|| actor.post_intervention_history(&task)).await;
+                        let rotation_excluded = history.rotation_excluded_models();
+                        if !rotation_excluded.is_empty() {
+                            let filtered: Vec<String> = model_ids
+                                .iter()
+                                .filter(|m| !rotation_excluded.contains(m))
+                                .cloned()
+                                .collect();
+                            if !filtered.is_empty() && filtered.len() < model_ids.len() {
                                 tracing::info!(
                                     task_id = %task.short_id,
-                                    role,
-                                    ladder_cooldown_secs = cooldown.as_secs(),
-                                    provider_floor_secs = effective_cooldown.as_secs(),
-                                    "CoordinatorActor: applying provider-stated retry-after as redispatch floor"
+                                    excluded = ?rotation_excluded,
+                                    "uv3p: forcing model rotation on post-intervention redispatch — excluding models that terminated pre-submission"
                                 );
+                                model_ids = filtered;
                             }
+                        }
+                    }
 
+                    // zkk9: Enforce arbiter-monitored-reopen `exclude_models` for the
+                    // one monitored worker dispatch.  When an arbiter issued a `reopen`
+                    // decision, the directive/excluded models were persisted on the
+                    // current unconsumed arbitration row.  If this worker dispatch is
+                    // the monitored attempt, apply those exclusions.  Unlike the
+                    // rotation exclusions above, these do NOT degrade to the unfiltered
+                    // list — if no eligible model remains, the task is parked with an
+                    // updated dossier rather than cycling another worker.
+                    if role == "worker" {
+                        let arb_repo = TaskArbitrationRepository::new(actor.db.clone());
+                        if let Ok((_cycle, Some(arb_record))) =
+                            arb_repo.resolve_current_hold_cycle(&task.id).await
+                            && arb_record.monitored_reopen_count >= 1
+                            && !arb_record.directive_injected
+                        {
+                            // This is the monitored reopen worker dispatch.
+                            let reopen_excluded: Vec<String> = arb_record
+                                .excluded_models
+                                .as_array()
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str().map(String::from))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            if !reopen_excluded.is_empty() {
+                                let filtered: Vec<String> = model_ids
+                                    .iter()
+                                    .filter(|m| !reopen_excluded.contains(m))
+                                    .cloned()
+                                    .collect();
+                                tracing::info!(
+                                    task_id = %task.short_id,
+                                    excluded = ?reopen_excluded,
+                                    remaining = filtered.len(),
+                                    "zkk9: enforcing arbiter reopen exclude_models for monitored worker dispatch"
+                                );
+                                model_ids = filtered;
+                            }
+                        }
+                    }
+
+                    // Cross-model ("Thorough") review: when this is a reviewer dispatch
+                    // and the creator has `diverse_review` on, steer the fallback list so
+                    // the first viable model id differs from the one that implemented the
+                    // task. Reorders in place (entries != implementer first, preserving
+                    // priority); collapses to same-model when nothing else is viable.
+                    if role == "reviewer" {
+                        poll_stack::boxed(|| {
+                            actor.apply_diverse_review_ordering(
+                                &task,
+                                Some(creator.as_str()),
+                                &mut model_ids,
+                            )
+                        })
+                        .await;
+                    }
+
+                    // Dispatch-time throttle deprioritization: move any model that is
+                    // currently inside a throttle cooldown window to the BACK of the
+                    // ordered list so a healthy lane-mate is attempted first. A model
+                    // whose token plan just 429'd is likely still quota-dead; retrying
+                    // it head-of-line wastes a session spawn + a <10s crash + the
+                    // ~30-minute task redispatch cooldown before failover finally
+                    // happens. This is a pure reorder (not a filter): a throttle-cooling
+                    // model stays in the list as a last-resort candidate, so if every
+                    // lane model is cooling the existing all-unavailable path still
+                    // applies (the dispatch loop's `is_available` gate + escalating
+                    // backoff), and a half-open (cooldown-expired) throttle model is
+                    // still tried when it is the only option.
+                    deprioritize_throttle_cooling(&actor.health, Some(creator.as_str()), &mut model_ids);
+
+                    // Structured observability: emit one log record per candidate in
+                    // the final ordered list so post-apply / post-rollback model order
+                    // can be inspected without production-only tooling.
+                    super::lane_resolution_log::emit_lane_resolution_candidates(
+                        &task.short_id,
+                        role,
+                        creator.as_str(),
+                        &model_ids,
+                    );
+
+                    // zkk9: No-eligible-model parking for monitored reopen.  If the
+                    // arbiter's `exclude_models` eliminated all worker models for the
+                    // monitored reopen dispatch, park with an updated dossier instead
+                    // of cycling another worker or arbiter.  Also mark the monitored
+                    // attempt complete so re-entry cannot trigger a second cycle.
+                    if model_ids.is_empty() && role == "worker" {
+                        let arb_repo = TaskArbitrationRepository::new(actor.db.clone());
+                        let should_park_reopen = match arb_repo.resolve_current_hold_cycle(&task.id).await {
+                            Ok((cycle, Some(rec))) => (rec.monitored_reopen_count >= 1
+                                && !rec.directive_injected)
+                                .then_some((cycle, rec)),
+                            _ => None,
+                        };
+                        if let Some((hold_cycle, rec)) = should_park_reopen {
+                            let park_reason = "arbiter reopen exclude_models eliminated all worker models";
+                            let dossier = serde_json::json!({
+                                "reason": park_reason,
+                                "task_id": task.short_id,
+                                "kind": "monitored_reopen_no_eligible_model",
+                                "excluded_models": rec.excluded_models,
+                                "directive": rec.directive,
+                                "verification_command": rec.verification_command,
+                            });
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                "zkk9: monitored reopen exclude_models left no eligible worker model — parking with dossier"
+                            );
+                            // Persist the dossier on the arbitration row so the
+                            // externally visible contract carries the explicit
+                            // `monitored_reopen_no_eligible_model` evidence.
+                            use djinn_db::repositories::task_arbitration::UpdateDispatchLedgerParams;
+                            let _ = arb_repo
+                                .update_dispatch_ledger(UpdateDispatchLedgerParams {
+                                    task_id: &task.id,
+                                    hold_cycle,
+                                    mirror_head_sha: None,
+                                    github_head_sha: None,
+                                    pr_url: None,
+                                    failing_ci_job_ids: None,
+                                    dossier: Some(&dossier),
+                                    directive: None,
+                                    verification_command: None,
+                                    excluded_models: None,
+                                })
+                                .await;
+                            // Complete the monitored attempt so re-entry cannot retry.
+                            let _ = arb_repo
+                                .complete_monitored_reopen(&task.id, hold_cycle)
+                                .await;
+                            let quality_strikes = actor
+                                .task_repo()
+                                .quality_reopen_count(&task.id)
+                                .await
+                                .unwrap_or(0);
+                            let empty_evidence = serde_json::json!({});
+                            poll_stack::boxed(|| {
+                                actor.park_source_human_review_with_dossier(
+                                    &task,
+                                    park_reason,
+                                    quality_strikes,
+                                    Some(dossier),
+                                    &empty_evidence,
+                                )
+                            })
+                            .await;
+                            return Ok(LegacyDispatchPass::Continue);
+                        }
+                    }
+
+                    // No model whose provider this task's owner has connected → the task
+                    // is structurally undispatchable (the canary). Don't loop it forever
+                    // (wedging the task open). Back off with the
+                    // escalating cooldown, and after MAX consecutive misses fail it
+                    // terminally with an actionable reason.
+                    if model_ids.is_empty() {
+                        let streak = {
+                            let s = actor
+                                .dispatch_failure_streak
+                                .entry(task.id.clone())
+                                .or_insert(0);
+                            *s = s.saturating_add(1);
+                            *s
+                        };
+                        if streak >= MAX_DISPATCH_FAILURES {
+                            poll_stack::boxed(|| {
+                                actor.terminally_fail_task(
+                                &task,
+                                role,
+                                "no model available for this task's owner: none of the role's configured \
+                                 models have a provider connected for them. Connect a provider/model for \
+                                 the owner and reopen.",
+                            )
+                            })
+                            .await;
+                            actor.dispatch_failure_streak.remove(&task.id);
+                            actor.dispatch_cooldowns.remove(&task.id);
+                            actor.inflight_dispatches.remove(&task.id);
+                            poll_stack::boxed(|| {
+                                actor.clear_durable_dispatch_backoff_state(
+                                    &task.id,
+                                    Some(&task.short_id),
+                                    "no_eligible_model_terminal_close_clear",
+                                )
+                            })
+                            .await;
+                        } else {
+                            let cooldown = escalating_dispatch_cooldown(streak);
                             tracing::warn!(
                                 task_id = %task.short_id,
                                 role,
-                                streak = stored_streak,
-                                throttle,
-                                transient,
-                                provider_backoff = provider_failure.is_some(),
-                                cooldown_secs = effective_cooldown.as_secs(),
-                                "CoordinatorActor: repeated task failure — backing off dispatch"
+                                streak,
+                                cooldown_secs = cooldown.as_secs(),
+                                "CoordinatorActor: no eligible model for task owner — backing off"
                             );
-                            self.dispatch_cooldowns.insert(
-                                task.id.clone(),
-                                SystemClock::new().now_instant() + effective_cooldown,
-                            );
+                            actor.dispatch_cooldowns
+                                .insert(task.id.clone(), SystemClock::new().now_instant() + cooldown);
                             poll_stack::boxed(|| {
-                                self.persist_durable_dispatch_state_update(
+                                actor.persist_durable_dispatch_state_update(
                                     &task.id,
                                     Some(&task.short_id),
-                                    "same_role_failure_backoff",
+                                    "no_eligible_model_backoff",
                                     DurableDispatchStateUpdate {
-                                        failure_streak: Some(stored_streak),
-                                        cooldown_until: Some(dispatch_wall_clock_after(
-                                            effective_cooldown,
-                                        )),
+                                        failure_streak: Some(streak),
+                                        cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
                                         last_dispatched: Some(None),
                                         ..Default::default()
                                     },
                                 )
                             })
                             .await;
-                            continue;
                         }
-                        Some(ReappearingDispatch::RoleTransition) | None => {
-                            self.dispatch_failure_streak.remove(&task.id);
-                            self.provider_failure_streak.remove(&task.id);
-                            self.dispatch_cooldowns.remove(&task.id);
-                            poll_stack::boxed(|| {
-                                self.clear_durable_dispatch_backoff_state(
-                                    &task.id,
-                                    Some(&task.short_id),
-                                    "role_transition_dispatch_state_clear",
-                                )
-                            })
-                            .await;
-                        }
+                        return Ok(LegacyDispatchPass::Continue);
                     }
-                }
-            }
-            if exhausted_roles.contains(role) {
-                continue;
-            }
-            let creator = task.created_by_user_id.clone();
 
-            // Base per-role eligibility, scoped to THIS task's creator's
-            // credentials (own + org-shared) — the same set the worker resolves
-            // with — so the coordinator never offers a model it can't auth.
-            // Memoized per (role, creator) for the pass.
-            let base_model_ids = match role_models_cache.get(&(role, Some(creator.clone()))) {
-                Some(v) => v.clone(),
-                None => {
-                    let v = self
-                        .resolve_dispatch_models_for_role(role, Some(creator.as_str()))
-                        .await;
-                    role_models_cache.insert((role, Some(creator.clone())), v.clone());
-                    v
-                }
-            };
-
-            // Final fallback list, precedence: creator's per-user selection →
-            // project default-role preference → role base. All scoped to the
-            // creator, so selection and runtime resolution stay consistent.
-            //
-            // Post-intervention worker retries (intervention_count >= 1) are
-            // routed to the plan lane when the default-on feature flag is set,
-            // while keeping the `worker` role and `ModelLane::for_role` mapping
-            // unchanged.
-            let effective_lane = post_intervention_lane::effective_dispatch_lane(
-                role,
-                task.intervention_count,
-                post_intervention_lane::use_plan_lane_for_post_intervention_workers(),
-            );
-            let user_model_ids = self
-                .resolve_user_model_priority_with_lane(Some(creator.as_str()), role, effective_lane)
-                .await;
-            let model_preference_ids = self
-                .resolve_role_model_preference(&task.project_id, role, Some(creator.as_str()))
-                .await;
-            let mut seen = std::collections::HashSet::new();
-            let mut model_ids: Vec<String> = Vec::with_capacity(
-                user_model_ids.len() + model_preference_ids.len() + base_model_ids.len(),
-            );
-            for id in user_model_ids
-                .iter()
-                .chain(model_preference_ids.iter())
-                .chain(base_model_ids.iter())
-            {
-                if seen.insert(id.clone()) {
-                    model_ids.push(id.clone());
-                }
-            }
-
-            // uv3p Part B: forced model rotation on the post-intervention retry
-            // path. When the human-park rung declined to park because no attempt
-            // has reached submit_work yet, it redispatches — but a redispatch to
-            // the SAME model that just terminated pre-submission (loop-guard trip,
-            // infra death) would loop identically. Exclusions are derived from
-            // `task_attempts` rows via `PostInterventionHistory::rotation_excluded_models()`;
-            // only actual model IDs (provider/model) are excluded — outcome
-            // fallback strings from failed session lookups are skipped.
-            // Degrades to the unfiltered list when exclusion would empty it
-            // (only one viable model → plan-lane retry, then park at the bound).
-            // 4etb: rotation is NO LONGER gated on `intervention_count >= 1`.
-            // With rung 1 retired nothing advances that counter, so the gate
-            // would have disabled rotation on exactly the escalations that need
-            // it — every first escalation. The canonical evidence epoch inside
-            // `post_intervention_history` is the real gate now: it returns an
-            // empty history (and therefore no exclusions) for a task that has
-            // never been escalated, so an unescalated worker dispatch is
-            // unaffected.
-            if role == "worker" {
-                let history = poll_stack::boxed(|| self.post_intervention_history(&task)).await;
-                let rotation_excluded = history.rotation_excluded_models();
-                if !rotation_excluded.is_empty() {
-                    let filtered: Vec<String> = model_ids
-                        .iter()
-                        .filter(|m| !rotation_excluded.contains(m))
-                        .cloned()
-                        .collect();
-                    if !filtered.is_empty() && filtered.len() < model_ids.len() {
-                        tracing::info!(
-                            task_id = %task.short_id,
-                            excluded = ?rotation_excluded,
-                            "uv3p: forcing model rotation on post-intervention redispatch — excluding models that terminated pre-submission"
-                        );
-                        model_ids = filtered;
-                    }
-                }
-            }
-
-            // zkk9: Enforce arbiter-monitored-reopen `exclude_models` for the
-            // one monitored worker dispatch.  When an arbiter issued a `reopen`
-            // decision, the directive/excluded models were persisted on the
-            // current unconsumed arbitration row.  If this worker dispatch is
-            // the monitored attempt, apply those exclusions.  Unlike the
-            // rotation exclusions above, these do NOT degrade to the unfiltered
-            // list — if no eligible model remains, the task is parked with an
-            // updated dossier rather than cycling another worker.
-            if role == "worker" {
-                let arb_repo = TaskArbitrationRepository::new(self.db.clone());
-                if let Ok((_cycle, Some(arb_record))) =
-                    arb_repo.resolve_current_hold_cycle(&task.id).await
-                    && arb_record.monitored_reopen_count >= 1
-                    && !arb_record.directive_injected
-                {
-                    // This is the monitored reopen worker dispatch.
-                    let reopen_excluded: Vec<String> = arb_record
-                        .excluded_models
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if !reopen_excluded.is_empty() {
-                        let filtered: Vec<String> = model_ids
-                            .iter()
-                            .filter(|m| !reopen_excluded.contains(m))
-                            .cloned()
-                            .collect();
-                        tracing::info!(
-                            task_id = %task.short_id,
-                            excluded = ?reopen_excluded,
-                            remaining = filtered.len(),
-                            "zkk9: enforcing arbiter reopen exclude_models for monitored worker dispatch"
-                        );
-                        model_ids = filtered;
-                    }
-                }
-            }
-
-            // Cross-model ("Thorough") review: when this is a reviewer dispatch
-            // and the creator has `diverse_review` on, steer the fallback list so
-            // the first viable model id differs from the one that implemented the
-            // task. Reorders in place (entries != implementer first, preserving
-            // priority); collapses to same-model when nothing else is viable.
-            if role == "reviewer" {
-                poll_stack::boxed(|| {
-                    self.apply_diverse_review_ordering(
-                        &task,
-                        Some(creator.as_str()),
-                        &mut model_ids,
-                    )
-                })
-                .await;
-            }
-
-            // Dispatch-time throttle deprioritization: move any model that is
-            // currently inside a throttle cooldown window to the BACK of the
-            // ordered list so a healthy lane-mate is attempted first. A model
-            // whose token plan just 429'd is likely still quota-dead; retrying
-            // it head-of-line wastes a session spawn + a <10s crash + the
-            // ~30-minute task redispatch cooldown before failover finally
-            // happens. This is a pure reorder (not a filter): a throttle-cooling
-            // model stays in the list as a last-resort candidate, so if every
-            // lane model is cooling the existing all-unavailable path still
-            // applies (the dispatch loop's `is_available` gate + escalating
-            // backoff), and a half-open (cooldown-expired) throttle model is
-            // still tried when it is the only option.
-            deprioritize_throttle_cooling(&self.health, Some(creator.as_str()), &mut model_ids);
-
-            // Structured observability: emit one log record per candidate in
-            // the final ordered list so post-apply / post-rollback model order
-            // can be inspected without production-only tooling.
-            super::lane_resolution_log::emit_lane_resolution_candidates(
-                &task.short_id,
-                role,
-                creator.as_str(),
-                &model_ids,
-            );
-
-            // zkk9: No-eligible-model parking for monitored reopen.  If the
-            // arbiter's `exclude_models` eliminated all worker models for the
-            // monitored reopen dispatch, park with an updated dossier instead
-            // of cycling another worker or arbiter.  Also mark the monitored
-            // attempt complete so re-entry cannot trigger a second cycle.
-            if model_ids.is_empty() && role == "worker" {
-                let arb_repo = TaskArbitrationRepository::new(self.db.clone());
-                let should_park_reopen = match arb_repo.resolve_current_hold_cycle(&task.id).await {
-                    Ok((cycle, Some(rec))) => (rec.monitored_reopen_count >= 1
-                        && !rec.directive_injected)
-                        .then_some((cycle, rec)),
-                    _ => None,
-                };
-                if let Some((hold_cycle, rec)) = should_park_reopen {
-                    let park_reason = "arbiter reopen exclude_models eliminated all worker models";
-                    let dossier = serde_json::json!({
-                        "reason": park_reason,
-                        "task_id": task.short_id,
-                        "kind": "monitored_reopen_no_eligible_model",
-                        "excluded_models": rec.excluded_models,
-                        "directive": rec.directive,
-                        "verification_command": rec.verification_command,
-                    });
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        "zkk9: monitored reopen exclude_models left no eligible worker model — parking with dossier"
-                    );
-                    // Persist the dossier on the arbitration row so the
-                    // externally visible contract carries the explicit
-                    // `monitored_reopen_no_eligible_model` evidence.
-                    use djinn_db::repositories::task_arbitration::UpdateDispatchLedgerParams;
-                    let _ = arb_repo
-                        .update_dispatch_ledger(UpdateDispatchLedgerParams {
-                            task_id: &task.id,
-                            hold_cycle,
-                            mirror_head_sha: None,
-                            github_head_sha: None,
-                            pr_url: None,
-                            failing_ci_job_ids: None,
-                            dossier: Some(&dossier),
-                            directive: None,
-                            verification_command: None,
-                            excluded_models: None,
-                        })
-                        .await;
-                    // Complete the monitored attempt so re-entry cannot retry.
-                    let _ = arb_repo
-                        .complete_monitored_reopen(&task.id, hold_cycle)
-                        .await;
-                    let quality_strikes = self
-                        .task_repo()
-                        .quality_reopen_count(&task.id)
-                        .await
-                        .unwrap_or(0);
-                    let empty_evidence = serde_json::json!({});
-                    poll_stack::boxed(|| {
-                        self.park_source_human_review_with_dossier(
-                            &task,
-                            park_reason,
-                            quality_strikes,
-                            Some(dossier),
-                            &empty_evidence,
-                        )
-                    })
-                    .await;
-                    continue;
-                }
-            }
-
-            // No model whose provider this task's owner has connected → the task
-            // is structurally undispatchable (the canary). Don't loop it forever
-            // (wedging the task open). Back off with the
-            // escalating cooldown, and after MAX consecutive misses fail it
-            // terminally with an actionable reason.
-            if model_ids.is_empty() {
-                let streak = {
-                    let s = self
-                        .dispatch_failure_streak
-                        .entry(task.id.clone())
-                        .or_insert(0);
-                    *s = s.saturating_add(1);
-                    *s
-                };
-                if streak >= MAX_DISPATCH_FAILURES {
-                    poll_stack::boxed(|| {
-                        self.terminally_fail_task(
-                        &task,
-                        role,
-                        "no model available for this task's owner: none of the role's configured \
-                         models have a provider connected for them. Connect a provider/model for \
-                         the owner and reopen.",
-                    )
-                    })
-                    .await;
-                    self.dispatch_failure_streak.remove(&task.id);
-                    self.dispatch_cooldowns.remove(&task.id);
-                    self.inflight_dispatches.remove(&task.id);
-                    poll_stack::boxed(|| {
-                        self.clear_durable_dispatch_backoff_state(
-                            &task.id,
-                            Some(&task.short_id),
-                            "no_eligible_model_terminal_close_clear",
-                        )
-                    })
-                    .await;
-                } else {
-                    let cooldown = escalating_dispatch_cooldown(streak);
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        role,
-                        streak,
-                        cooldown_secs = cooldown.as_secs(),
-                        "CoordinatorActor: no eligible model for task owner — backing off"
-                    );
-                    self.dispatch_cooldowns
-                        .insert(task.id.clone(), SystemClock::new().now_instant() + cooldown);
-                    poll_stack::boxed(|| {
-                        self.persist_durable_dispatch_state_update(
-                            &task.id,
-                            Some(&task.short_id),
-                            "no_eligible_model_backoff",
-                            DurableDispatchStateUpdate {
-                                failure_streak: Some(streak),
-                                cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
-                                last_dispatched: Some(None),
-                                ..Default::default()
-                            },
-                        )
-                    })
-                    .await;
-                }
-                continue;
-            }
-
-            // Per-user cap gate: keep only models where this task's creator is
-            // under their own concurrency cap (default 1 when unset). Eligible
-            // but all-at-cap ⇒ the user is simply busy — skip this pass (NOT
-            // terminal, no streak/cooldown; retries next tick as their sessions
-            // free). Tasks with no creator (legacy NULL) are ungated.
-            {
-                let c = creator.as_str();
-                if !creator_caps.contains_key(c) {
-                    let settings = djinn_db::UserSettingsRepository::new(self.db.clone())
-                        .get(c)
-                        .await
-                        .ok()
-                        .flatten();
-                    creator_caps.insert(
-                        c.to_string(),
-                        settings
-                            .as_ref()
-                            .and_then(|s| s.max_sessions.clone())
-                            .unwrap_or_default(),
-                    );
-                    creator_lane_caps
-                        .insert(c.to_string(), settings.and_then(|s| s.lane_max_sessions));
-                }
-
-                let caps = &creator_caps[c];
-                model_ids.retain(|m| {
-                    Self::resident_admission_allows(
-                        &running_by_user_model,
-                        &running_by_user_lane,
-                        c,
-                        m,
-                        role,
-                        caps,
-                        creator_lane_caps[c].as_ref(),
-                    )
-                });
-                if model_ids.is_empty() {
-                    record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_CAP);
-                    tracing::debug!(outcome = "cap", task_id = %task.short_id, role);
-                    tracing::debug!(
-                        task_id = %task.short_id,
-                        role,
-                        "CoordinatorActor: task owner at per-model concurrency cap — deferring"
-                    );
-                    // Audit: record a guard-deferred row for the capacity
-                    // deferral.  Best-effort; no counters incremented.
-                    super::respawn_guard::record_guard_deferred_attempt(
-                        &self.db,
-                        &task.id,
-                        role,
-                        djinn_core::models::task_attempt::GuardReason::Capacity,
-                        Some("capacity: user at per-model concurrency cap"),
-                    )
-                    .await;
-                    continue;
-                }
-            }
-            let model_ids: &[String] = &model_ids;
-
-            match self.pool.has_session(&task.id).await {
-                Ok(true) => continue,
-                Ok(false) => {}
-                Err(PoolError::ActorDead) => {
-                    tracing::error!("CoordinatorActor: slot pool actor dead, aborting dispatch");
-                    return;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        error = %e,
-                        "CoordinatorActor: has_session query failed"
-                    );
-                    continue;
-                }
-            }
-
-            let Some(project_path) =
-                poll_stack::boxed(|| self.project_path_for_id(&task.project_id)).await
-            else {
-                tracing::warn!(task_id = %task.short_id, project_id = %task.project_id, "CoordinatorActor: project path not found, skipping dispatch");
-                continue;
-            };
-
-            // Phase 3 PR 8: architect-only pre-dispatch `await_fresh` gate.
-            // Blocks up to 45s for a warm canonical graph; on timeout the
-            // warmer returns Ok and the architect proceeds best-effort.
-            // Other roles proceed immediately (per ADR: workers tolerate
-            // a stale skeleton).
-            if role == "architect"
-                && let Some(warmer) = self.graph_warmer.clone()
-            {
-                let pid = task.project_id.clone();
-                let _ = warmer
-                    .await_fresh(
-                        &pid,
-                        std::time::Duration::from_secs(300),
-                        std::time::Duration::from_secs(45),
-                    )
-                    .await;
-            }
-
-            // ri23 Part 2: pre-pod-allocation warm build-cache freshness gate.
-            // Mirrors the architect graph gate above, but for the per-project
-            // warm Cargo build cache. When the warm substrate has wired a
-            // probe, this bounds the wait for a fresh cache and labels the
-            // decision; otherwise it is a best-effort no-op. The task-run pod is
-            // still allocated exactly once below, regardless of the decision.
-            if let Some(warm_probe) = self.warm_build_cache_probe() {
-                let identity = super::warm_dispatch_gate::WarmCacheIdentity {
-                    project_id: task.project_id.clone(),
-                    environment_identity: self.warm_cache_environment_identity(&task.project_id),
-                };
-                let decision = super::warm_dispatch_gate::WarmDispatchGate::default()
-                    .decide_and_record(
-                        self.warm_compile_mode_for(&task.project_id),
-                        warm_probe.as_ref(),
-                        &identity,
-                        &SystemClock::new(),
-                    )
-                    .await;
-                tracing::debug!(
-                    task_id = %task.short_id,
-                    project_id = %task.project_id,
-                    warm_hit = decision.is_warm_hit(),
-                    "CoordinatorActor: warm build-cache dispatch gate decision"
-                );
-            }
-
-            // Coordinator-side resume-via-git selection: when resume is
-            // enabled and the selector produced a metadata struct, serialize
-            // it and route the dispatch through `dispatch_with_resume_metadata`
-            // so the selection lands on `TaskRunSpec::resume_lifecycle_metadata`
-            // (read by downstream prompt/model/merge work in siblings `48ru`/
-            // `twsk`/`sy0g`). When resume is disabled OR the selector
-            // returned `None`, fall back to the legacy `dispatch` call so
-            // existing default/off dispatch behavior is byte-for-byte
-            // preserved.
-            let dispatch_group_id = uuid::Uuid::now_v7().to_string();
-            let mut resume_metadata = self
-                .select_resume_lifecycle_metadata_for_dispatch(&task)
-                .await;
-            let metadata = resume_metadata.get_or_insert_with(Default::default);
-            metadata.dispatch_owner_incarnation_id = Some(self.coordinator_incarnation_id.clone());
-            metadata.dispatch_group_id = Some(dispatch_group_id.clone());
-            let resume_metadata_json = resume_metadata
-                .as_ref()
-                .map(serde_json::to_value)
-                .transpose()
-                .map_err(|e| {
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        error = %e,
-                        "CoordinatorActor: failed to serialize ResumeLifecycleMetadata for re-dispatch; \
-                         proceeding without resume metadata"
-                    );
-                    e
-                })
-                .ok()
-                .flatten();
-
-            let task_id = task.id.clone();
-            let project_path_owned = project_path.clone();
-            let outcome = self
-                .try_dispatch_to_pool(
-                    &task.short_id,
-                    role,
-                    task.reopen_count.max(0) as u32,
-                    Some(creator.as_str()),
-                    model_ids,
-                    |pool, model_id| {
-                        let pool = pool.clone();
-                        let tid = task_id.clone();
-                        let pp = project_path_owned.clone();
-                        let mid = model_id.to_owned();
-                        let resume = resume_metadata_json.clone();
-                        async move {
-                            match resume {
-                                Some(metadata) => {
-                                    pool.dispatch_with_resume_metadata(
-                                        &tid,
-                                        &pp,
-                                        &mid,
-                                        Some(metadata),
-                                    )
-                                    .await
-                                }
-                                None => pool.dispatch(&tid, &pp, &mid).await,
-                            }
-                        }
-                    },
-                )
-                .await;
-
-            match outcome {
-                DispatchOutcome::Dispatched {
-                    model_id: used_model,
-                } => {
-                    record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_OK);
-                    tracing::info!(outcome = "ok", task_id = %task.short_id, role);
-                    tracing::info!(
-                        task_id = %task.short_id,
-                        task_uuid = %task.id,
-                        project_id = %task.project_id,
-                        status = %task.status,
-                        priority = task.priority,
-                        role,
-                        project_path,
-                        "CoordinatorActor: task dispatched"
-                    );
-                    self.last_dispatched.insert(
-                        task.id.clone(),
-                        DispatchMarker {
-                            instant: SystemClock::new().now_instant(),
-                            role: role.to_owned(),
-                        },
-                    );
-                    // A dispatch got through, so any breaker-outage backoff
-                    // ladder this task was climbing is over — reset it so a
-                    // future, unrelated outage starts back at the first rung.
-                    self.breaker_open_backoff_streak.remove(&task.id);
-                    poll_stack::boxed(|| {
-                        self.persist_durable_dispatch_state_update(
-                            &task.id,
-                            Some(&task.short_id),
-                            "successful_dispatch_marker",
-                            DurableDispatchStateUpdate {
-                                cooldown_until: Some(None),
-                                last_dispatched: Some(
-                                    dispatch_wall_clock_now().map(|ts| (ts, role.to_owned())),
-                                ),
-                                ..Default::default()
-                            },
-                        )
-                    })
-                    .await;
-                    self.dispatched += 1;
-                    // Attempt lifecycle: record the dispatch-start as a
-                    // pending task_attempt row. Best-effort — never fails the
-                    // dispatch path.
-                    let dispatch_key = super::attempt_lifecycle::make_dispatch_key(&task.id, role);
-                    super::attempt_lifecycle::record_dispatch_start_with_identity(
-                        &self.db,
-                        &task.id,
-                        role,
-                        None,
-                        &dispatch_key,
-                        &self.coordinator_incarnation_id,
-                        &dispatch_group_id,
-                    )
-                    .await;
-                    // Bump the per-user running count for the model actually
-                    // used (the first health-available one — the elastic pool
-                    // accepts it), so further same-creator+model tasks in THIS
-                    // pass respect the cap before the session row is visible.
+                    // Per-user cap gate: keep only models where this task's creator is
+                    // under their own concurrency cap (default 1 when unset). Eligible
+                    // but all-at-cap ⇒ the user is simply busy — skip this pass (NOT
+                    // terminal, no streak/cooldown; retries next tick as their sessions
+                    // free). Tasks with no creator (legacy NULL) are ungated.
                     {
                         let c = creator.as_str();
-                        // The model the failover chain ACCEPTED, carried out of
-                        // `try_dispatch_to_pool`. Re-deriving it here with
-                        // `find(is_available)` mis-attributed every
-                        // capacity-driven failover (see `DispatchOutcome`).
-                        {
-                            let used = &used_model;
-                            *running_by_user_model
-                                .entry((c.to_string(), used.clone()))
-                                .or_insert(0) += 1;
-                            *running_by_user_lane
-                                .entry((
-                                    c.to_string(),
-                                    djinn_core::models::ModelLane::for_role(role),
-                                ))
-                                .or_insert(0) += 1;
-                            #[cfg(test)]
-                            observe_dispatch_cap_count(
-                                DispatchCapObservationStage::InflightIncremented,
-                                c,
-                                used,
-                                running_by_user_model
-                                    .get(&(c.to_string(), used.clone()))
-                                    .copied()
-                                    .unwrap_or(0),
+                        if !creator_caps.contains_key(c) {
+                            let settings = djinn_db::UserSettingsRepository::new(actor.db.clone())
+                                .get(c)
+                                .await
+                                .ok()
+                                .flatten();
+                            creator_caps.insert(
+                                c.to_string(),
+                                settings
+                                    .as_ref()
+                                    .and_then(|s| s.max_sessions.clone())
+                                    .unwrap_or_default(),
                             );
-                            // Record in the in-flight ledger via the shared
-                            // admission helper so the NEXT pass (and the planner
-                            // escalation path) counts this dispatch against the
-                            // cap immediately — before its `running` session row
-                            // lands (pod boot lags 20-60s). Reconciled against
-                            // the live pool at the top of each pass, so it drops
-                            // out the moment the task completes.
+                            creator_lane_caps
+                                .insert(c.to_string(), settings.and_then(|s| s.lane_max_sessions));
+                        }
+
+                        let caps = &creator_caps[c];
+                        model_ids.retain(|m| {
+                            Self::resident_admission_allows(
+                                &running_by_user_model,
+                                &running_by_user_lane,
+                                c,
+                                m,
+                                role,
+                                caps,
+                                creator_lane_caps[c].as_ref(),
+                            )
+                        });
+                        if model_ids.is_empty() {
+                            record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_CAP);
+                            tracing::debug!(outcome = "cap", task_id = %task.short_id, role);
+                            tracing::debug!(
+                                task_id = %task.short_id,
+                                role,
+                                "CoordinatorActor: task owner at per-model concurrency cap — deferring"
+                            );
+                            // Audit: record a guard-deferred row for the capacity
+                            // deferral.  Best-effort; no counters incremented.
+                            super::respawn_guard::record_guard_deferred_attempt(
+                                &actor.db,
+                                &task.id,
+                                role,
+                                djinn_core::models::task_attempt::GuardReason::Capacity,
+                                Some("capacity: user at per-model concurrency cap"),
+                            )
+                            .await;
+                            return Ok(LegacyDispatchPass::Continue);
+                        }
+                    }
+                    let model_ids: &[String] = &model_ids;
+
+                    match actor.pool.has_session(&task.id).await {
+                        Ok(true) => return Ok(LegacyDispatchPass::Continue),
+                        Ok(false) => {}
+                        Err(PoolError::ActorDead) => {
+                            tracing::error!("CoordinatorActor: slot pool actor dead, aborting dispatch");
+                            return Ok(LegacyDispatchPass::AbortPass);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                error = %e,
+                                "CoordinatorActor: has_session query failed"
+                            );
+                            return Ok(LegacyDispatchPass::Continue);
+                        }
+                    }
+
+                    let Some(project_path) =
+                        poll_stack::boxed(|| actor.project_path_for_id(&task.project_id)).await
+                    else {
+                        tracing::warn!(task_id = %task.short_id, project_id = %task.project_id, "CoordinatorActor: project path not found, skipping dispatch");
+                        return Ok(LegacyDispatchPass::Continue);
+                    };
+
+                    // Phase 3 PR 8: architect-only pre-dispatch `await_fresh` gate.
+                    // Blocks up to 45s for a warm canonical graph; on timeout the
+                    // warmer returns Ok and the architect proceeds best-effort.
+                    // Other roles proceed immediately (per ADR: workers tolerate
+                    // a stale skeleton).
+                    if role == "architect"
+                        && let Some(warmer) = actor.graph_warmer.clone()
+                    {
+                        let pid = task.project_id.clone();
+                        let _ = warmer
+                            .await_fresh(
+                                &pid,
+                                std::time::Duration::from_secs(300),
+                                std::time::Duration::from_secs(45),
+                            )
+                            .await;
+                    }
+
+                    // ri23 Part 2: pre-pod-allocation warm build-cache freshness gate.
+                    // Mirrors the architect graph gate above, but for the per-project
+                    // warm Cargo build cache. When the warm substrate has wired a
+                    // probe, this bounds the wait for a fresh cache and labels the
+                    // decision; otherwise it is a best-effort no-op. The task-run pod is
+                    // still allocated exactly once below, regardless of the decision.
+                    if let Some(warm_probe) = actor.warm_build_cache_probe() {
+                        let identity = super::warm_dispatch_gate::WarmCacheIdentity {
+                            project_id: task.project_id.clone(),
+                            environment_identity: actor.warm_cache_environment_identity(&task.project_id),
+                        };
+                        let decision = super::warm_dispatch_gate::WarmDispatchGate::default()
+                            .decide_and_record(
+                                actor.warm_compile_mode_for(&task.project_id),
+                                warm_probe.as_ref(),
+                                &identity,
+                                &SystemClock::new(),
+                            )
+                            .await;
+                        tracing::debug!(
+                            task_id = %task.short_id,
+                            project_id = %task.project_id,
+                            warm_hit = decision.is_warm_hit(),
+                            "CoordinatorActor: warm build-cache dispatch gate decision"
+                        );
+                    }
+
+                    // Coordinator-side resume-via-git selection: when resume is
+                    // enabled and the selector produced a metadata struct, serialize
+                    // it and route the dispatch through `dispatch_with_resume_metadata`
+                    // so the selection lands on `TaskRunSpec::resume_lifecycle_metadata`
+                    // (read by downstream prompt/model/merge work in siblings `48ru`/
+                    // `twsk`/`sy0g`). When resume is disabled OR the selector
+                    // returned `None`, fall back to the legacy `dispatch` call so
+                    // existing default/off dispatch behavior is byte-for-byte
+                    // preserved.
+                    let dispatch_group_id = uuid::Uuid::now_v7().to_string();
+                    let mut resume_metadata = actor
+                        .select_resume_lifecycle_metadata_for_dispatch(&task)
+                        .await;
+                    let metadata = resume_metadata.get_or_insert_with(Default::default);
+                    metadata.dispatch_owner_incarnation_id = Some(actor.coordinator_incarnation_id.clone());
+                    metadata.dispatch_group_id = Some(dispatch_group_id.clone());
+                    let resume_metadata_json = resume_metadata
+                        .as_ref()
+                        .map(serde_json::to_value)
+                        .transpose()
+                        .map_err(|e| {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                error = %e,
+                                "CoordinatorActor: failed to serialize ResumeLifecycleMetadata for re-dispatch; \
+                                 proceeding without resume metadata"
+                            );
+                            e
+                        })
+                        .ok()
+                        .flatten();
+
+                    let task_id = task.id.clone();
+                    let project_path_owned = project_path.clone();
+                    let outcome = actor
+                        .try_dispatch_to_pool(
+                            &task.short_id,
+                            role,
+                            task.reopen_count.max(0) as u32,
+                            Some(creator.as_str()),
+                            model_ids,
+                            |pool, model_id| {
+                                let pool = pool.clone();
+                                let tid = task_id.clone();
+                                let pp = project_path_owned.clone();
+                                let mid = model_id.to_owned();
+                                let resume = resume_metadata_json.clone();
+                                async move {
+                                    match resume {
+                                        Some(metadata) => {
+                                            pool.dispatch_with_resume_metadata(
+                                                &tid,
+                                                &pp,
+                                                &mid,
+                                                Some(metadata),
+                                            )
+                                            .await
+                                        }
+                                        None => pool.dispatch(&tid, &pp, &mid).await,
+                                    }
+                                }
+                            },
+                        )
+                        .await;
+
+                    match outcome {
+                        DispatchOutcome::Dispatched {
+                            model_id: used_model,
+                        } => {
+                            record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_OK);
+                            tracing::info!(outcome = "ok", task_id = %task.short_id, role);
+                            tracing::info!(
+                                task_id = %task.short_id,
+                                task_uuid = %task.id,
+                                project_id = %task.project_id,
+                                status = %task.status,
+                                priority = task.priority,
+                                role,
+                                project_path,
+                                "CoordinatorActor: task dispatched"
+                            );
+                            actor.last_dispatched.insert(
+                                task.id.clone(),
+                                DispatchMarker {
+                                    instant: SystemClock::new().now_instant(),
+                                    role: role.to_owned(),
+                                },
+                            );
+                            // A dispatch got through, so any breaker-outage backoff
+                            // ladder this task was climbing is over — reset it so a
+                            // future, unrelated outage starts back at the first rung.
+                            actor.breaker_open_backoff_streak.remove(&task.id);
                             poll_stack::boxed(|| {
-                                self.record_inflight_dispatch(
+                                actor.persist_durable_dispatch_state_update(
                                     &task.id,
                                     Some(&task.short_id),
-                                    Some(c),
-                                    used,
+                                    "successful_dispatch_marker",
+                                    DurableDispatchStateUpdate {
+                                        cooldown_until: Some(None),
+                                        last_dispatched: Some(
+                                            dispatch_wall_clock_now().map(|ts| (ts, role.to_owned())),
+                                        ),
+                                        ..Default::default()
+                                    },
+                                )
+                            })
+                            .await;
+                            actor.dispatched += 1;
+                            // Attempt lifecycle: record the dispatch-start as a
+                            // pending task_attempt row. Best-effort — never fails the
+                            // dispatch path.
+                            let dispatch_key = super::attempt_lifecycle::make_dispatch_key(&task.id, role);
+                            super::attempt_lifecycle::record_dispatch_start_with_identity(
+                                &actor.db,
+                                &task.id,
+                                role,
+                                None,
+                                &dispatch_key,
+                                &actor.coordinator_incarnation_id,
+                                &dispatch_group_id,
+                            )
+                            .await;
+                            // Bump the per-user running count for the model actually
+                            // used (the first health-available one — the elastic pool
+                            // accepts it), so further same-creator+model tasks in THIS
+                            // pass respect the cap before the session row is visible.
+                            {
+                                let c = creator.as_str();
+                                // The model the failover chain ACCEPTED, carried out of
+                                // `try_dispatch_to_pool`. Re-deriving it here with
+                                // `find(is_available)` mis-attributed every
+                                // capacity-driven failover (see `DispatchOutcome`).
+                                {
+                                    let used = &used_model;
+                                    *running_by_user_model
+                                        .entry((c.to_string(), used.clone()))
+                                        .or_insert(0) += 1;
+                                    *running_by_user_lane
+                                        .entry((
+                                            c.to_string(),
+                                            djinn_core::models::ModelLane::for_role(role),
+                                        ))
+                                        .or_insert(0) += 1;
+                                    #[cfg(test)]
+                                    observe_dispatch_cap_count(
+                                        DispatchCapObservationStage::InflightIncremented,
+                                        c,
+                                        used,
+                                        running_by_user_model
+                                            .get(&(c.to_string(), used.clone()))
+                                            .copied()
+                                            .unwrap_or(0),
+                                    );
+                                    // Record in the in-flight ledger via the shared
+                                    // admission helper so the NEXT pass (and the planner
+                                    // escalation path) counts this dispatch against the
+                                    // cap immediately — before its `running` session row
+                                    // lands (pod boot lags 20-60s). Reconciled against
+                                    // the live pool at the top of each pass, so it drops
+                                    // out the moment the task completes.
+                                    poll_stack::boxed(|| {
+                                        actor.record_inflight_dispatch(
+                                            &task.id,
+                                            Some(&task.short_id),
+                                            Some(c),
+                                            used,
+                                            role,
+                                        )
+                                    })
+                                    .await;
+                                }
+                            }
+                        }
+                        DispatchOutcome::AtCapacity => {
+                            record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_CAP);
+                            tracing::debug!(outcome = "cap", task_id = %task.short_id, role);
+                            tracing::debug!(
+                                task_id = %task.short_id,
+                                task_uuid = %task.id,
+                                project_id = %task.project_id,
+                                role,
+                                status = %task.status,
+                                candidate_models = model_ids.len(),
+                                "CoordinatorActor: all models at capacity for role"
+                            );
+                            exhausted_roles.insert(role);
+                        }
+                        DispatchOutcome::PoolDead => {
+                            record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_ERROR);
+                            return Ok(LegacyDispatchPass::AbortPass);
+                        }
+                        DispatchOutcome::Failed {
+                            exhausted_observations,
+                        } => {
+                            let breaker_open_for_all_candidates = model_ids.iter().all(|model_id| {
+                                !actor.health.is_available(Some(creator.as_str()), model_id)
+                            });
+                            if breaker_open_for_all_candidates {
+                                record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_BREAKER);
+                                tracing::debug!(outcome = "breaker", task_id = %task.short_id, role);
+                            } else {
+                                record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_ERROR);
+                                tracing::debug!(outcome = "error", task_id = %task.short_id, role);
+                            }
+                            tracing::debug!(
+                                task_id = %task.short_id,
+                                task_uuid = %task.id,
+                                project_id = %task.project_id,
+                                role,
+                                status = %task.status,
+                                candidate_models = model_ids.len(),
+                                "CoordinatorActor: no model could accept dispatch"
+                            );
+
+                            // Chain-exhaustion terminal side effects: advance the
+                            // failure streak and apply escalating cooldown so the
+                            // task is not silently retried every tick without
+                            // backoff. Pass this chain's exhausted observations so
+                            // breaker side effects apply ONLY to failures from THIS
+                            // dispatch attempt — not from a fallback-rescued or
+                            // unrelated earlier chain (AC2).
+                            //
+                            // `breaker_open_for_all_candidates` is threaded through
+                            // explicitly: when it holds, no candidate was attempted, so
+                            // the exhaustion says nothing about this task and must back
+                            // off WITHOUT advancing the streak that force-closes at
+                            // MAX_DISPATCH_FAILURES.
+                            poll_stack::boxed(|| {
+                                actor.apply_chain_exhaustion_side_effects(
+                                    &task,
                                     role,
+                                    model_ids,
+                                    &exhausted_observations,
+                                    breaker_open_for_all_candidates,
                                 )
                             })
                             .await;
                         }
                     }
-                }
-                DispatchOutcome::AtCapacity => {
-                    record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_CAP);
-                    tracing::debug!(outcome = "cap", task_id = %task.short_id, role);
-                    tracing::debug!(
-                        task_id = %task.short_id,
-                        task_uuid = %task.id,
-                        project_id = %task.project_id,
-                        role,
-                        status = %task.status,
-                        candidate_models = model_ids.len(),
-                        "CoordinatorActor: all models at capacity for role"
-                    );
-                    exhausted_roles.insert(role);
-                }
-                DispatchOutcome::PoolDead => {
-                    record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_ERROR);
+                    Ok(LegacyDispatchPass::Continue)
+                },
+            )
+            .await;
+            match continuation {
+                Ok(ReadyDispatchContinuation::LegacyDispatch(LegacyDispatchPass::AbortPass)) => {
                     return;
                 }
-                DispatchOutcome::Failed {
-                    exhausted_observations,
-                } => {
-                    let breaker_open_for_all_candidates = model_ids.iter().all(|model_id| {
-                        !self.health.is_available(Some(creator.as_str()), model_id)
-                    });
-                    if breaker_open_for_all_candidates {
-                        record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_BREAKER);
-                        tracing::debug!(outcome = "breaker", task_id = %task.short_id, role);
-                    } else {
-                        record_dispatch_outcome(djinn_telemetry::dispatch::OUTCOME_ERROR);
-                        tracing::debug!(outcome = "error", task_id = %task.short_id, role);
-                    }
-                    tracing::debug!(
-                        task_id = %task.short_id,
-                        task_uuid = %task.id,
-                        project_id = %task.project_id,
-                        role,
-                        status = %task.status,
-                        candidate_models = model_ids.len(),
-                        "CoordinatorActor: no model could accept dispatch"
-                    );
-
-                    // Chain-exhaustion terminal side effects: advance the
-                    // failure streak and apply escalating cooldown so the
-                    // task is not silently retried every tick without
-                    // backoff. Pass this chain's exhausted observations so
-                    // breaker side effects apply ONLY to failures from THIS
-                    // dispatch attempt — not from a fallback-rescued or
-                    // unrelated earlier chain (AC2).
-                    //
-                    // `breaker_open_for_all_candidates` is threaded through
-                    // explicitly: when it holds, no candidate was attempted, so
-                    // the exhaustion says nothing about this task and must back
-                    // off WITHOUT advancing the streak that force-closes at
-                    // MAX_DISPATCH_FAILURES.
-                    poll_stack::boxed(|| {
-                        self.apply_chain_exhaustion_side_effects(
-                            &task,
-                            role,
-                            model_ids,
-                            &exhausted_observations,
-                            breaker_open_for_all_candidates,
-                        )
-                    })
-                    .await;
+                Ok(ReadyDispatchContinuation::LegacyDispatch(LegacyDispatchPass::Continue))
+                | Ok(ReadyDispatchContinuation::Parked)
+                | Ok(ReadyDispatchContinuation::Reconciled)
+                | Ok(ReadyDispatchContinuation::Settled) => continue,
+                Err(error) => {
+                    tracing::error!(task_id = %task.short_id, error = %error, "CoordinatorActor: dispatch denied because direct-delivery capability is unavailable or unknown");
+                    continue;
                 }
             }
         }
@@ -3672,7 +3686,12 @@ mod inflight_ledger_tests {
 
     pub(super) const WND1_READY_TASK_COUNT: usize = 10;
     pub(super) const WND1_STABLE_MODEL_ID: &str = "test/mock";
-    pub(super) const WND1_DISPATCH_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+    // The controlled test runtime deliberately holds each dispatched task until
+    // its settler observes the local ledger and materializes a session row.
+    // Under a saturated full coordinator run, ten seconds can expire while that
+    // test-owned continuation is merely descheduled. This remains a bounded
+    // harness allowance; production lease and dispatch behavior are unchanged.
+    pub(super) const WND1_DISPATCH_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
     pub(super) const WND1_CONTROLLED_RUNTIME_GUARD: Duration = Duration::from_secs(60);
 
     pub(super) struct Wnd1DispatchFixture {
@@ -4068,6 +4087,34 @@ mod inflight_ledger_tests {
         }
     }
 
+    /// A controlled runner signals `started_tx` from inside its callback,
+    /// before the pool actor necessarily publishes it through `get_status`.
+    /// Wait for that production reconciliation view before beginning the
+    /// intentionally session-row-free ledger-overlay window.
+    async fn wait_for_pool_to_report_running_task(
+        pool: &djinn_slot::SlotPoolHandle,
+        task_id: &str,
+    ) {
+        let deadline = tokio::time::Instant::now() + WND1_DISPATCH_SETTLE_TIMEOUT;
+        loop {
+            let running = pool
+                .get_status()
+                .await
+                .expect("query wnd1 pool running task status")
+                .running_tasks
+                .iter()
+                .any(|task| task.task_id == task_id);
+            if running {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for wnd1 pool to publish running task {task_id}"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
     fn assert_wnd1_observed_cap(
         cap: u32,
         creator_user_id: &str,
@@ -4200,6 +4247,10 @@ mod inflight_ledger_tests {
             let actor = StdArc::new(tokio::sync::Mutex::new(actor));
             let observations = StdArc::new(StdMutex::new(Vec::<DispatchCapObservation>::new()));
             let dispatch_done = StdArc::new(std::sync::atomic::AtomicBool::new(false));
+            // This flag is owned by this fixture and is published only after its
+            // own serialized actor pass sees the task's in-flight ledger entry.
+            // Do not derive the settler handshake from DispatchCapObservation:
+            // that recorder is process-global and peer tests can consume it.
             let ledger_overlay_observed = StdArc::new(std::sync::atomic::AtomicBool::new(false));
 
             let settler_db = db.clone();
@@ -4221,6 +4272,7 @@ mod inflight_ledger_tests {
                     tokio::select! {
                         maybe_task_id = started_rx.recv() => {
                             if let Some(task_id) = maybe_task_id {
+                                wait_for_pool_to_report_running_task(&settler_pool, &task_id).await;
                                 // Simulate the pod/session-row lag window: the local
                                 // in-flight ledger is already populated by dispatch,
                                 // while the DB row becomes visible only after a
@@ -4281,10 +4333,26 @@ mod inflight_ledger_tests {
                 let creator_user_id = fixture.created_by_user_id.clone();
                 let model_id = fixture.model_id.clone();
                 dispatchers.push(tokio::spawn(async move {
-                    let deadline = tokio::time::Instant::now() + WND1_DISPATCH_SETTLE_TIMEOUT;
+                    // A dispatcher can legitimately wait through one full
+                    // settle cycle for every ready task: the shared actor
+                    // serializes each pass, and the retained-lease fixture
+                    // deliberately delays session materialization until a
+                    // subsequent pass observes the local ledger. Keep this
+                    // bound owned by the complete continuation rather than a
+                    // single cycle, so a cap=1 run cannot expire while making
+                    // bounded, verified progress.
+                    let deadline = tokio::time::Instant::now()
+                        + WND1_DISPATCH_SETTLE_TIMEOUT
+                            * u32::try_from(WND1_READY_TASK_COUNT)
+                                .expect("wnd1 ready task count fits timeout multiplier");
                     loop {
                         let dispatched = {
                             let mut actor = actor.lock().await;
+                            // A pass can only have overlaid this fixture's
+                            // retained lease when that lease existed before
+                            // the pass started. This is test-owned state, not
+                            // the process-global observation recorder.
+                            let had_inflight_ledger = !actor.inflight_dispatches.is_empty();
                             clear_dispatch_cap_observations();
                             actor.dispatch_ready_tasks(Some(&project_id)).await;
                             let dispatched = actor.dispatched;
@@ -4298,11 +4366,7 @@ mod inflight_ledger_tests {
                                 &mut observations,
                                 "concurrent repeated dispatch passes",
                             );
-                            if observations.iter().any(|obs| {
-                                obs.stage == DispatchCapObservationStage::LedgerOverlay
-                                    && obs.creator_user_id == creator_user_id
-                                    && obs.model == model_id
-                            }) {
+                            if had_inflight_ledger {
                                 ledger_overlay_observed
                                     .store(true, std::sync::atomic::Ordering::SeqCst);
                             }

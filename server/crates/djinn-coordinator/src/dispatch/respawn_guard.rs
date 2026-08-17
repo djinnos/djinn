@@ -71,6 +71,26 @@ pub(crate) async fn admit_respawn_guard_liveness(
     crate::direct_delivery::admit_direct_delivery_liveness(db, tasks, task_id).await
 }
 
+/// The ready-dispatch frame shared by `dispatch_ready_tasks` and focused
+/// repository-backed tests. Applying is not merely classified: its caller-owned
+/// direct-delivery engine runs before ready dispatch refuses a worker spawn.
+pub(crate) async fn reconcile_ready_dispatch_liveness<F, Fut>(
+    db: djinn_db::Database,
+    tasks: &TaskRepository,
+    task_id: &str,
+    reconcile: F,
+) -> anyhow::Result<crate::direct_delivery::DirectDeliveryLiveness>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<crate::direct_delivery::DeliveryOutcome>>,
+{
+    let liveness = admit_respawn_guard_liveness(db, tasks, task_id).await?;
+    if liveness == crate::direct_delivery::DirectDeliveryLiveness::Reconcile {
+        reconcile().await?;
+    }
+    Ok(liveness)
+}
+
 /// The role whose dispatches carry PR-write intent.  Open-PR adoption applies
 /// ONLY to worker dispatches: vd4w's intent was "before spawning a duplicate
 /// WORKER".  Reviewer / planner / arbiter / lead dispatches for a task that
