@@ -269,11 +269,13 @@ mod evidence_dispatch_recovery;
 mod refinement_read_only;
 mod test_support_retry;
 mod typed_evidence_ingress;
+mod typed_evidence_rollout;
 
 pub use evidence_dispatch_recovery::*;
 pub use refinement_read_only::*;
 pub use test_support_retry::*;
 pub use typed_evidence_ingress::*;
+pub use typed_evidence_rollout::*;
 
 /// Counts every demand-owned relation for one proposal and its target project.
 ///
