@@ -3766,6 +3766,10 @@ mod inflight_ledger_tests {
         }
 
         fn observe_start(&self, task_id: &str, cap: u32) {
+            assert!(
+                self.fixture.task_ids.iter().any(|id| id == task_id),
+                "cap {cap}: controlled runner started task {task_id} outside its fixture"
+            );
             let active = {
                 let mut admitted = self
                     .admitted_tasks
@@ -3798,6 +3802,8 @@ mod inflight_ledger_tests {
         started_tx: tokio::sync::mpsc::UnboundedSender<String>,
         releases:
             std::sync::Arc<std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
+        admission_observer:
+            std::sync::Arc<std::sync::Mutex<Option<(StdArc<Wnd1DispatchRaceFixture>, u32)>>>,
     }
 
     impl Wnd1ControlledRuntime {
@@ -3807,9 +3813,20 @@ mod inflight_ledger_tests {
                 Self {
                     started_tx,
                     releases: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+                    admission_observer: std::sync::Arc::new(std::sync::Mutex::new(None)),
                 },
                 started_rx,
             )
+        }
+
+        /// Installs fixture-owned evidence at the actual runner boundary.
+        /// This is configured before the pool is spawned, preventing a settler
+        /// from serializing concurrent runner starts into a smaller window.
+        fn observe_runner_admissions(&self, race: StdArc<Wnd1DispatchRaceFixture>, cap: u32) {
+            *self
+                .admission_observer
+                .lock()
+                .expect("wnd1 admission observer mutex") = Some((race, cap));
         }
 
         fn spawn_pool(
@@ -3820,6 +3837,7 @@ mod inflight_ledger_tests {
         ) -> djinn_slot::SlotPoolHandle {
             let started_tx = self.started_tx.clone();
             let releases = self.releases.clone();
+            let admission_observer = self.admission_observer.clone();
             djinn_slot::SlotPoolHandle::spawn_with_factory(
                 crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
                 cancel,
@@ -3838,6 +3856,7 @@ mod inflight_ledger_tests {
                 std::sync::Arc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
                     let started_tx = started_tx.clone();
                     let releases = releases.clone();
+                    let admission_observer = admission_observer.clone();
                     let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
                         move |task_id,
                               _execution_generation,
@@ -3849,7 +3868,15 @@ mod inflight_ledger_tests {
                               _resume_lifecycle_metadata| {
                             let started_tx = started_tx.clone();
                             let releases = releases.clone();
+                            let admission_observer = admission_observer.clone();
                             Box::pin(async move {
+                                let observer = admission_observer
+                                    .lock()
+                                    .expect("wnd1 admission observer mutex")
+                                    .clone();
+                                if let Some((race, cap)) = &observer {
+                                    race.observe_start(&task_id, *cap);
+                                }
                                 let (release_tx, release_rx) = tokio::sync::oneshot::channel();
                                 releases
                                     .lock()
@@ -3861,6 +3888,15 @@ mod inflight_ledger_tests {
                                     _ = kill.cancelled() => {}
                                     _ = tokio::time::sleep(WND1_CONTROLLED_RUNTIME_GUARD) => {}
                                 }
+                                // A requested release is not evidence of a completed
+                                // runner: remove admission only when this callback exits.
+                                if let Some((race, _)) = observer {
+                                    race.observe_release(&task_id);
+                                }
+                                releases
+                                    .lock()
+                                    .expect("wnd1 release map mutex")
+                                    .remove(&task_id);
                                 Ok(())
                             })
                         },
@@ -4269,6 +4305,7 @@ mod inflight_ledger_tests {
             )
             .await;
             let (runtime, mut started_rx) = Wnd1ControlledRuntime::new();
+            runtime.observe_runner_admissions(race.clone(), cap);
             let actor =
                 wnd1_actor_for_tests(&db, &events_tx, &runtime, WND1_READY_TASK_COUNT as u32);
             let pool = actor.pool.clone();
@@ -4291,7 +4328,8 @@ mod inflight_ledger_tests {
                             .await
                             .expect("wnd1 fixture timed out waiting for controlled-pool start")
                             .expect("wnd1 controlled-pool start channel closed");
-                    settler_race.observe_start(&task_id, cap);
+                    // Admission evidence is recorded by the actual controlled
+                    // runner callback; the settler owns only overlay/session phases.
                     settler_race.wait_for_overlay(&task_id, cap).await;
                     let session_id =
                         materialize_wnd1_running_session(&settler_db, &settler_fixture, &task_id)
@@ -4301,13 +4339,11 @@ mod inflight_ledger_tests {
                         let (task_id, session_id) = active.remove(0);
                         complete_wnd1_session(&settler_db, &session_id).await;
                         settler_runtime.release(&task_id).await;
-                        settler_race.observe_release(&task_id);
                     }
                 }
                 for (task_id, session_id) in active {
                     complete_wnd1_session(&settler_db, &session_id).await;
                     settler_runtime.release(&task_id).await;
-                    settler_race.observe_release(&task_id);
                 }
             });
             let mut dispatchers = Vec::new();
@@ -4355,6 +4391,14 @@ mod inflight_ledger_tests {
                     .interrupt_running_for_task(task_id)
                     .await
                     .expect("settle wnd1 fixture task");
+                wait_for_pool_to_forget_task(&pool, task_id).await;
+                assert!(
+                    !pool
+                        .has_session(task_id)
+                        .await
+                        .expect("query settled wnd1 pool mapping"),
+                    "cap {cap}: pool retained fixture task {task_id} after teardown"
+                );
             }
             {
                 let mut actor = actor.lock().await;
