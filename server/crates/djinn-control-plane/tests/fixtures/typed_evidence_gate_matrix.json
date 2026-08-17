@@ -1,0 +1,409 @@
+{
+  "version": "typed_evidence_gate_matrix_v1",
+  "$comment": [
+    "Every row is executed against all five gated transitions through their real",
+    "production entry points, against a migrated database. The `expected` field is",
+    "the assertion, never the source of truth: the test asserts the persisted",
+    "proposal / signoff / epic row each transition would have written.",
+    "",
+    "`revision_offset` is how many spec revisions are committed AFTER the demand is",
+    "raised. A finding's `demanded_revision_seq` is provenance, not a filter, so a",
+    "demand must keep blocking as the head advances past it.",
+    "",
+    "`prose_only` rows additionally carry a Judge debate verdict whose prose asserts",
+    "the claim is settled. Prose is not a disposition, so it must not unblock."
+  ],
+  "transitions": [
+    "proposal_debate_append",
+    "proposal_refinement_resolve",
+    "proposal_signoff",
+    "proposal_verdict_override",
+    "proposal_graduate"
+  ],
+  "rows": [
+    {
+      "name": "demanded__rev_n_plus_0__structured",
+      "lifecycle": "demanded",
+      "evidence_outcome": null,
+      "revision_offset": 0,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "demanded__rev_n_plus_0__prose_only",
+      "lifecycle": "demanded",
+      "evidence_outcome": null,
+      "revision_offset": 0,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "demanded__rev_n_plus_1__structured",
+      "lifecycle": "demanded",
+      "evidence_outcome": null,
+      "revision_offset": 1,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "demanded__rev_n_plus_1__prose_only",
+      "lifecycle": "demanded",
+      "evidence_outcome": null,
+      "revision_offset": 1,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "demanded__rev_n_plus_2__structured",
+      "lifecycle": "demanded",
+      "evidence_outcome": null,
+      "revision_offset": 2,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "demanded__rev_n_plus_2__prose_only",
+      "lifecycle": "demanded",
+      "evidence_outcome": null,
+      "revision_offset": 2,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "spike_active__rev_n_plus_0__structured",
+      "lifecycle": "spike_active",
+      "evidence_outcome": null,
+      "revision_offset": 0,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "spike_active__rev_n_plus_0__prose_only",
+      "lifecycle": "spike_active",
+      "evidence_outcome": null,
+      "revision_offset": 0,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "spike_active__rev_n_plus_1__structured",
+      "lifecycle": "spike_active",
+      "evidence_outcome": null,
+      "revision_offset": 1,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "spike_active__rev_n_plus_1__prose_only",
+      "lifecycle": "spike_active",
+      "evidence_outcome": null,
+      "revision_offset": 1,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "spike_active__rev_n_plus_2__structured",
+      "lifecycle": "spike_active",
+      "evidence_outcome": null,
+      "revision_offset": 2,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "spike_active__rev_n_plus_2__prose_only",
+      "lifecycle": "spike_active",
+      "evidence_outcome": null,
+      "revision_offset": 2,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_resolved__rev_n_plus_0__structured",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "resolved",
+      "revision_offset": 0,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_resolved__rev_n_plus_0__prose_only",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "resolved",
+      "revision_offset": 0,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_resolved__rev_n_plus_1__structured",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "resolved",
+      "revision_offset": 1,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_resolved__rev_n_plus_1__prose_only",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "resolved",
+      "revision_offset": 1,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_resolved__rev_n_plus_2__structured",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "resolved",
+      "revision_offset": 2,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_resolved__rev_n_plus_2__prose_only",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "resolved",
+      "revision_offset": 2,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_partial__rev_n_plus_0__structured",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "partial",
+      "revision_offset": 0,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_partial__rev_n_plus_0__prose_only",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "partial",
+      "revision_offset": 0,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_partial__rev_n_plus_1__structured",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "partial",
+      "revision_offset": 1,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_partial__rev_n_plus_1__prose_only",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "partial",
+      "revision_offset": 1,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_partial__rev_n_plus_2__structured",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "partial",
+      "revision_offset": 2,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_partial__rev_n_plus_2__prose_only",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "partial",
+      "revision_offset": 2,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_unresolved__rev_n_plus_0__structured",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "unresolved",
+      "revision_offset": 0,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_unresolved__rev_n_plus_0__prose_only",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "unresolved",
+      "revision_offset": 0,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_unresolved__rev_n_plus_1__structured",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "unresolved",
+      "revision_offset": 1,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_unresolved__rev_n_plus_1__prose_only",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "unresolved",
+      "revision_offset": 1,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_unresolved__rev_n_plus_2__structured",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "unresolved",
+      "revision_offset": 2,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "evidence_received_unresolved__rev_n_plus_2__prose_only",
+      "lifecycle": "evidence_received",
+      "evidence_outcome": "unresolved",
+      "revision_offset": 2,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "failed__rev_n_plus_0__structured",
+      "lifecycle": "failed",
+      "evidence_outcome": null,
+      "revision_offset": 0,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "failed__rev_n_plus_0__prose_only",
+      "lifecycle": "failed",
+      "evidence_outcome": null,
+      "revision_offset": 0,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "failed__rev_n_plus_1__structured",
+      "lifecycle": "failed",
+      "evidence_outcome": null,
+      "revision_offset": 1,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "failed__rev_n_plus_1__prose_only",
+      "lifecycle": "failed",
+      "evidence_outcome": null,
+      "revision_offset": 1,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "failed__rev_n_plus_2__structured",
+      "lifecycle": "failed",
+      "evidence_outcome": null,
+      "revision_offset": 2,
+      "verdict_form": "structured",
+      "expected": "blocked"
+    },
+    {
+      "name": "failed__rev_n_plus_2__prose_only",
+      "lifecycle": "failed",
+      "evidence_outcome": null,
+      "revision_offset": 2,
+      "verdict_form": "prose_only",
+      "expected": "blocked"
+    },
+    {
+      "name": "resolved__rev_n_plus_0__structured",
+      "lifecycle": "resolved",
+      "evidence_outcome": null,
+      "revision_offset": 0,
+      "verdict_form": "structured",
+      "expected": "admitted"
+    },
+    {
+      "name": "resolved__rev_n_plus_0__prose_only",
+      "lifecycle": "resolved",
+      "evidence_outcome": null,
+      "revision_offset": 0,
+      "verdict_form": "prose_only",
+      "expected": "admitted"
+    },
+    {
+      "name": "resolved__rev_n_plus_1__structured",
+      "lifecycle": "resolved",
+      "evidence_outcome": null,
+      "revision_offset": 1,
+      "verdict_form": "structured",
+      "expected": "admitted"
+    },
+    {
+      "name": "resolved__rev_n_plus_1__prose_only",
+      "lifecycle": "resolved",
+      "evidence_outcome": null,
+      "revision_offset": 1,
+      "verdict_form": "prose_only",
+      "expected": "admitted"
+    },
+    {
+      "name": "resolved__rev_n_plus_2__structured",
+      "lifecycle": "resolved",
+      "evidence_outcome": null,
+      "revision_offset": 2,
+      "verdict_form": "structured",
+      "expected": "admitted"
+    },
+    {
+      "name": "resolved__rev_n_plus_2__prose_only",
+      "lifecycle": "resolved",
+      "evidence_outcome": null,
+      "revision_offset": 2,
+      "verdict_form": "prose_only",
+      "expected": "admitted"
+    },
+    {
+      "name": "withdrawn__rev_n_plus_0__structured",
+      "lifecycle": "withdrawn",
+      "evidence_outcome": null,
+      "revision_offset": 0,
+      "verdict_form": "structured",
+      "expected": "admitted"
+    },
+    {
+      "name": "withdrawn__rev_n_plus_0__prose_only",
+      "lifecycle": "withdrawn",
+      "evidence_outcome": null,
+      "revision_offset": 0,
+      "verdict_form": "prose_only",
+      "expected": "admitted"
+    },
+    {
+      "name": "withdrawn__rev_n_plus_1__structured",
+      "lifecycle": "withdrawn",
+      "evidence_outcome": null,
+      "revision_offset": 1,
+      "verdict_form": "structured",
+      "expected": "admitted"
+    },
+    {
+      "name": "withdrawn__rev_n_plus_1__prose_only",
+      "lifecycle": "withdrawn",
+      "evidence_outcome": null,
+      "revision_offset": 1,
+      "verdict_form": "prose_only",
+      "expected": "admitted"
+    },
+    {
+      "name": "withdrawn__rev_n_plus_2__structured",
+      "lifecycle": "withdrawn",
+      "evidence_outcome": null,
+      "revision_offset": 2,
+      "verdict_form": "structured",
+      "expected": "admitted"
+    },
+    {
+      "name": "withdrawn__rev_n_plus_2__prose_only",
+      "lifecycle": "withdrawn",
+      "evidence_outcome": null,
+      "revision_offset": 2,
+      "verdict_form": "prose_only",
+      "expected": "admitted"
+    }
+  ]
+}
