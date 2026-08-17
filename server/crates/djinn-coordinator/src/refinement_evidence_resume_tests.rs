@@ -2,27 +2,71 @@
 //! Typed-evidence ingress coverage deliberately crosses the production Slot
 //! activity boundary before exercising the coordinator's live and cold paths.
 
+use crate::refinement::RefinementPhase;
 use crate::refinement_dispatch::refinement_cap_tests::{
     build_refinement_actor, seed_refinement_fixture, spawn_test_pool,
 };
-use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_core::models::NeedsEvidenceClaim;
+use djinn_core::models::{DispatchPause, NeedsEvidenceClaim};
+use djinn_core::{
+    events::{DjinnEventEnvelope, EventBus},
+    refinement_liveness::RefinementParkKind,
+};
 use djinn_db::test_support::{
     CanonicalTypedEvidenceReturnOutcomeForTest, TypedEvidenceFindingSnapshotForTest,
     TypedEvidenceIngressFixtureForTest, TypedEvidenceValidationSnapshotForTest,
 };
 use djinn_db::{
-    EffectiveCreatorProvenance, ProposalRepository, TaskRepository, TypedEvidenceRepository,
+    AdmitRefinementRunRequest, DispatchPauseRepository, DispatchPauseTarget,
+    EffectiveCreatorProvenance, ParkRefinementRunRequest, ProposalRepository,
+    RefinementAdmissionOutcome, RefinementAdmissionSource, TaskRepository, TypedEvidenceRepository,
 };
 use djinn_slot::finalize_handlers::handle_submit_work;
 use tokio_util::sync::CancellationToken;
 
 struct Fixture {
     db: djinn_db::Database,
+    project_id: String,
     proposal_id: String,
     spike_task_id: String,
     finding_id: String,
     delivery: TypedEvidenceIngressFixtureForTest,
+}
+
+/// Persist the park that a cold coordinator must rehydrate before its typed
+/// evidence replay can advance the exact awaiting run into Advocate folding.
+async fn park_awaiting_evidence(f: &Fixture, idempotency_key: &str) -> String {
+    let proposals = ProposalRepository::new(f.db.clone(), EventBus::noop());
+    let (run_id, generation) = match proposals
+        .admit_refinement_run(AdmitRefinementRunRequest {
+            proposal_id: f.proposal_id.clone(),
+            idempotency_key: idempotency_key.to_owned(),
+            source: RefinementAdmissionSource::ExplicitStart {
+                actor: "commit-before-resume-test".to_owned(),
+            },
+            heartbeat_grace_millis: 60_000,
+        })
+        .await
+        .expect("admit durable awaiting-evidence run")
+    {
+        RefinementAdmissionOutcome::Admitted {
+            run_id, generation, ..
+        }
+        | RefinementAdmissionOutcome::Existing {
+            run_id, generation, ..
+        } => (run_id, generation),
+    };
+    assert!(
+        proposals
+            .park_refinement_run(ParkRefinementRunRequest {
+                run_id: run_id.clone(),
+                generation,
+                kind: RefinementParkKind::AwaitingEvidence,
+            })
+            .await
+            .expect("park exact durable run"),
+        "fixture must durably await evidence"
+    );
+    run_id
 }
 
 async fn fixture(outcome: CanonicalTypedEvidenceReturnOutcomeForTest) -> Fixture {
@@ -79,6 +123,7 @@ async fn fixture(outcome: CanonicalTypedEvidenceReturnOutcomeForTest) -> Fixture
         .expect("terminal producer task");
     Fixture {
         db,
+        project_id: refinement.project_id,
         proposal_id: refinement.proposal_id,
         spike_task_id,
         finding_id: delivery.finding_id.clone(),
@@ -292,6 +337,165 @@ async fn production_submit_live_and_cold_replay_have_complete_parity() {
         assert_eq!(cold.outcome, expected);
         assert_eq!(cold.finding_lifecycle, "evidence_received");
         assert_parity(&live, &cold);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commit_before_resume_fault_cold_recovery_reuses_receipt_and_folds_advocate_once() {
+    let f = fixture(CanonicalTypedEvidenceReturnOutcomeForTest::Resolved).await;
+    let run_id = park_awaiting_evidence(&f, "commit-before-resume-ungated").await;
+    let envelope = submitted_envelope(
+        &f,
+        serde_json::from_str(&f.delivery.return_payload).expect("canonical return payload"),
+    )
+    .await;
+    let raw = envelope.payload["payload"].to_string();
+    let (events, _) = tokio::sync::broadcast::channel(16);
+    let mut interrupted = build_refinement_actor(&f.db, &events, spawn_test_pool(&f.db, 2));
+
+    interrupted.interrupt_after_evidence_commit_before_resume_for_test(&f.spike_task_id);
+    let committed = interrupted
+        .ingest_raw_tribunal_evidence_return_v1(&f.spike_task_id, &raw)
+        .await
+        .expect("the fault occurs only after the durable receipt commits");
+    let committed_snapshot =
+        djinn_db::test_support::typed_evidence_validation_snapshot_for_finding_for_test(
+            &f.db,
+            &f.finding_id,
+        )
+        .await;
+    let raw_finding =
+        djinn_db::test_support::typed_evidence_finding_snapshot_for_test(&f.db, &f.finding_id)
+            .await;
+    assert!(!committed.replayed);
+    assert_eq!(raw_finding.lifecycle, "evidence_received");
+    assert_eq!(committed_snapshot.transition_count, 1);
+    let proposal = ProposalRepository::new(f.db.clone(), EventBus::noop())
+        .get(&f.proposal_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(proposal.linked_spike_task_id.is_none() && proposal.needs_evidence_claim.is_none());
+
+    // Drop the interrupted actor; only a fresh actor may perform this replay.
+    drop(interrupted);
+    let (cold_events, _) = tokio::sync::broadcast::channel(16);
+    let mut cold = build_refinement_actor(&f.db, &cold_events, spawn_test_pool(&f.db, 2));
+    cold.recover_interrupted_refinements().await;
+    assert_eq!(
+        cold.active_refinements[&run_id].phase,
+        RefinementPhase::AwaitingEvidence
+    );
+    let replay = cold.recover_terminal_linked_spike_evidence().await;
+    assert_eq!(replay.len(), 1);
+    assert!(replay[0].replayed);
+    assert_eq!(replay[0].validation_id, committed.validation_id);
+    assert_eq!(
+        cold.active_refinements[&run_id].phase,
+        RefinementPhase::AdvocateRevision
+    );
+    assert_eq!(
+        djinn_db::test_support::typed_evidence_validation_snapshot_for_finding_for_test(
+            &f.db,
+            &f.finding_id,
+        )
+        .await,
+        committed_snapshot
+    );
+    let duplicate = cold
+        .ingest_raw_tribunal_evidence_return_v1(&f.spike_task_id, &raw)
+        .await
+        .unwrap();
+    assert!(duplicate.replayed);
+    assert_eq!(duplicate.validation_id, committed.validation_id);
+    assert_eq!(
+        djinn_db::test_support::typed_evidence_validation_snapshot_for_finding_for_test(
+            &f.db,
+            &f.finding_id,
+        )
+        .await,
+        committed_snapshot,
+        "duplicate live delivery preserves the complete receipt snapshot"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commit_before_resume_recovery_honors_dispatch_pause_and_proposal_freeze() {
+    for gate in ["global_dispatch_pause", "proposal_freeze"] {
+        let f = fixture(CanonicalTypedEvidenceReturnOutcomeForTest::Resolved).await;
+        let run_id = park_awaiting_evidence(&f, gate).await;
+        let envelope = submitted_envelope(
+            &f,
+            serde_json::from_str(&f.delivery.return_payload).expect("canonical return payload"),
+        )
+        .await;
+        let raw = envelope.payload["payload"].to_string();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let mut interrupted = build_refinement_actor(&f.db, &events, spawn_test_pool(&f.db, 2));
+        interrupted.interrupt_after_evidence_commit_before_resume_for_test(&f.spike_task_id);
+        let committed = interrupted
+            .ingest_raw_tribunal_evidence_return_v1(&f.spike_task_id, &raw)
+            .await
+            .unwrap();
+        drop(interrupted);
+
+        let proposals = ProposalRepository::new(f.db.clone(), EventBus::noop());
+        if gate == "global_dispatch_pause" {
+            DispatchPauseRepository::new(f.db.clone(), EventBus::noop())
+                .pause(
+                    DispatchPauseTarget::Global,
+                    DispatchPause {
+                        paused_by: "commit-before-resume-test".into(),
+                        paused_at: ::time::OffsetDateTime::now_utc()
+                            .format(&::time::format_description::well_known::Rfc3339)
+                            .unwrap(),
+                        reason: "prove recovery gate".into(),
+                        expires_at: None,
+                    },
+                )
+                .await
+                .unwrap();
+        } else {
+            proposals.set_frozen(&f.proposal_id, true).await.unwrap();
+        }
+        let task_count = TaskRepository::new(f.db.clone(), EventBus::noop())
+            .list_by_project(&f.project_id)
+            .await
+            .unwrap()
+            .len();
+        let (cold_events, _) = tokio::sync::broadcast::channel(16);
+        let mut cold = build_refinement_actor(&f.db, &cold_events, spawn_test_pool(&f.db, 2));
+        cold.recover_interrupted_refinements().await;
+        let replay = cold.recover_terminal_linked_spike_evidence().await;
+        assert!(replay[0].replayed);
+        assert_eq!(replay[0].validation_id, committed.validation_id);
+        assert_eq!(
+            cold.active_refinements[&run_id].phase,
+            RefinementPhase::AdvocateRevision
+        );
+        assert!(
+            cold.refinement_sessions.is_empty(),
+            "{gate}: Advocate was not dispatched"
+        );
+        assert_eq!(
+            TaskRepository::new(f.db.clone(), EventBus::noop())
+                .list_by_project(&f.project_id)
+                .await
+                .unwrap()
+                .len(),
+            task_count,
+            "{gate}: no Advocate task was created"
+        );
+        let raw_finding =
+            djinn_db::test_support::typed_evidence_finding_snapshot_for_test(&f.db, &f.finding_id)
+                .await;
+        assert_eq!(raw_finding.lifecycle, "evidence_received", "{gate}");
+        assert_eq!(raw_finding.validation_count, 1, "{gate}");
+        let proposal = proposals.get(&f.proposal_id).await.unwrap().unwrap();
+        assert!(
+            proposal.linked_spike_task_id.is_none() && proposal.needs_evidence_claim.is_none(),
+            "{gate}: receipt retains compatibility cleanup"
+        );
     }
 }
 
