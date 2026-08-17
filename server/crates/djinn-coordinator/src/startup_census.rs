@@ -58,6 +58,28 @@ pub struct CensusTaskRun {
     pub witness: TaskRunWitness,
 }
 
+impl CensusTaskRun {
+    /// Whether this run's immutable evidence authorizes a destructive startup
+    /// mutation of the run itself or of anything linked to it.
+    ///
+    /// A durable `starting` row whose Job is authoritatively absent can still
+    /// be inside the commit-then-CREATE window, so authoritative absence alone
+    /// never authorizes destruction for it. Every startup stage shares this
+    /// single rule: Stage A's session interruption, Stage B's task-run reaping,
+    /// and (through [`TaskCensusProjection`]) Stage C's attempt classification
+    /// must not disagree about whether one identity is destructively gone.
+    pub fn destructive_mutation_authorized(&self) -> bool {
+        matches!(
+            (self.durable_state, self.witness),
+            (_, TaskRunWitness::Gone(GoneProvenance::TerminalPresent))
+                | (
+                    DurableRunState::Running,
+                    TaskRunWitness::Gone(GoneProvenance::AuthoritativelyAbsent)
+                )
+        )
+    }
+}
+
 /// Per-task reduction used by stages which classify attempts rather than a
 /// single run.  A starting row with authoritative absence can still be between
 /// committing its ledger row and CREATE, so it is fenced as `CreationTransit`.
