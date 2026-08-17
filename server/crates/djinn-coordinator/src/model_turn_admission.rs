@@ -945,7 +945,7 @@ mod tests {
                 &[capability(path.clone())],
                 &[a],
             )
-                .admitted
+            .admitted
         );
         assert_eq!(window().end_second(), 180);
         assert_eq!(
