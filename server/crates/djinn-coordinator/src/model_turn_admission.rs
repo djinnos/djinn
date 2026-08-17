@@ -11,7 +11,7 @@ use djinn_db::{
     ModelTurnPhaseCEvidenceOutcome, ModelTurnPhaseCEvidenceStage, ModelTurnPool,
 };
 use djinn_k8s::{WorkloadObjectKind, WorkloadRecord};
-use djinn_provider::{ProviderAttemptPlanV1, ProviderOutcomeV1};
+use djinn_provider::{ProviderAttemptPlanV1, ProviderOutcomeV1, catalog::CatalogService};
 use djinn_slot::model_turn_capability::{
     ModelTurnCapabilityCoverageV2, ModelTurnCapabilityReportV2,
 };
@@ -92,7 +92,7 @@ impl CoordinatorActor {
             .await
             .map_err(djinn_db::Error::InvalidData)?;
         let repository = ModelTurnAdmissionRepository::new(self.db.clone());
-        project_from_inventory(&repository, records, plans, reports).await
+        project_from_inventory(&repository, &self.catalog, records, plans, reports).await
     }
 }
 
@@ -202,11 +202,12 @@ pub async fn persist_provider_outcome_v1(
 
 async fn project_from_inventory(
     repository: &ModelTurnAdmissionRepository,
+    catalog: &CatalogService,
     records: Vec<WorkloadRecord>,
     plans: &[ProviderAttemptPlanV1],
     reports: &[ModelTurnCapabilityReportV2],
 ) -> djinn_db::Result<ExpectedAttemptPathProjectionV1> {
-    let routes = resolve_planned_routes(repository, plans).await?;
+    let routes = resolve_planned_routes(repository, catalog, plans).await?;
     let mut expected_paths = BTreeSet::new();
     for record in records.iter().filter(eligible_live_slot) {
         let Some(uid) = record
@@ -539,6 +540,7 @@ fn validate_attempt_chain(
 
 async fn resolve_planned_routes(
     repository: &ModelTurnAdmissionRepository,
+    catalog: &CatalogService,
     plans: &[ProviderAttemptPlanV1],
 ) -> djinn_db::Result<Vec<ModelTurnPool>> {
     let mut routes = Vec::new();
@@ -556,6 +558,15 @@ async fn resolve_planned_routes(
         else {
             continue;
         };
+        // Durable pool rows are identity, not a label authority. Require the
+        // exact resolved pair to be catalog-bounded before it can enter the
+        // coordinator-owned expected-path denominator.
+        if catalog
+            .find_model(&format!("{}/{}", pool.provider_id, pool.model_id))
+            .is_none()
+        {
+            continue;
+        }
         routes.push(pool);
     }
     routes.sort_by_key(|pool| pool.id);
@@ -628,9 +639,10 @@ mod tests {
     #[tokio::test]
     async fn denominator_comes_only_from_live_slots_and_resolved_routes() {
         let db = Database::ephemeral().await.expect("db");
-        let pool_id = seed(&db, "credential-a", "provider", "model").await;
+        let pool_id = seed(&db, "credential-a", "zai", "glm-5").await;
         let projection = project_from_inventory(
             &ModelTurnAdmissionRepository::new(db),
+            &CatalogService::new(),
             vec![
                 record(Some("ready-old"), Some("rev-1"), true, false),
                 record(Some("ready-new"), Some("rev-2"), true, false),
@@ -640,7 +652,7 @@ mod tests {
                 record(Some("missing-revision"), None, true, false),
             ],
             &[
-                plan("credential-a", "provider", "model"),
+                plan("credential-a", "zai", "glm-5"),
                 plan("fabricated", "attacker", "model"),
             ],
             &[],
@@ -660,15 +672,41 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn arbitrary_resolved_pool_labels_never_enter_the_denominator() {
+        let db = Database::ephemeral().await.expect("db");
+        seed(
+            &db,
+            "credential-arbitrary",
+            "arbitrary-provider",
+            "arbitrary-model",
+        )
+        .await;
+        let projection = project_from_inventory(
+            &ModelTurnAdmissionRepository::new(db),
+            &CatalogService::new(),
+            vec![record(Some("slot-a"), Some("rev-1"), true, false)],
+            &[plan(
+                "credential-arbitrary",
+                "arbitrary-provider",
+                "arbitrary-model",
+            )],
+            &[],
+        )
+        .await
+        .expect("projection");
+        assert!(projection.expected_paths.is_empty());
+    }
+
+    #[tokio::test]
     async fn reports_preserve_coverage_and_persist_complete_evidence_surface() {
         let db = Database::ephemeral().await.expect("db");
-        let pool_id = seed(&db, "credential-a", "provider", "model").await;
+        let pool_id = seed(&db, "credential-a", "zai", "glm-5").await;
         let repository = ModelTurnAdmissionRepository::new(db);
         let report = ModelTurnCapabilityReportV2 {
             slot_pod_uid: "slot-a".into(),
             deployment_revision: "rev-1".into(),
-            provider: "provider".into(),
-            model_scope: "model".into(),
+            provider: "zai".into(),
+            model_scope: "glm-5".into(),
             coverage: ModelTurnCapabilityCoverageV2::Covered,
         };
         let mut reports = vec![
@@ -700,8 +738,9 @@ mod tests {
         }
         let projection = project_from_inventory(
             &repository,
+            &CatalogService::new(),
             vec![record(Some("slot-a"), Some("rev-1"), true, false)],
-            &[plan("credential-a", "provider", "model")],
+            &[plan("credential-a", "zai", "glm-5")],
             &reports,
         )
         .await
@@ -758,10 +797,10 @@ mod tests {
             .expect("read evidence");
         assert_eq!(evidence.len(), 6);
         assert!(evidence.iter().any(|row| {
-            row.stage == "heartbeat" && row.outcome == "recorded" && row.provider_id == "provider"
+            row.stage == "heartbeat" && row.outcome == "recorded" && row.provider_id == "zai"
         }));
         assert!(evidence.iter().any(|row| {
-            row.stage == "heartbeat" && row.outcome == "missing" && row.model_id == "model"
+            row.stage == "heartbeat" && row.outcome == "missing" && row.model_id == "glm-5"
         }));
         assert!(
             evidence
@@ -785,21 +824,22 @@ mod tests {
     #[tokio::test]
     async fn one_exact_report_persists_evidence_for_every_resolved_credential_route() {
         let db = Database::ephemeral().await.expect("db");
-        let first_pool_id = seed(&db, "credential-a", "provider", "model").await;
-        let second_pool_id = seed(&db, "credential-b", "provider", "model").await;
+        let first_pool_id = seed(&db, "credential-a", "zai", "glm-5").await;
+        let second_pool_id = seed(&db, "credential-b", "zai", "glm-5").await;
         let repository = ModelTurnAdmissionRepository::new(db);
         let projection = project_from_inventory(
             &repository,
+            &CatalogService::new(),
             vec![record(Some("slot-a"), Some("rev-1"), true, false)],
             &[
-                plan("credential-a", "provider", "model"),
-                plan("credential-b", "provider", "model"),
+                plan("credential-a", "zai", "glm-5"),
+                plan("credential-b", "zai", "glm-5"),
             ],
             &[ModelTurnCapabilityReportV2 {
                 slot_pod_uid: "slot-a".into(),
                 deployment_revision: "rev-1".into(),
-                provider: "provider".into(),
-                model_scope: "model".into(),
+                provider: "zai".into(),
+                model_scope: "glm-5".into(),
                 coverage: ModelTurnCapabilityCoverageV2::Covered,
             }],
         )
@@ -911,6 +951,17 @@ mod tests {
             AlignedPhaseCWindowV1::new(9_223_372_036_854_775_800),
             Err(AlignedPhaseCWindowErrorV1::EndOverflow)
         );
+        let mut end = attempt(ExpectedAttemptPathV1::test_resolved_route(7));
+        end.admitted_at_second = 180;
+        assert!(
+            qualify_aligned_phase_c_window_v1(
+                window(),
+                &[ExpectedAttemptPathV1::test_resolved_route(7)],
+                &[capability(ExpectedAttemptPathV1::test_resolved_route(7))],
+                &[end]
+            )
+            .admitted
+        );
     }
     #[test]
     fn qualifier_rejects_silent_stale_replaced_and_partial_capability() {
@@ -939,7 +990,10 @@ mod tests {
             &qualify_aligned_phase_c_window_v1(
                 window(),
                 &[path],
-                &[capability(ExpectedAttemptPathV1::test_resolved_route(8))],
+                &[capability(ExpectedAttemptPathV1 {
+                    deployment_revision: "replacement-revision".into(),
+                    ..ExpectedAttemptPathV1::test_resolved_route(7)
+                })],
                 &[]
             ),
             PhaseCWindowDiagnosticCodeV1::UnexpectedCapability
@@ -973,6 +1027,9 @@ mod tests {
             "credential",
             "request-id",
             "lease-id",
+            "reporter-text",
+            "provider-catalog-bound",
+            "model-catalog-bound",
             "arbitrary-label",
         ] {
             assert!(!json.contains(value), "leaked {value}");
@@ -988,5 +1045,29 @@ mod tests {
             qualify_aligned_phase_c_window_v1(window(), &[path.clone()], &[capability(path)], &[a]);
         assert!(has(&r, PhaseCWindowDiagnosticCodeV1::MissingStageOutcome));
         assert!(has(&r, PhaseCWindowDiagnosticCodeV1::MissingStage));
+    }
+
+    #[test]
+    fn qualifier_rejects_unknown_paths_reversed_stages_and_exact_end_stages() {
+        let path = ExpectedAttemptPathV1::test_resolved_route(7);
+        let unknown = attempt(ExpectedAttemptPathV1::test_resolved_route(8));
+        let mut reversed = attempt(path.clone());
+        reversed.stages[2].timestamp_second = 122;
+        let mut end = attempt(path.clone());
+        end.stages[4].timestamp_second = 180;
+        let r = qualify_aligned_phase_c_window_v1(
+            window(),
+            &[path.clone()],
+            &[capability(path)],
+            &[unknown, reversed, end],
+        );
+        for code in [
+            PhaseCWindowDiagnosticCodeV1::UnknownAttemptPath,
+            PhaseCWindowDiagnosticCodeV1::ReversedStages,
+            PhaseCWindowDiagnosticCodeV1::StageOutsideWindow,
+        ] {
+            assert!(has(&r, code), "{code:?}");
+        }
+        assert!(!r.admitted);
     }
 }
