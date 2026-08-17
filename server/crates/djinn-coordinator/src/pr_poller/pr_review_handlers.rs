@@ -424,6 +424,35 @@ impl CoordinatorActor {
         review: Option<&str>,
         merge_queue: &str,
     ) {
+        self.apply_pr_merge_with_reason(
+            task_id,
+            pr_url,
+            merge_commit_sha,
+            review,
+            merge_queue,
+            None,
+        )
+        .await;
+    }
+
+    /// [`Self::apply_pr_merge`] with an explicit audit reason on the `pr_merge`
+    /// transition.
+    ///
+    /// The normal poller paths pass `None` — a merge observed by the loop that
+    /// owns the task needs no explanation. The reconciliation pass passes its
+    /// `RECONCILE_MERGE_REASON` so a task closed outside the normal path still
+    /// says why in its audit trail, even when it was already in
+    /// `pr_draft`/`pr_review` and therefore needed no `user_override` routing
+    /// step to carry that reason.
+    pub(crate) async fn apply_pr_merge_with_reason(
+        &self,
+        task_id: &str,
+        pr_url: &str,
+        merge_commit_sha: Option<&str>,
+        review: Option<&str>,
+        merge_queue: &str,
+        reason: Option<&str>,
+    ) {
         self.record_pr_outcome_facts(pr_url, review, Some(merge_queue), None)
             .await;
         if let Some(sha) = merge_commit_sha.filter(|s| !s.is_empty()) {
@@ -452,7 +481,7 @@ impl CoordinatorActor {
             Some("PR merged and task completed"),
         )
         .await;
-        self.apply_pr_transition(task_id, TransitionAction::PrMerge, None)
+        self.apply_pr_transition(task_id, TransitionAction::PrMerge, reason)
             .await;
     }
 

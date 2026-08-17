@@ -164,16 +164,25 @@ impl TaskRepository {
             .await?)
     }
 
-    /// List tasks the PR poller's status-scoped loops never observe but which
-    /// still carry a live PR reference: a non-empty `pr_url`, a non-terminal
-    /// status, and a status the poller does NOT own (`pr_draft` / `pr_review`
-    /// are polled directly and must be excluded so their loops keep sole
-    /// ownership). This is the poller's blind spot (`open`, `in_progress`,
-    /// `needs_task_review`, `needs_lead_intervention`, ...): a PR can merge —
-    /// or its head CI can change — while the task sits in one of these states
-    /// with nothing reconciling it. The reconciliation pass iterates this set.
-    /// The result is intentionally small (only non-terminal tasks that ever
-    /// opened a PR), so a single unfiltered scan per slow tick is cheap.
+    /// List every non-terminal task that still carries a live PR reference: a
+    /// non-empty `pr_url` and a status other than `closed`. The merged-PR
+    /// reconciliation pass iterates this set. The result is intentionally small
+    /// (only non-terminal tasks that ever opened a PR), so a single unfiltered
+    /// scan per slow tick is cheap.
+    ///
+    /// This deliberately does **not** exclude the poller-owned statuses
+    /// `pr_draft` / `pr_review`. It used to, on the theory that their own poll
+    /// loops kept sole ownership — which put the hole in the safety net exactly
+    /// where the primary mechanism operates. Tasks `4vnt` (PR #3153, 5 days)
+    /// and `3kza` (PR #3155) both stranded in `pr_draft` with a merged PR
+    /// because the `pr_draft` loop `continue`d past its own merge check on an
+    /// active tripwire hold, and nothing else was allowed to look. A task that
+    /// never terminalizes never releases its dependents, so the cost of the
+    /// exclusion was a silently-stalled dependency chain.
+    ///
+    /// Covering these statuses is safe because terminalization is idempotent:
+    /// `closed` is excluded here and the reconciler re-reads the task row
+    /// immediately before transitioning it.
     pub async fn list_reconcilable_pr_tasks(&self) -> Result<Vec<Task>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, Task>(
@@ -211,7 +220,7 @@ impl TaskRepository {
                     CAST(0 AS BIGINT) AS unresolved_blocker_count
              FROM tasks
              WHERE pr_url IS NOT NULL AND pr_url <> ''
-               AND status NOT IN ('closed', 'pr_draft', 'pr_review')
+               AND status <> 'closed'
              ORDER BY priority, created_at"#,
         )
         .fetch_all(self.db.pool())

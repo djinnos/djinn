@@ -6725,8 +6725,7 @@ async fn the_quiescence_report_counts_the_leaders_live_provider_futures() {
 ///     `["true", "false"]` assertion fails — and a merged PR would record
 ///     `passed`, or a passing one `merged`.
 /// (e) Move the merged-branch call after `apply_pr_merge`, or out of the
-///     `pr.merged == Some(true)` branch entirely: the first range assertion
-///     fails.
+///     `PrTerminalState::Merged` arm entirely: the first range assertion fails.
 /// (f) Move the passing-branch call out of the `CiStatus::Passing` arm: the
 ///     second range assertion fails.
 /// (g) Shadow the lane-routing method with a local `fn` of the same name in
@@ -6766,8 +6765,12 @@ fn the_pr_poller_closes_ci_routes_on_both_merge_and_pass() {
     );
 
     // ── Each call site sits in the branch that needs it ─────────────────────
+    //
+    // The merged branch is the `Merged` arm of the terminal-state match that
+    // now runs BEFORE the tripwire active-hold gate (the `4vnt`/`3kza` fix); a
+    // merged PR is ground truth and no Djinn-side gate may precede it.
     let merged_branch = code
-        .find("if pr.merged == Some(true) {")
+        .find("merged_reconcile::PrTerminalState::Merged => {")
         .expect("the merged branch is in pr_watcher.rs");
     let apply_merge = code
         .find("self.apply_pr_merge(")
