@@ -2,10 +2,10 @@
 //! Typed-evidence ingress coverage deliberately crosses the production Slot
 //! activity boundary before exercising the coordinator's live and cold paths.
 
+use crate::refinement::RefinementPhase;
 use crate::refinement_dispatch::refinement_cap_tests::{
     build_refinement_actor, seed_refinement_fixture, spawn_test_pool,
 };
-use crate::{actor::CoordinatorActor, refinement::RefinementPhase};
 use djinn_core::models::{DispatchPause, NeedsEvidenceClaim};
 use djinn_core::{
     events::{DjinnEventEnvelope, EventBus},
@@ -344,11 +344,16 @@ async fn production_submit_live_and_cold_replay_have_complete_parity() {
 async fn commit_before_resume_fault_cold_recovery_reuses_receipt_and_folds_advocate_once() {
     let f = fixture(CanonicalTypedEvidenceReturnOutcomeForTest::Resolved).await;
     let run_id = park_awaiting_evidence(&f, "commit-before-resume-ungated").await;
-    let raw = f.delivery.return_payload.clone();
+    let envelope = submitted_envelope(
+        &f,
+        serde_json::from_str(&f.delivery.return_payload).expect("canonical return payload"),
+    )
+    .await;
+    let raw = envelope.payload["payload"].to_string();
     let (events, _) = tokio::sync::broadcast::channel(16);
     let mut interrupted = build_refinement_actor(&f.db, &events, spawn_test_pool(&f.db, 2));
 
-    CoordinatorActor::interrupt_after_evidence_commit_before_resume_for_test(&f.spike_task_id);
+    interrupted.interrupt_after_evidence_commit_before_resume_for_test(&f.spike_task_id);
     let committed = interrupted
         .ingest_raw_tribunal_evidence_return_v1(&f.spike_task_id, &raw)
         .await
@@ -419,10 +424,15 @@ async fn commit_before_resume_recovery_honors_dispatch_pause_and_proposal_freeze
     for gate in ["global_dispatch_pause", "proposal_freeze"] {
         let f = fixture(CanonicalTypedEvidenceReturnOutcomeForTest::Resolved).await;
         let run_id = park_awaiting_evidence(&f, gate).await;
-        let raw = f.delivery.return_payload.clone();
+        let envelope = submitted_envelope(
+            &f,
+            serde_json::from_str(&f.delivery.return_payload).expect("canonical return payload"),
+        )
+        .await;
+        let raw = envelope.payload["payload"].to_string();
         let (events, _) = tokio::sync::broadcast::channel(16);
         let mut interrupted = build_refinement_actor(&f.db, &events, spawn_test_pool(&f.db, 2));
-        CoordinatorActor::interrupt_after_evidence_commit_before_resume_for_test(&f.spike_task_id);
+        interrupted.interrupt_after_evidence_commit_before_resume_for_test(&f.spike_task_id);
         let committed = interrupted
             .ingest_raw_tribunal_evidence_return_v1(&f.spike_task_id, &raw)
             .await
