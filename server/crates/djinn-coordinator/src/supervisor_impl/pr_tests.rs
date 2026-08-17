@@ -1895,6 +1895,368 @@ async fn retained_legacy_cleanup_reaches_inline_and_stale_provider_boundaries() 
     }
 }
 
+/// Fresh repository fixtures prevent one maintenance route's parking from
+/// de-selecting the fixture for another route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pr_maintenance_surfaces_independently_preserve_attempt_ownership() {
+    let _guard = RETAINED_LEGACY_LIFECYCLE_GUARD.lock().await;
+    use crate::{
+        direct_delivery::{BoundaryOperation, clear_boundary_operations, take_boundary_operations},
+        health,
+        pr_poller::{
+            installation::set_installation_client_base_url_for_test, pr_cleanup::CloseKind,
+        },
+    };
+    use djinn_core::events::EventBus;
+    use djinn_db::{
+        ActivateProposalBuildAttemptInput, Database, DirectDeliveryCapabilityRepository,
+        EpicRepository, PersistAttemptPrIdentityInput, ProposalBuildAttemptRepository,
+        ReserveProposalBuildAttemptInput, TaskRepository,
+    };
+    use djinn_provider::github_app::installations::prime_cache_for_tests;
+    use tokio_util::sync::CancellationToken;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path, query_param},
+    };
+    const INSTALLATION: u64 = 42_426;
+    const URL: &str = "https://github.com/acme/widget/pull/76";
+    const ATTEMPT_URL: &str = "https://example.test/attempt-pr/316";
+    #[derive(Clone, Copy, Debug)]
+    enum Surface {
+        Status,
+        Review,
+        Blindspot,
+        Inline,
+        Stale,
+    }
+    impl Surface {
+        fn name(self) -> &'static str {
+            match self {
+                Self::Status => "poll_pr_statuses",
+                Self::Review => "poll_pr_review_tasks",
+                Self::Blindspot => "reconcile_blindspot_merged_prs",
+                Self::Inline => "cleanup_pr_and_branch_on_close",
+                Self::Stale => "health::sweep_stale_resources",
+            }
+        }
+        fn status(self) -> &'static str {
+            match self {
+                Self::Status => "pr_draft",
+                Self::Review => "pr_review",
+                Self::Blindspot | Self::Inline | Self::Stale => "approved",
+            }
+        }
+    }
+    #[derive(Clone, Copy, Debug)]
+    enum Fixture {
+        Direct,
+        Unresolved,
+        Missing,
+        Unknown,
+    }
+    impl Fixture {
+        fn name(self) -> &'static str {
+            match self {
+                Self::Direct => "active-direct",
+                Self::Unresolved => "unresolved-owner",
+                Self::Missing => "missing-contract",
+                Self::Unknown => "unknown-contract",
+            }
+        }
+        fn reason(self) -> Option<&'static str> {
+            match self {
+                Self::Direct => None,
+                Self::Unresolved => Some("no_proposal_owner"),
+                Self::Missing => Some("direct_delivery_contract_missing_epoch"),
+                Self::Unknown => Some("direct_delivery_contract_unknown_epoch"),
+            }
+        }
+    }
+    fn without_park(task: &djinn_core::models::Task) -> serde_json::Value {
+        let mut v = serde_json::to_value(task).unwrap();
+        let o = v.as_object_mut().unwrap();
+        o.remove("status");
+        o.remove("updated_at");
+        v
+    }
+    for surface in [
+        Surface::Status,
+        Surface::Review,
+        Surface::Blindspot,
+        Surface::Inline,
+        Surface::Stale,
+    ] {
+        for fixture in [
+            Fixture::Direct,
+            Fixture::Unresolved,
+            Fixture::Missing,
+            Fixture::Unknown,
+        ] {
+            let db = Database::open_in_memory().unwrap();
+            let events = EventBus::noop();
+            let epic = EpicRepository::new(db.clone(), events.clone())
+                .create("independent ownership", "", "", "", "", None)
+                .await
+                .unwrap();
+            let tasks = TaskRepository::new(db.clone(), events);
+            let task = tasks
+                .create(
+                    &epic.id,
+                    &format!("{}-{}", surface.name(), fixture.name()),
+                    "",
+                    "",
+                    "task",
+                    0,
+                    "worker",
+                    Some(surface.status()),
+                )
+                .await
+                .unwrap();
+            let task = tasks.set_pr_url(&task.id, URL).await.unwrap();
+            djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
+            if matches!(fixture, Fixture::Direct) {
+                djinn_db::test_support::seed_direct_delivery_proposal_owner_for_test(
+                    &db, &epic.id, "p", "p",
+                )
+                .await;
+            } else {
+                djinn_db::test_support::seed_direct_delivery_proposal_for_test(&db, "p", "p").await;
+            }
+            let attempts = ProposalBuildAttemptRepository::new(db.clone());
+            attempts
+                .reserve(&ReserveProposalBuildAttemptInput {
+                    proposal_id: "p".into(),
+                    proposal_short_id: "p".into(),
+                    build_attempt_id: "a".into(),
+                    build_attempt_short_id: "a".into(),
+                    observed_base_sha: "base".into(),
+                })
+                .await
+                .unwrap();
+            attempts
+                .activate(&ActivateProposalBuildAttemptInput {
+                    build_attempt_id: "a".into(),
+                    expected_lifecycle: djinn_core::models::ProposalBuildAttemptLifecycle::Reserved,
+                    expected_branch_head_sha: None,
+                    branch_head_sha: "base".into(),
+                })
+                .await
+                .unwrap();
+            attempts
+                .persist_pr_identity(&PersistAttemptPrIdentityInput {
+                    build_attempt_id: "a".into(),
+                    proposal_pr_number: 316,
+                    proposal_pr_url: ATTEMPT_URL.into(),
+                })
+                .await
+                .unwrap();
+            let before_task = tasks.get(&task.id).await.unwrap().unwrap();
+            let before_attempt = attempts.get("a").await.unwrap().unwrap();
+            let before_ledger = tasks
+                .latest_delivery_for_attempt("a", &task.id)
+                .await
+                .unwrap();
+            let before_counts =
+                djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await;
+            assert_eq!(
+                (
+                    before_counts.build_attempts,
+                    before_counts.attempt_pr_identities,
+                    before_counts.deliveries
+                ),
+                (Some(1), Some(1), Some(0))
+            );
+            match fixture {
+                Fixture::Missing => {
+                    djinn_db::test_support::remove_direct_delivery_epoch_for_test(&db).await
+                }
+                Fixture::Unknown => {
+                    djinn_db::test_support::seed_unknown_direct_delivery_epoch_for_test(&db).await
+                }
+                Fixture::Direct | Fixture::Unresolved => {}
+            }
+            // Observe the selected fixture contract immediately before its
+            // single production entry-point call.
+            let before_epoch = DirectDeliveryCapabilityRepository::new(db.clone())
+                .probe()
+                .await
+                .map_err(|e| e.to_string());
+            let server = MockServer::start().await;
+            // This is the functioning provider's attempt-PR failure seam: any accidental request fails the fixture.
+            Mock::given(method("POST"))
+                .and(path("/repos/acme/widget/pulls"))
+                .respond_with(ResponseTemplate::new(500).set_body_string("ProviderFailure"))
+                .expect(0)
+                .mount(&server)
+                .await;
+            if matches!(surface, Surface::Stale) {
+                let branch = format!("task/{}", task.short_id);
+                let open = serde_json::json!({"number":76,"title":"open","state":"open","merged":false,"html_url":URL,"user":{"login":"djinn-bot[bot]","id":1},"head":{"ref":branch,"sha":"head"},"base":{"ref":"main","sha":"base"},"node_id":"PR_task"});
+                Mock::given(method("GET"))
+                    .and(path("/repos/acme/widget/pulls"))
+                    .and(query_param("state", "open"))
+                    .and(query_param("per_page", "100"))
+                    .and(query_param("page", "1"))
+                    .respond_with(
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!([open])),
+                    )
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            djinn_db::test_support::persist_project_github_installation_for_test(
+                &db,
+                &task.project_id,
+                "acme",
+                "widget",
+                INSTALLATION,
+            )
+            .await;
+            prime_cache_for_tests(INSTALLATION, "ghs_independent_ownership_fixture");
+            unsafe { std::env::set_var("GITHUB_APP_ID", "1") };
+            set_installation_client_base_url_for_test(Some(server.uri()));
+            clear_boundary_operations();
+            match surface {
+                Surface::Status => {
+                    let (tx, _) = tokio::sync::broadcast::channel(8);
+                    let (mut a, c) =
+                        crate::test_helpers::make_coordinator_actor_cancellable(&db, &tx);
+                    a.poll_pr_statuses().await;
+                    c.cancel();
+                }
+                Surface::Review => {
+                    let (tx, _) = tokio::sync::broadcast::channel(8);
+                    let (mut a, c) =
+                        crate::test_helpers::make_coordinator_actor_cancellable(&db, &tx);
+                    a.poll_pr_review_tasks().await;
+                    c.cancel();
+                }
+                Surface::Blindspot => {
+                    let (tx, _) = tokio::sync::broadcast::channel(8);
+                    let (a, c) = crate::test_helpers::make_coordinator_actor_cancellable(&db, &tx);
+                    a.reconcile_blindspot_merged_prs().await;
+                    c.cancel();
+                }
+                Surface::Inline => {
+                    let (tx, _) = tokio::sync::broadcast::channel(8);
+                    let (a, c) = crate::test_helpers::make_coordinator_actor_cancellable(&db, &tx);
+                    a.cleanup_pr_and_branch_on_close(
+                        &tasks.get(&task.id).await.unwrap().unwrap(),
+                        CloseKind::NonMerge,
+                    )
+                    .await;
+                    c.cancel();
+                }
+                Surface::Stale => {
+                    let mut ctx = crate::test_helpers::coordinator_context_from_db(
+                        db.clone(),
+                        CancellationToken::new(),
+                    );
+                    ctx.reconciliation_sweep.enabled = true;
+                    ctx.reconciliation_sweep.dry_run = false;
+                    ctx.reconciliation_sweep.grace_period = std::time::Duration::ZERO;
+                    health::sweep_stale_resources(&db, &ctx).await;
+                }
+            }
+            let operations = take_boundary_operations();
+            let after_task = tasks.get(&task.id).await.unwrap().unwrap();
+            assert_eq!(
+                DirectDeliveryCapabilityRepository::new(db.clone())
+                    .probe()
+                    .await
+                    .map_err(|e| e.to_string()),
+                before_epoch,
+                "{} {} changed epoch",
+                surface.name(),
+                fixture.name()
+            );
+            if matches!(fixture, Fixture::Missing | Fixture::Unknown) {
+                djinn_db::test_support::restore_active_direct_delivery_epoch_for_test(&db).await;
+            }
+            let after_attempt = attempts.get("a").await.unwrap().unwrap();
+            let after_ledger = tasks
+                .latest_delivery_for_attempt("a", &task.id)
+                .await
+                .unwrap();
+            let after_counts =
+                djinn_db::test_support::direct_delivery_matrix_counts_for_test(&db).await;
+            assert_eq!(
+                after_attempt,
+                before_attempt,
+                "{} {} changed attempt",
+                surface.name(),
+                fixture.name()
+            );
+            assert_eq!(after_ledger, before_ledger);
+            assert_eq!(after_counts, before_counts);
+            assert_eq!(
+                (
+                    after_attempt.proposal_pr_number,
+                    after_attempt.proposal_pr_url.as_deref()
+                ),
+                (Some(316), Some(ATTEMPT_URL))
+            );
+            assert_eq!(after_task.pr_url, before_task.pr_url);
+            for forbidden in [
+                BoundaryOperation::TaskPrLookup,
+                BoundaryOperation::TaskPrAdopt,
+                BoundaryOperation::TaskPrStatusPoll,
+                BoundaryOperation::TaskPrReviewPoll,
+                BoundaryOperation::TaskPrMergedPoll,
+                BoundaryOperation::TaskPrInlineCleanup,
+                BoundaryOperation::TaskPrCreate,
+                BoundaryOperation::TaskPrMerge,
+                BoundaryOperation::TaskPrAutoMerge,
+                BoundaryOperation::TaskPrApproval,
+                BoundaryOperation::TaskPrSignoff,
+                BoundaryOperation::TaskPrCustomEnqueue,
+                BoundaryOperation::AttemptPrCreateOrAdoptRequest,
+                BoundaryOperation::DirectAppend,
+            ] {
+                assert!(
+                    !operations.contains(&forbidden),
+                    "{} {} reached {forbidden:?}: {operations:?}",
+                    surface.name(),
+                    fixture.name()
+                );
+            }
+            if matches!(surface, Surface::Stale) {
+                assert!(
+                    operations.contains(&BoundaryOperation::TaskPrStaleCleanup),
+                    "the stale fixture must reach per-task eligibility after its open-PR response"
+                );
+            } else {
+                assert!(
+                    !operations.contains(&BoundaryOperation::TaskPrStaleCleanup),
+                    "{} unexpectedly reached stale task-PR cleanup",
+                    surface.name()
+                );
+            }
+            if let Some(reason) = fixture.reason() {
+                assert_eq!(after_task.status, "needs_lead_intervention");
+                assert_eq!(without_park(&after_task), without_park(&before_task));
+                assert!(
+                    tasks
+                        .list_activity(&task.id)
+                        .await
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .payload
+                        .contains(reason)
+                );
+            } else {
+                assert_eq!(
+                    serde_json::to_value(&after_task).unwrap(),
+                    serde_json::to_value(&before_task).unwrap()
+                );
+            }
+            set_installation_client_base_url_for_test(None);
+        }
+    }
+}
+
 /// END-TO-END REGRESSION for tasks `4vnt` (PR #3153) and `3kza` (PR #3155).
 ///
 /// Drives the **real** `poll_pr_draft_tasks` — production entry point, real
