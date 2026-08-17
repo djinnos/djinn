@@ -376,8 +376,8 @@ async fn startup_stage_a_identity_matrix() {
             .await
             .expect("list durable matrix task runs")
             .len(),
-        10,
-        "Stage A must preserve all linked ledger rows"
+        11,
+        "Stage A must preserve the seed run and all ten matrix ledger rows"
     );
     assert_eq!(
         TaskAttemptRepository::new(db)
