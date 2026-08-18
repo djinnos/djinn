@@ -453,6 +453,177 @@ pub struct ModelTurnPhaseCEvidence {
     pub recorded_at: String,
 }
 
+// ── Phase D: the persisted A→B→C→D compatibility phase and its guard ───────
+
+/// The persisted deployment compatibility phase of one pool.
+///
+/// This is deliberately **not** [`ModelTurnAdmissionPhase`], which is the
+/// per-pool admission *mode* (`off|shadow|draining|enforce`). A pool carries
+/// both: the mode says what admission does right now, the compatibility phase
+/// says how far the A→B→C→D rollout has been proven for that pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelTurnCompatibilityPhase {
+    A,
+    B,
+    C,
+    D,
+}
+
+impl ModelTurnCompatibilityPhase {
+    /// The persisted spelling. The column is `VARCHAR(1)` with a CHECK.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::A => "a",
+            Self::B => "b",
+            Self::C => "c",
+            Self::D => "d",
+        }
+    }
+
+    /// The single phase this one may advance to, or `None` at the end.
+    #[must_use]
+    pub const fn next(self) -> Option<Self> {
+        match self {
+            Self::A => Some(Self::B),
+            Self::B => Some(Self::C),
+            Self::C => Some(Self::D),
+            Self::D => None,
+        }
+    }
+}
+
+fn parse_compatibility_phase(value: &str) -> Result<ModelTurnCompatibilityPhase> {
+    match value {
+        "a" => Ok(ModelTurnCompatibilityPhase::A),
+        "b" => Ok(ModelTurnCompatibilityPhase::B),
+        "c" => Ok(ModelTurnCompatibilityPhase::C),
+        "d" => Ok(ModelTurnCompatibilityPhase::D),
+        other => Err(crate::Error::InvalidData(format!(
+            "unknown model-turn compatibility phase `{other}`"
+        ))),
+    }
+}
+
+/// Every prerequisite a requested compatibility phase must satisfy.
+///
+/// The variant list *is* the closed key set of the persisted
+/// `predicate_results` object; migration 211 enforces the same set with a
+/// CHECK constraint, so the two cannot drift apart without a storage error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelTurnPhasePredicate {
+    /// The durable admission schema marker is installed at the version this
+    /// binary understands.
+    SchemaMarker,
+    /// Every fresh capability report for the pool carries exactly the pool's
+    /// own B1 route labels, and at least one such report exists.
+    CapabilityReports,
+    /// The requesting coordinator incarnation still holds a live, non-draining
+    /// leadership lease at or after the fence's floor.
+    LeadershipGeneration,
+    /// Every attempt observed in the freshness window has a complete stage
+    /// chain with no missing edge. An empty history fails closed.
+    ObservationHistory,
+    /// The set of routes reporting fresh coverage equals the caller's live
+    /// expected-path set exactly, and is non-empty.
+    ExpectedPathCoverage,
+    /// The pool's durable identity state is `eligible`.
+    IdentityEligibility,
+}
+
+impl ModelTurnPhasePredicate {
+    /// The closed allow-list, in persisted key order.
+    pub const ALL: [Self; 6] = [
+        Self::SchemaMarker,
+        Self::CapabilityReports,
+        Self::LeadershipGeneration,
+        Self::ObservationHistory,
+        Self::ExpectedPathCoverage,
+        Self::IdentityEligibility,
+    ];
+
+    /// The persisted JSON key. Bounded vocabulary; never an identifier.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::SchemaMarker => "schema_marker",
+            Self::CapabilityReports => "capability_reports",
+            Self::LeadershipGeneration => "leadership_generation",
+            Self::ObservationHistory => "observation_history",
+            Self::ExpectedPathCoverage => "expected_path_coverage",
+            Self::IdentityEligibility => "identity_eligibility",
+        }
+    }
+}
+
+/// The freshness bound every ageing predicate is measured against.
+pub const MODEL_TURN_PHASE_PREDICATE_FRESHNESS_SECONDS: i64 = 60;
+
+/// One live expected attempt path, as the coordinator's own inventory sees it.
+///
+/// It is a slot identity plus a deployment revision — deliberately no request,
+/// lease, credential, account, project, or user identifier.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ModelTurnExpectedPathKey {
+    pub slot_pod_uid: String,
+    pub deployment_revision: String,
+}
+
+/// A request to make one compatibility phase effective for one pool.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelTurnPhaseTransitionRequest {
+    pub pool_id: i64,
+    pub requested_phase: ModelTurnCompatibilityPhase,
+    /// The requesting leader's controller generation, persisted verbatim.
+    pub controller_generation: i64,
+    /// The durable leadership fence the guard re-checks inside its own
+    /// transaction, so a superseded generation cannot make a phase effective.
+    pub fence: ModelTurnControllerFence,
+    /// RFC 3339 instant every freshness bound is measured from. It is supplied
+    /// rather than read from a local clock so a fake-time caller and a
+    /// production caller evaluate the identical predicate.
+    pub evaluated_at: String,
+    /// The live expected attempt paths for this pool. Empty fails closed.
+    pub expected_paths: Vec<ModelTurnExpectedPathKey>,
+}
+
+/// The persisted, closed-shape predicate verdict.
+pub type ModelTurnPhasePredicateResults = BTreeMap<String, bool>;
+
+/// What one guarded phase request actually did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelTurnPhaseTransitionOutcome {
+    /// Every predicate held. Exactly one ledger row was written and
+    /// `compatibility_phase` advanced by exactly one step.
+    Advanced {
+        effective_phase: ModelTurnCompatibilityPhase,
+        predicate_results: ModelTurnPhasePredicateResults,
+    },
+    /// At least one predicate failed. One ledger row was written naming the
+    /// failures; the effective phase is unchanged.
+    Denied {
+        effective_phase: ModelTurnCompatibilityPhase,
+        failed: Vec<ModelTurnPhasePredicate>,
+        predicate_results: ModelTurnPhasePredicateResults,
+    },
+    /// The pool already stands at the requested phase. No row is written, so
+    /// re-issuing an accepted request is idempotent.
+    AlreadyEffective {
+        effective_phase: ModelTurnCompatibilityPhase,
+    },
+    /// The request would skip a prerequisite phase (or move backwards). No
+    /// predicate is evaluated and **no row is written**: a phase cannot become
+    /// effective without its predecessor having become effective first.
+    NotAdjacent {
+        effective_phase: ModelTurnCompatibilityPhase,
+        requested_phase: ModelTurnCompatibilityPhase,
+    },
+    /// No such pool row.
+    PoolUnavailable,
+}
+
 /// Durable repository surface for the additive v1 schema.
 #[derive(Clone)]
 pub struct ModelTurnAdmissionRepository {
@@ -804,6 +975,344 @@ impl ModelTurnAdmissionRepository {
         .await?;
         tx.commit().await?;
         Ok(drained.into_iter().map(|(id,)| id).collect())
+    }
+
+    /// Evaluate every A→B→C→D prerequisite and, only if all of them hold,
+    /// make the requested compatibility phase effective — all in one
+    /// serializable transaction.
+    ///
+    /// The pool row is taken `FOR UPDATE` first, the same canonical lock order
+    /// [`Self::acquire_turn`] uses, so a concurrent acquisition serializes
+    /// behind the decision rather than racing it.
+    ///
+    /// Ordering is the contract:
+    ///
+    /// 1. A request for a phase that is not the immediate successor of the
+    ///    effective one is refused **before any predicate is evaluated and
+    ///    without writing a row**. A phase cannot skip its prerequisite.
+    /// 2. A request for the phase already in effect is a no-op, so an accepted
+    ///    request re-issued is idempotent.
+    /// 3. Otherwise all six predicates are evaluated and exactly one ledger row
+    ///    records the full verdict. The effective phase advances only when
+    ///    every predicate held; a denial leaves it exactly where it was.
+    ///
+    /// Every predicate is a storage fact read inside this transaction. None of
+    /// them is a caller-supplied assertion: the only caller input the guard
+    /// trusts is the live expected-path set, which is the coordinator's own
+    /// inventory and is used as a *denominator* that coverage must match
+    /// exactly — it can only make the guard stricter, never laxer.
+    pub async fn request_phase_transition_in_transaction(
+        &self,
+        request: ModelTurnPhaseTransitionRequest,
+    ) -> Result<ModelTurnPhaseTransitionOutcome> {
+        self.db.ensure_initialized().await?;
+        if request.pool_id <= 0
+            || request.controller_generation <= 0
+            || request.evaluated_at.trim().is_empty()
+            || request.fence.incarnation_id.trim().is_empty()
+            || request.fence.live_since_at.trim().is_empty()
+        {
+            return Err(crate::Error::InvalidData(
+                "invalid model-turn phase transition request".to_owned(),
+            ));
+        }
+        for attempt in 0..3 {
+            match self.request_phase_transition_once(&request).await {
+                Err(error) if attempt < 2 && is_serialization_failure(&error) => continue,
+                result => return result,
+            }
+        }
+        unreachable!("the bounded retry loop returns on its final iteration")
+    }
+
+    async fn request_phase_transition_once(
+        &self,
+        request: &ModelTurnPhaseTransitionRequest,
+    ) -> Result<ModelTurnPhaseTransitionOutcome> {
+        let mut tx = self.db.pool().begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut *tx)
+            .await?;
+        let pool: Option<(String, String, String, String)> = sqlx::query_as(
+            "SELECT compatibility_phase, identity_state, provider_id, model_id \
+             FROM model_turn_pools WHERE id = $1 FOR UPDATE",
+        )
+        .bind(request.pool_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((phase, identity_state, provider_id, model_id)) = pool else {
+            tx.commit().await?;
+            return Ok(ModelTurnPhaseTransitionOutcome::PoolUnavailable);
+        };
+        let effective_phase = parse_compatibility_phase(&phase)?;
+        if effective_phase == request.requested_phase {
+            tx.commit().await?;
+            return Ok(ModelTurnPhaseTransitionOutcome::AlreadyEffective { effective_phase });
+        }
+        if effective_phase.next() != Some(request.requested_phase) {
+            tx.commit().await?;
+            return Ok(ModelTurnPhaseTransitionOutcome::NotAdjacent {
+                effective_phase,
+                requested_phase: request.requested_phase,
+            });
+        }
+
+        // ── Predicate 1: the durable schema marker this binary understands ──
+        let marker: Option<i64> = sqlx::query_scalar(
+            "SELECT version FROM model_turn_admission_schema \
+             WHERE marker = 'model_turn_admission_schema'",
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        let schema_marker = marker == Some(MODEL_TURN_ADMISSION_SCHEMA_VERSION);
+
+        // ── Predicate 2: B1 route labels agree with every fresh B2 report ──
+        let (route_matched, fresh_reports): (i64, i64) = sqlx::query_as(
+            "SELECT count(*) FILTER (WHERE provider_id = $3 AND model_id = $4), count(*) \
+             FROM model_turn_capability_heartbeats \
+             WHERE pool_id = $1 \
+               AND heartbeat_at >= $2::timestamptz - make_interval(secs => $5::double precision)",
+        )
+        .bind(request.pool_id)
+        .bind(&request.evaluated_at)
+        .bind(&provider_id)
+        .bind(&model_id)
+        .bind(MODEL_TURN_PHASE_PREDICATE_FRESHNESS_SECONDS as f64)
+        .fetch_one(&mut *tx)
+        .await?;
+        let capability_reports = fresh_reports > 0 && route_matched == fresh_reports;
+
+        // ── Predicate 3: this incarnation still holds the fenced lease ──────
+        let leading: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM coordinator_incarnations \
+             WHERE id = $1 AND draining_at IS NULL AND last_renewed_at >= $2",
+        )
+        .bind(&request.fence.incarnation_id)
+        .bind(&request.fence.live_since_at)
+        .fetch_one(&mut *tx)
+        .await?;
+        let leadership_generation = leading == 1;
+
+        // ── Predicate 4: every observed attempt chain is complete ──────────
+        //
+        // Five distinct stages and no `missing` edge. An empty history is not
+        // a complete history: with nothing observed there is nothing to
+        // qualify, so the predicate fails closed rather than vacuously passing.
+        let (attempts, complete_attempts): (i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(*) FILTER (WHERE stages = 5 AND missing = 0) FROM ( \
+                 SELECT attempt_fingerprint, count(DISTINCT stage) AS stages, \
+                        count(*) FILTER (WHERE outcome = 'missing') AS missing \
+                 FROM model_turn_phase_c_evidence \
+                 WHERE pool_id = $1 \
+                   AND recorded_at >= $2::timestamptz \
+                                      - make_interval(secs => $3::double precision) \
+                 GROUP BY attempt_fingerprint \
+             ) chains",
+        )
+        .bind(request.pool_id)
+        .bind(&request.evaluated_at)
+        .bind(MODEL_TURN_PHASE_PREDICATE_FRESHNESS_SECONDS as f64)
+        .fetch_one(&mut *tx)
+        .await?;
+        let observation_history = attempts > 0 && complete_attempts == attempts;
+
+        // ── Predicate 5: fresh coverage equals the live expected denominator ─
+        //
+        // Exact set equality, not containment. A path the coordinator expects
+        // but nothing covers denies, and coverage reported by a path the
+        // coordinator does not expect denies too — an unexpected reporter is
+        // exactly as much a coverage fault as a silent one.
+        let covered_rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT slot_pod_uid, deployment_revision FROM model_turn_capability_heartbeats \
+             WHERE pool_id = $1 \
+               AND heartbeat_at >= $2::timestamptz - make_interval(secs => $3::double precision)",
+        )
+        .bind(request.pool_id)
+        .bind(&request.evaluated_at)
+        .bind(MODEL_TURN_PHASE_PREDICATE_FRESHNESS_SECONDS as f64)
+        .fetch_all(&mut *tx)
+        .await?;
+        let covered: std::collections::BTreeSet<ModelTurnExpectedPathKey> = covered_rows
+            .into_iter()
+            .map(
+                |(slot_pod_uid, deployment_revision)| ModelTurnExpectedPathKey {
+                    slot_pod_uid,
+                    deployment_revision,
+                },
+            )
+            .collect();
+        let expected: std::collections::BTreeSet<ModelTurnExpectedPathKey> =
+            request.expected_paths.iter().cloned().collect();
+        let expected_path_coverage = !expected.is_empty() && covered == expected;
+
+        // ── Predicate 6: durable per-pool identity eligibility ─────────────
+        let identity_eligibility =
+            parse_identity(&identity_state)? == ModelTurnIdentityState::Eligible;
+
+        let verdicts = [
+            (ModelTurnPhasePredicate::SchemaMarker, schema_marker),
+            (
+                ModelTurnPhasePredicate::CapabilityReports,
+                capability_reports,
+            ),
+            (
+                ModelTurnPhasePredicate::LeadershipGeneration,
+                leadership_generation,
+            ),
+            (
+                ModelTurnPhasePredicate::ObservationHistory,
+                observation_history,
+            ),
+            (
+                ModelTurnPhasePredicate::ExpectedPathCoverage,
+                expected_path_coverage,
+            ),
+            (
+                ModelTurnPhasePredicate::IdentityEligibility,
+                identity_eligibility,
+            ),
+        ];
+        debug_assert_eq!(verdicts.len(), ModelTurnPhasePredicate::ALL.len());
+        let predicate_results: ModelTurnPhasePredicateResults = verdicts
+            .iter()
+            .map(|(predicate, held)| (predicate.key().to_owned(), *held))
+            .collect();
+        let failed: Vec<ModelTurnPhasePredicate> = verdicts
+            .iter()
+            .filter(|(_, held)| !*held)
+            .map(|(predicate, _)| *predicate)
+            .collect();
+        // One decision drives both the ledger's `effective_phase` column and
+        // the column update, so the row can never claim a phase the pool did
+        // not actually reach.
+        let advance_to = failed.is_empty().then_some(request.requested_phase);
+        let effective_after = advance_to.unwrap_or(effective_phase);
+        let encoded = serde_json::to_string(&predicate_results)
+            .map_err(|error| crate::Error::InvalidData(error.to_string()))?;
+        sqlx::query(
+            "INSERT INTO model_turn_pool_phase_transitions \
+             (pool_id, requested_phase, effective_phase, decided_at, predicate_results, \
+              controller_generation) \
+             VALUES ($1, $2, $3, $4::timestamptz, $5::jsonb, $6)",
+        )
+        .bind(request.pool_id)
+        .bind(request.requested_phase.code())
+        .bind(effective_after.code())
+        .bind(&request.evaluated_at)
+        .bind(&encoded)
+        .bind(request.controller_generation)
+        .execute(&mut *tx)
+        .await?;
+        if let Some(target) = advance_to {
+            // Guarded by the phase this transaction actually read, so the
+            // advance is exactly one step from that observation or nothing.
+            let advanced = sqlx::query(
+                "UPDATE model_turn_pools SET compatibility_phase = $2, updated_at = now() \
+                 WHERE id = $1 AND compatibility_phase = $3",
+            )
+            .bind(request.pool_id)
+            .bind(target.code())
+            .bind(effective_phase.code())
+            .execute(&mut *tx)
+            .await?;
+            if advanced.rows_affected() != 1 {
+                return Err(crate::Error::InvalidData(
+                    "model-turn compatibility phase moved under the guard".to_owned(),
+                ));
+            }
+            tx.commit().await?;
+            return Ok(ModelTurnPhaseTransitionOutcome::Advanced {
+                effective_phase: target,
+                predicate_results,
+            });
+        }
+        tx.commit().await?;
+        Ok(ModelTurnPhaseTransitionOutcome::Denied {
+            effective_phase,
+            failed,
+            predicate_results,
+        })
+    }
+
+    /// Read one pool's persisted compatibility phase.
+    pub async fn compatibility_phase(
+        &self,
+        pool_id: i64,
+    ) -> Result<Option<ModelTurnCompatibilityPhase>> {
+        self.db.ensure_initialized().await?;
+        let phase: Option<String> =
+            sqlx::query_scalar("SELECT compatibility_phase FROM model_turn_pools WHERE id = $1")
+                .bind(pool_id)
+                .fetch_optional(self.db.pool())
+                .await?;
+        phase
+            .map(|phase| parse_compatibility_phase(&phase))
+            .transpose()
+    }
+
+    /// Read the append-only phase-decision ledger for one pool, oldest first.
+    pub async fn phase_transitions(
+        &self,
+        pool_id: i64,
+        limit: i64,
+    ) -> Result<
+        Vec<(
+            ModelTurnCompatibilityPhase,
+            ModelTurnCompatibilityPhase,
+            i64,
+            ModelTurnPhasePredicateResults,
+        )>,
+    > {
+        self.db.ensure_initialized().await?;
+        let rows: Vec<(String, String, i64, String)> = sqlx::query_as(
+            "SELECT requested_phase, effective_phase, controller_generation, \
+                    predicate_results::text \
+             FROM model_turn_pool_phase_transitions WHERE pool_id = $1 \
+             ORDER BY decided_at ASC, id ASC LIMIT $2",
+        )
+        .bind(pool_id)
+        .bind(limit.clamp(1, 256))
+        .fetch_all(self.db.pool())
+        .await?;
+        rows.into_iter()
+            .map(|(requested, effective, generation, results)| {
+                Ok((
+                    parse_compatibility_phase(&requested)?,
+                    parse_compatibility_phase(&effective)?,
+                    generation,
+                    serde_json::from_str(&results)
+                        .map_err(|error| crate::Error::InvalidData(error.to_string()))?,
+                ))
+            })
+            .collect()
+    }
+
+    /// Write one ledger row verbatim so a storage-boundary regression can model
+    /// what a downlevel or corrupted writer would attempt. Raw mutation stays
+    /// in DB test support; the closed-shape CHECK is what must reject it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn insert_raw_phase_transition_for_test(
+        &self,
+        pool_id: i64,
+        requested_phase: &str,
+        effective_phase: &str,
+        predicate_results_json: &str,
+        controller_generation: i64,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "INSERT INTO model_turn_pool_phase_transitions \
+             (pool_id, requested_phase, effective_phase, predicate_results, controller_generation) \
+             VALUES ($1, $2, $3, $4::jsonb, $5)",
+        )
+        .bind(pool_id)
+        .bind(requested_phase)
+        .bind(effective_phase)
+        .bind(predicate_results_json)
+        .bind(controller_generation)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
     }
 
     /// Read one persisted typed summary for cross-crate storage regressions.
