@@ -13,10 +13,12 @@ use djinn_core::models::{
     TaskDeliveryIdentity, TaskIntegrated, TransitionAction,
 };
 use djinn_db::{
-    Database, DeliveryFinalizeInput, DeliveryMappedHeadRetryInput, DeliveryPrepareInput,
-    DeliveryReworkInput, DeliveryTransitionResult, DirectDeliveryCapabilityRepository,
-    DirectDeliverySchemaCapability, ProposalBuildAttemptRepository, ResolveTaskActiveAttemptResult,
-    TaskIntegrationResult, TaskIntegrationStaleness, TaskRepository,
+    AcquireDeliveryLeaseInput, AcquireDeliveryLeaseResult, Database, DeliveryFinalizeInput,
+    DeliveryMappedHeadRetryInput, DeliveryPrepareInput, DeliveryReworkInput,
+    DeliveryTransitionResult, DirectDeliveryActivationRepository,
+    DirectDeliveryCapabilityRepository, DirectDeliverySchemaCapability,
+    ProposalBuildAttemptRepository, ResolveTaskActiveAttemptResult, TaskIntegrationResult,
+    TaskIntegrationStaleness, TaskRepository,
 };
 use djinn_git::{
     DirectDeliveryBuild, DirectDeliveryInput, DirectDeliverySignature,
@@ -30,6 +32,40 @@ use djinn_workspace::MirrorManager;
 /// direct section, the `merged` classification) routes on this same label, so
 /// one definition keeps the coordinator and the SQL from drifting apart.
 pub use djinn_db::LEGACY_DELIVERY_LABEL;
+
+/// The direct-delivery epoch whose append/reconciliation orchestration this
+/// module implements, reported to the activation capability census.
+///
+/// `direct_delivery_activation_matrix` enumerates the production half of this
+/// file and requires [`ORCHESTRATOR_CONTRACT_ENTRY_POINTS`] to still be defined
+/// here, so the declaration cannot outlive the orchestrator it names.
+pub const DIRECT_DELIVERY_ORCHESTRATOR_CONTRACT: &str = "direct_delivery_v1";
+
+/// The orchestration entry points the `orchestrator` capability asserts exist.
+pub const ORCHESTRATOR_CONTRACT_ENTRY_POINTS: [&str; 3] = [
+    "deliver_task_branch",
+    "DirectDeliveryEngine",
+    "RepositoryDeliveryLedger",
+];
+
+/// The direct-delivery epoch whose consumer cutover this crate implements.
+pub const DIRECT_DELIVERY_CONSUMER_CUTOVER_CONTRACT: &str = "direct_delivery_v1";
+
+/// The shared gates every cut-over consumer routes through. The `consumer`
+/// capability asserts these are still the gates, and the matrix enumerates this
+/// file's production half to keep that assertion honest.
+pub const CONSUMER_CUTOVER_CONTRACT_GATES: [&str; 3] = [
+    "admit_direct_delivery",
+    "task_pr_eligibility",
+    "task_pr_handling_is_eligible",
+];
+
+/// How long a delivery lease is held before another owner may take it over.
+///
+/// It bounds how long a crashed owner can block its own generation, and it is
+/// what the activation fence waits out when a legacy-generation lease is still
+/// live.
+pub const DELIVERY_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// Effect boundaries reached by the epoch-aware delivery routing path.
 ///
@@ -690,8 +726,10 @@ impl CandidateBuilder for GitCandidateBuilder {
 /// Public-db-only production ledger adapter.
 pub struct RepositoryDeliveryLedger {
     capability: DirectDeliveryCapabilityRepository,
+    leases: DirectDeliveryActivationRepository,
     attempts: ProposalBuildAttemptRepository,
     tasks: TaskRepository,
+    owner_incarnation_id: String,
 }
 impl RepositoryDeliveryLedger {
     pub fn new(
@@ -700,11 +738,99 @@ impl RepositoryDeliveryLedger {
         tasks: TaskRepository,
     ) -> Self {
         Self {
-            capability: DirectDeliveryCapabilityRepository::new(db),
+            capability: DirectDeliveryCapabilityRepository::new(db.clone()),
+            leases: DirectDeliveryActivationRepository::new(db),
             attempts,
             tasks,
+            owner_incarnation_id: process_incarnation_id().to_owned(),
         }
     }
+
+    /// Present a distinct lease-owner identity. Production always uses the
+    /// process identity; a second owner exists only where two processes really
+    /// do contend for the same generation.
+    #[must_use]
+    pub fn with_owner_incarnation(mut self, owner_incarnation_id: impl Into<String>) -> Self {
+        self.owner_incarnation_id = owner_incarnation_id.into();
+        self
+    }
+
+    /// Take (or renew) the `direct_delivery_leases` row fencing this exact
+    /// generation before the remote ref is touched.
+    ///
+    /// Returns `false` when a *different* live owner already holds it, or when
+    /// a later activation has fenced this owner's probed epoch generation out.
+    /// Both are refusals to mutate rather than parks: the generation stays
+    /// exactly where it is and the next pass re-derives it.
+    async fn hold_delivery_lease(&self, identity: &TaskDeliveryIdentity) -> Result<bool> {
+        let DirectDeliverySchemaCapability::SupportedActive { epoch } =
+            self.capability.probe().await?
+        else {
+            return Ok(false);
+        };
+        let expires_at = (time::OffsetDateTime::now_utc()
+            + time::Duration::seconds(
+                i64::try_from(DELIVERY_LEASE_TTL.as_secs()).unwrap_or(i64::MAX),
+            ))
+        .format(&time::format_description::well_known::Rfc3339)?;
+        match self
+            .leases
+            .acquire_delivery_lease(&AcquireDeliveryLeaseInput {
+                lease_id: uuid::Uuid::now_v7().to_string(),
+                identity: identity.clone(),
+                owner_incarnation_id: self.owner_incarnation_id.clone(),
+                epoch_generation: epoch.generation,
+                expires_at,
+            })
+            .await?
+        {
+            AcquireDeliveryLeaseResult::Acquired(_) | AcquireDeliveryLeaseResult::Replayed(_) => {
+                Ok(true)
+            }
+            AcquireDeliveryLeaseResult::Held { current } => {
+                tracing::warn!(
+                    build_attempt_id = %identity.build_attempt_id,
+                    task_id = %identity.task_id,
+                    delivery_generation = identity.delivery_generation,
+                    holder = %current.owner_incarnation_id,
+                    "direct delivery generation is leased by another live owner; not mutating"
+                );
+                Ok(false)
+            }
+            AcquireDeliveryLeaseResult::StaleGeneration {
+                requested,
+                persisted,
+            } => {
+                tracing::warn!(
+                    build_attempt_id = %identity.build_attempt_id,
+                    task_id = %identity.task_id,
+                    requested,
+                    persisted,
+                    "direct delivery lease refused at a stale epoch generation"
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    /// Release the fence once the generation is terminal. A failed release is
+    /// never fatal: the lease expires on its own.
+    async fn release_delivery_lease(&self, identity: &TaskDeliveryIdentity) {
+        if let Err(error) = self
+            .leases
+            .release_delivery_lease(identity, &self.owner_incarnation_id)
+            .await
+        {
+            tracing::warn!(%error, "failed to release a direct-delivery lease; it will expire");
+        }
+    }
+}
+
+/// One stable lease-owner identity per process, so every ledger built in this
+/// process replays its own live lease instead of contending with itself.
+fn process_incarnation_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| uuid::Uuid::now_v7().to_string())
 }
 fn transition_result(result: DeliveryTransitionResult) -> LedgerResult {
     match result {
@@ -792,6 +918,12 @@ impl DeliveryLedger for RepositoryDeliveryLedger {
         identity: &TaskDeliveryIdentity,
         transition: &str,
     ) -> Result<LedgerResult> {
+        // The applying transition is the last durable fact before the remote
+        // compare-and-set, so it is where the generation gets fenced. A lease
+        // this owner cannot hold declines the transition rather than pushing.
+        if !self.hold_delivery_lease(identity).await? {
+            return Ok(LedgerResult::Stale);
+        }
         Ok(transition_result(
             self.tasks
                 .begin_delivery_apply(&DeliveryFinalizeInput {
@@ -808,7 +940,7 @@ impl DeliveryLedger for RepositoryDeliveryLedger {
         transition: &str,
         reason: &str,
     ) -> Result<LedgerResult> {
-        Ok(transition_result(
+        let result = transition_result(
             self.tasks
                 .finalize_delivery_conflict(&DeliveryFinalizeInput {
                     identity: identity.clone(),
@@ -816,21 +948,22 @@ impl DeliveryLedger for RepositoryDeliveryLedger {
                     conflict_reason: Some(reason.into()),
                 })
                 .await?,
-        ))
+        );
+        // A conflict generation is immutable and terminal, so its fence has no
+        // further mutation to protect.
+        if result != LedgerResult::Stale {
+            self.release_delivery_lease(identity).await;
+        }
+        Ok(result)
     }
     async fn integrate(&self, integrated: TaskIntegrated) -> Result<LedgerResult> {
-        Ok(match self.tasks.task_integrated(&integrated).await? {
-            TaskIntegrationResult::Integrated(_) => LedgerResult::Applied,
-            TaskIntegrationResult::Replayed(_) => LedgerResult::Replayed,
-            // The ledger already knows which decline can converge; carry that
-            // fact rather than re-deriving it from nullable row snapshots.
-            TaskIntegrationResult::Stale { staleness, .. } => {
-                match PermanentStaleness::from_ledger(staleness) {
-                    Some(permanent) => LedgerResult::PermanentlyStale(permanent),
-                    None => LedgerResult::Stale,
-                }
-            }
-        })
+        let identity = integrated.identity.clone();
+        let result = self.integrate_generation(integrated).await?;
+        // Applied and replayed are both terminal for this generation.
+        if matches!(result, LedgerResult::Applied | LedgerResult::Replayed) {
+            self.release_delivery_lease(&identity).await;
+        }
+        Ok(result)
     }
     async fn is_mapped_first_parent(&self, attempt: &ActiveAttempt, sha: &str) -> Result<bool> {
         Ok(attempt.branch_head_sha == sha
@@ -879,6 +1012,23 @@ impl DeliveryLedger for RepositoryDeliveryLedger {
             )
             .await?;
         Ok(())
+    }
+}
+
+impl RepositoryDeliveryLedger {
+    async fn integrate_generation(&self, integrated: TaskIntegrated) -> Result<LedgerResult> {
+        Ok(match self.tasks.task_integrated(&integrated).await? {
+            TaskIntegrationResult::Integrated(_) => LedgerResult::Applied,
+            TaskIntegrationResult::Replayed(_) => LedgerResult::Replayed,
+            // The ledger already knows which decline can converge; carry that
+            // fact rather than re-deriving it from nullable row snapshots.
+            TaskIntegrationResult::Stale { staleness, .. } => {
+                match PermanentStaleness::from_ledger(staleness) {
+                    Some(permanent) => LedgerResult::PermanentlyStale(permanent),
+                    None => LedgerResult::Stale,
+                }
+            }
+        })
     }
 }
 

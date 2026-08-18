@@ -1155,6 +1155,30 @@ impl CoordinatorActor {
         }
     }
 
+    /// Advertise this incarnation's direct-delivery capabilities and, when an
+    /// operator has requested it, run the C4 activation transaction.
+    ///
+    /// The incarnation id handed to the fence is the *same* one registered in
+    /// `coordinator_incarnations`, because that table is the census population:
+    /// a process that is live for the reaper must be a process the fence counts.
+    async fn run_direct_delivery_activation_pass(&self) {
+        let outcome = crate::direct_delivery_activation::run_direct_delivery_activation_pass(
+            &self.db,
+            crate::events::event_bus_for(&self.events_tx),
+            &self.coordinator_incarnation_id,
+        )
+        .await;
+        if let crate::direct_delivery_activation::ActivationPassOutcome::Activated { generation } =
+            outcome
+        {
+            tracing::warn!(
+                generation,
+                incarnation_id = %self.coordinator_incarnation_id,
+                "CoordinatorActor: direct_delivery_v1 epoch activated"
+            );
+        }
+    }
+
     /// Register this runtime's immutable incarnation lease during startup.
     async fn register_coordinator_incarnation(&self) {
         if let Err(error) = djinn_db::CoordinatorIncarnationRepository::new(self.db.clone())
@@ -1463,6 +1487,16 @@ impl CoordinatorActor {
         // qualifier verdict it consumes, and it is the only production writer
         // that can move a pool to `enforce` or drain one on coverage loss.
         poll_stack::boxed(|| self.run_model_turn_enforcement_pass()).await;
+        // C4 direct-delivery activation fence (proposal `dser`, task `pdq1`).
+        // This is the production caller of the capability advertisement and of
+        // the single activation transaction. It runs only inside the actor that
+        // exists after `run_with_leadership` won the advisory lock, it always
+        // advertises so the census can complete, and it activates only when an
+        // operator has explicitly asked *and* every prerequisite holds. Deleting
+        // this line leaves `direct_delivery_process_capabilities` with no
+        // production writer, which is what
+        // `direct_delivery_activation_matrix` refuses.
+        poll_stack::boxed(|| self.run_direct_delivery_activation_pass()).await;
 
         poll_stack::boxed(|| {
             self.mismatch_scan

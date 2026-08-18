@@ -46,6 +46,25 @@ use std::time::Duration;
 use reqwest::Client;
 use tokio::sync::RwLock;
 
+/// The direct-delivery epoch whose ref contract this compiled client
+/// implements. The activation capability census refuses to advertise
+/// `provider` for a binary whose value here is not the epoch being activated,
+/// so a client built before the C1 ref contract can never be counted.
+pub const DIRECT_DELIVERY_REF_CONTRACT: &str = "direct_delivery_v1";
+
+/// The exact provider operations the C1 ref contract is made of.
+///
+/// These are names rather than a comment because
+/// `direct_delivery_activation_matrix` enumerates the production half of
+/// `github_api/contents.rs` and requires each one to still be defined there.
+/// Deleting an operation therefore reddens the capability declaration instead
+/// of leaving it advertising something the binary no longer does.
+pub const DIRECT_DELIVERY_REF_OPERATIONS: [&str; 3] = [
+    "observe_exact_ref",
+    "create_ref_expected_absent",
+    "update_ref_expected_old_sha",
+];
+
 pub use error::{GitHubApiError, GitHubErrorSource};
 pub use refresh::{DbBackedRefresher, NoRefresh, UserTokenRefresh};
 pub use transport::UserTokenExpired;
