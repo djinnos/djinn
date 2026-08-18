@@ -1,0 +1,52 @@
+{
+  // The CI-gated typecheck of the test tree.
+  //
+  // Why this file exists: `pnpm tsc --noEmit` (root `tsconfig.json`, gated at
+  // `.github/workflows/quality-gate.yml`) EXCLUDES every `*.test.ts(x)`. A
+  // type-level assertion in a test file — a drift guard whose whole failure
+  // mode is a compile error and not a runtime one — therefore proved nothing
+  // at all. `pnpm test:typecheck` (`tsconfig.test.json`) does compile the test
+  // tree, but nothing in CI ran it, so the gap was invisible.
+  //
+  // Why it is not simply `tsconfig.test.json`: that config reports 81 errors
+  // across the 21 files listed under `exclude` below. Gating on it would
+  // produce a permanently red job, which is worse than no job. So this config
+  // gates everything ELSE, which is clean, and — because `include` is the whole
+  // of `src` — every NEW test file is covered by default. A future inert
+  // type-level guard is caught the day it is written.
+  //
+  // The excluded list is the debt, written down. Fix a file's errors, delete
+  // its line here, and the gate widens. Do not add a line to make a new failure
+  // go away.
+  //
+  // Measured on 2026-08-18: `pnpm test:typecheck` => 81 errors / 21 files;
+  // `pnpm test:typecheck:gate` => 0 errors.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["vitest/globals"]
+  },
+  "include": ["src"],
+  "exclude": [
+    "src/App.test.tsx",
+    "src/api/analytics.test.ts",
+    "src/api/galaxyArtifact.test.ts",
+    "src/components/KanbanBoard.test.tsx",
+    "src/components/SessionThread.test.tsx",
+    "src/components/Sidebar.test.tsx",
+    "src/components/UserConfigDialog.test.tsx",
+    "src/components/proposals/ProposalDebateTrail.test.tsx",
+    "src/components/proposals/ProposalHistory.test.tsx",
+    "src/components/proposals/ProposalRefinement.test.tsx",
+    "src/components/proposals/ReadinessPanel.test.tsx",
+    "src/components/proposals/blocks/blocks.test.ts",
+    "src/components/settings/AiPolicyTab.test.tsx",
+    "src/components/settings/OrgDefaultLanesSection.test.tsx",
+    "src/components/usage/UsageBreakdownsTab.test.tsx",
+    "src/components/usage/UsageModelsTab.test.tsx",
+    "src/components/usage/UsageProjectModelMatrixTab.test.tsx",
+    "src/hooks/useEventSource.test.ts",
+    "src/lib/codeGraphAdapter.test.ts",
+    "src/pages/ProposalsPage.test.tsx",
+    "src/stores/settingsStore.test.ts"
+  ]
+}
