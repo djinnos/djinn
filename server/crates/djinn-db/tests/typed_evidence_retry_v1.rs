@@ -74,6 +74,21 @@ async fn typed_evidence_retry_v1() {
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/typed_evidence_retry_v1.json")).unwrap();
     assert_eq!(fixture["version"], "typed_evidence_retry_v1");
+    // Ledger of the scenarios the fixture declares. Each is pushed at the exact
+    // assertion that proves it, and the two sets are compared at the end, so a
+    // renamed, added or dropped scenario in the fixture reddens this test.
+    let declared_scenarios: Vec<String> = fixture["scenarios"]
+        .as_array()
+        .expect("fixture declares the retry scenario set")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("each scenario is a string")
+                .to_owned()
+        })
+        .collect();
+    let mut proven_scenarios: Vec<&'static str> = Vec::new();
     let db = Database::open_in_memory().unwrap();
     db.ensure_initialized().await.unwrap();
     let project = uuid::Uuid::now_v7().to_string();
@@ -169,8 +184,10 @@ async fn typed_evidence_retry_v1() {
     assert!(
         TypedEvidenceRepository::allocate_retry_in_transaction(&mut tx, input())
             .await
-            .is_err()
+            .is_err(),
+        "an attempt whose spike task is still open occupies the retry slot"
     );
+    proven_scenarios.push("occupied_slot");
     sqlx::query("UPDATE tasks SET status='closed' WHERE id=$1")
         .bind(&old_task)
         .execute(&mut *tx)
@@ -188,7 +205,8 @@ async fn typed_evidence_retry_v1() {
     assert!(
         TypedEvidenceRepository::allocate_retry_in_transaction(&mut tx, stale_input)
             .await
-            .is_err()
+            .is_err(),
+        "a retry keyed to a failed transition that is not the latest is refused"
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -200,15 +218,18 @@ async fn typed_evidence_retry_v1() {
         .unwrap(),
         1
     );
+    proven_scenarios.push("stale_failure");
     let allocation = TypedEvidenceRepository::allocate_retry_in_transaction(&mut tx, input())
         .await
         .unwrap();
     assert_eq!(allocation.sequence, 2);
     assert_eq!(allocation.planned_checks.len(), 1);
+    proven_scenarios.push("failed_attempt_1_to_attempt_2");
     let duplicate = TypedEvidenceRepository::allocate_retry_in_transaction(&mut tx, input())
         .await
         .unwrap();
     assert_eq!(duplicate.attempt_id, retry_attempt);
+    proven_scenarios.push("duplicate_retry");
     tx.commit().await.unwrap();
     let repo = TypedEvidenceRepository::new(db.clone());
     let reserved = repo
@@ -254,6 +275,7 @@ async fn typed_evidence_retry_v1() {
     })
     .await
     .unwrap();
+    proven_scenarios.push("dispatch_error_redrive_identity");
     let mut tx = db.pool().begin().await.unwrap();
     assert!(
         TypedEvidenceRepository::dispatch_retry_success_in_transaction(
@@ -297,6 +319,7 @@ async fn typed_evidence_retry_v1() {
     let replay = repo.submit_return_v1(&old_payload_bytes).await.unwrap();
     assert!(replay.replayed);
     assert_eq!(replay.lifecycle.as_str(), "spike_active");
+    proven_scenarios.push("old_attempt_terminal_replay");
     let mut malformed_old_payload = old_payload.clone();
     malformed_old_payload["version"] = serde_json::json!("malformed");
     assert!(
@@ -337,9 +360,31 @@ async fn typed_evidence_retry_v1() {
             .as_str(),
         "evidence_received"
     );
+    proven_scenarios.push("eventual_evidence_received");
     assert_eq!(
         failed_attempt_snapshot(&db, &finding, &old_attempt).await,
         failed_snapshot
+    );
+    proven_scenarios.push("immutable_history");
+
+    let mut proven: Vec<String> = proven_scenarios
+        .iter()
+        .map(|scenario| (*scenario).to_owned())
+        .collect();
+    proven.sort();
+    proven.dedup();
+    let mut declared = declared_scenarios.clone();
+    declared.sort();
+    declared.dedup();
+    assert_eq!(
+        declared.len(),
+        declared_scenarios.len(),
+        "the fixture must not declare a scenario twice",
+    );
+    assert_eq!(
+        proven, declared,
+        "every scenario the fixture declares must be proven by this body, and every scenario \
+         proven here must be declared by the fixture",
     );
 }
 

@@ -659,8 +659,18 @@ async fn immutable_attempt_one_snapshot(f: &Fixture) -> ImmutableAttemptOneSnaps
     }
 }
 
+/// Every facet of attempt one this test can prove immutable. The fixture's
+/// `attempt_1.immutable` list must name exactly this set: a token it adds has
+/// no probe, and a token it drops is one this body would stop asserting.
+const ATTEMPT_ONE_IMMUTABLE_FACETS: [&str; 4] =
+    ["task", "payload", "validation_history", "transitions"];
+
 /// One evolving finding: production ingress, repository retry authority, and
 /// the coordinator dispatch seam prove the fixture's documented contract.
+///
+/// Every non-identity key of `tests/fixtures/typed_evidence_failed_retry_v1.json`
+/// selects an assertion below, so corrupting any one of them reddens
+/// `cargo test -p djinn-coordinator typed_evidence_failed_retry_v1`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn typed_evidence_failed_retry_v1() {
     let fixture_json: serde_json::Value = serde_json::from_str(include_str!(
@@ -669,11 +679,22 @@ async fn typed_evidence_failed_retry_v1() {
     .expect("versioned fixture is valid JSON");
     assert_eq!(fixture_json["version"], 1);
     assert_eq!(fixture_json["fixture"], "typed_evidence_failed_retry_v1");
+    let pinned = |path: [&str; 2]| -> String {
+        fixture_json[path[0]][path[1]]
+            .as_str()
+            .unwrap_or_else(|| panic!("fixture key `{}.{}` is a string", path[0], path[1]))
+            .to_owned()
+    };
 
     let f = fixture(CanonicalTypedEvidenceReturnOutcomeForTest::Resolved).await;
     let mut malformed: serde_json::Value =
         serde_json::from_str(&f.delivery.return_payload).unwrap();
-    malformed["checks"] = serde_json::json!("not an array");
+    match pinned(["attempt_1", "delivery"]).as_str() {
+        "production_submit_work_malformed" => {
+            malformed["checks"] = serde_json::json!("not an array")
+        }
+        other => panic!("unknown attempt-one delivery `{other}`"),
+    }
     let attempt_one_event = submitted_envelope(&f, malformed).await;
     let (events, _) = tokio::sync::broadcast::channel(16);
     let mut first_actor = build_refinement_actor(&f.db, &events, spawn_test_pool(&f.db, 2));
@@ -682,18 +703,42 @@ async fn typed_evidence_failed_retry_v1() {
         djinn_db::test_support::typed_evidence_finding_snapshot_for_test(&f.db, &f.finding_id)
             .await;
     assert_failed_without_receipt(&before_retry, "production malformed attempt one");
+    assert_eq!(
+        before_retry.lifecycle,
+        pinned(["attempt_1", "terminal_lifecycle"]),
+        "attempt one lands in the lifecycle the fixture pins"
+    );
     assert_eq!(before_retry.attempt_id, f.delivery.attempt_id);
     let immutable_attempt_one = immutable_attempt_one_snapshot(&f).await;
-    assert_eq!(immutable_attempt_one.task_status, "closed");
-    assert_eq!(immutable_attempt_one.validation_count, 0);
-    assert_eq!(
-        immutable_attempt_one
-            .activity_history
-            .iter()
-            .filter(|(event_type, _)| event_type == "tribunal_evidence_return_v1")
-            .count(),
-        1
-    );
+    let immutable_facets: Vec<String> = fixture_json["attempt_1"]["immutable"]
+        .as_array()
+        .expect("`attempt_1.immutable` is an array")
+        .iter()
+        .map(|value| value.as_str().expect("each facet is a string").to_owned())
+        .collect();
+    for facet in ATTEMPT_ONE_IMMUTABLE_FACETS {
+        assert!(
+            immutable_facets.iter().any(|listed| listed == facet),
+            "`attempt_1.immutable` must claim `{facet}`; this body proves it",
+        );
+    }
+    for facet in &immutable_facets {
+        match facet.as_str() {
+            "task" => assert_eq!(immutable_attempt_one.task_status, "closed"),
+            "validation_history" => assert_eq!(immutable_attempt_one.validation_count, 0),
+            "payload" => assert_eq!(
+                immutable_attempt_one
+                    .activity_history
+                    .iter()
+                    .filter(|(event_type, _)| event_type == "tribunal_evidence_return_v1")
+                    .count(),
+                1
+            ),
+            // Proved after the retry allocates, against `before_retry`.
+            "transitions" => {}
+            other => panic!("unknown attempt-one immutability facet `{other}`"),
+        }
+    }
 
     let authority_task_id = retry_authority(&f, "failed-retry-conformance").await;
     let failed_transition_id = before_retry
@@ -702,17 +747,31 @@ async fn typed_evidence_failed_retry_v1() {
         .cloned()
         .expect("failed ingress transition has durable identity");
     let proposals = ProposalRepository::new(f.db.clone(), EventBus::noop());
-    assert!(
-        proposals
-            .retry_evidence_atomically(AtomicEvidenceRetryInput {
-                finding_id: f.finding_id.clone(),
-                failed_transition_id: uuid::Uuid::now_v7().to_string(),
-                caller_user_id: f.user_id.clone(),
-            })
-            .await
-            .is_err(),
-        "stale failed-transition is rejected by repository authority"
-    );
+    match pinned(["retry", "authority"]).as_str() {
+        // Every retry below goes through `ProposalRepository::retry_evidence_atomically`,
+        // the single atomic repository primitive. There is no coordinator- or
+        // control-plane-side retry path in this test.
+        "atomic_repository_retry" => {}
+        other => panic!("unknown retry authority `{other}`"),
+    }
+    let stale = proposals
+        .retry_evidence_atomically(AtomicEvidenceRetryInput {
+            finding_id: f.finding_id.clone(),
+            failed_transition_id: uuid::Uuid::now_v7().to_string(),
+            caller_user_id: f.user_id.clone(),
+        })
+        .await;
+    match pinned(["retry", "stale_failure"]).as_str() {
+        "rejected" => assert!(
+            stale.is_err(),
+            "stale failed-transition is rejected by repository authority"
+        ),
+        "accepted" => assert!(
+            stale.is_ok(),
+            "the fixture claims a stale failed-transition is accepted"
+        ),
+        other => panic!("unknown stale-failure disposition `{other}`"),
+    }
     let first = proposals
         .retry_evidence_atomically(AtomicEvidenceRetryInput {
             finding_id: f.finding_id.clone(),
@@ -721,17 +780,34 @@ async fn typed_evidence_failed_retry_v1() {
         })
         .await
         .expect("authorized retry consumes retained failed compatibility link");
-    assert_eq!(first.allocation.sequence, 2);
+    let from_attempt = fixture_json["retry"]["from_attempt"]
+        .as_i64()
+        .expect("`retry.from_attempt` is a sequence number");
+    let to_attempt = fixture_json["retry"]["to_attempt"]
+        .as_i64()
+        .expect("`retry.to_attempt` is a sequence number");
+    assert_eq!(
+        i64::from(first.allocation.sequence),
+        to_attempt,
+        "the retry allocates the attempt the fixture pins"
+    );
+    assert_eq!(
+        to_attempt,
+        from_attempt + 1,
+        "a retry advances the failed attempt by exactly one"
+    );
     assert_ne!(authority_task_id, first.allocation.spike_task_id);
     let after_retry =
         djinn_db::test_support::typed_evidence_finding_snapshot_for_test(&f.db, &f.finding_id)
             .await;
     assert_eq!(after_retry.lifecycle, "demanded");
     assert_eq!(after_retry.attempt_id, first.allocation.attempt_id);
-    assert_eq!(
-        &after_retry.transitions[..before_retry.transitions.len()],
-        before_retry.transitions.as_slice()
-    );
+    if immutable_facets.iter().any(|facet| facet == "transitions") {
+        assert_eq!(
+            &after_retry.transitions[..before_retry.transitions.len()],
+            before_retry.transitions.as_slice()
+        );
+    }
     assert_eq!(
         immutable_attempt_one_snapshot(&f).await,
         immutable_attempt_one
@@ -751,8 +827,14 @@ async fn typed_evidence_failed_retry_v1() {
         })
         .await
         .expect("duplicate retry reads allocation from repository authority");
-    assert!(duplicate.replayed);
-    assert_eq!(first.allocation, duplicate.allocation);
+    match pinned(["retry", "duplicate"]).as_str() {
+        "stable_attempt_2_identity" => {
+            assert!(duplicate.replayed);
+            assert_eq!(first.allocation, duplicate.allocation);
+        }
+        "new_allocation" => assert_ne!(first.allocation, duplicate.allocation),
+        other => panic!("unknown duplicate-retry disposition `{other}`"),
+    }
     let occupied = proposals
         .retry_evidence_atomically(AtomicEvidenceRetryInput {
             finding_id: f.finding_id.clone(),
@@ -760,26 +842,42 @@ async fn typed_evidence_failed_retry_v1() {
             caller_user_id: f.user_id.clone(),
         })
         .await;
-    assert!(
-        matches!(
-            occupied,
-            Err(djinn_db::Error::InvalidTransition(message)) if message == "active_evidence_conflict"
+    match pinned(["retry", "occupied_slot"]).as_str() {
+        "rejected" => assert!(
+            matches!(
+                occupied,
+                Err(djinn_db::Error::InvalidTransition(message)) if message == "active_evidence_conflict"
+            ),
+            "occupied retry slot is rejected by repository authority"
         ),
-        "occupied retry slot is rejected by repository authority"
-    );
-    let open_spikes = TaskRepository::new(f.db.clone(), EventBus::noop())
-        .list_by_project(&f.project_id)
-        .await
-        .unwrap()
-        .into_iter()
-        .filter(|task| {
-            task.issue_type == "spike" && matches!(task.status.as_str(), "open" | "in_progress")
-        })
-        .collect::<Vec<_>>();
+        "accepted" => assert!(
+            occupied.is_ok(),
+            "the fixture claims an occupied retry slot is accepted"
+        ),
+        other => panic!("unknown occupied-slot disposition `{other}`"),
+    }
+    let open_evidence_tasks = || async {
+        TaskRepository::new(f.db.clone(), EventBus::noop())
+            .list_by_project(&f.project_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|task| {
+                task.issue_type == "spike" && matches!(task.status.as_str(), "open" | "in_progress")
+            })
+            .collect::<Vec<_>>()
+    };
+    let open_spikes = open_evidence_tasks().await;
+    let expected_open = usize::try_from(
+        fixture_json["terminal"]["open_active_evidence_tasks"]
+            .as_u64()
+            .expect("`terminal.open_active_evidence_tasks` is a count"),
+    )
+    .unwrap();
     assert_eq!(
         open_spikes.len(),
-        1,
-        "exactly one evidence task is open or active"
+        expected_open,
+        "the fixture pins how many evidence tasks may be open or active"
     );
     assert_eq!(open_spikes[0].id, first.allocation.spike_task_id);
 
@@ -798,29 +896,29 @@ async fn typed_evidence_failed_retry_v1() {
     let after_enqueue_failure =
         djinn_db::test_support::typed_evidence_finding_snapshot_for_test(&f.db, &f.finding_id)
             .await;
-    assert_eq!(after_enqueue_failure.lifecycle, "demanded");
-    assert_eq!(
-        after_enqueue_failure.attempt_id,
-        first.allocation.attempt_id
-    );
-    assert_eq!(after_enqueue_failure.transitions, after_retry.transitions);
-    assert_eq!(
-        immutable_attempt_one_snapshot(&f).await,
-        immutable_attempt_one
-    );
     dispatcher.redrive_demanded_evidence_dispatches().await;
     let after_activation_failure =
         djinn_db::test_support::typed_evidence_finding_snapshot_for_test(&f.db, &f.finding_id)
             .await;
-    assert_eq!(after_activation_failure.lifecycle, "demanded");
-    assert_eq!(
-        after_activation_failure.attempt_id,
-        first.allocation.attempt_id
-    );
-    assert_eq!(
-        after_activation_failure.transitions,
-        after_retry.transitions
-    );
+    match pinned(["dispatch", "post_commit_activation_failure"]).as_str() {
+        "retains_demanded_allocation" => {
+            for (case, snapshot) in [
+                ("enqueue failure", &after_enqueue_failure),
+                ("activation failure", &after_activation_failure),
+            ] {
+                assert_eq!(snapshot.lifecycle, "demanded", "{case}");
+                assert_eq!(snapshot.attempt_id, first.allocation.attempt_id, "{case}");
+                assert_eq!(snapshot.transitions, after_retry.transitions, "{case}");
+            }
+        }
+        "discards_allocation" => {
+            assert_ne!(
+                after_activation_failure.attempt_id,
+                first.allocation.attempt_id
+            )
+        }
+        other => panic!("unknown post-commit activation-failure disposition `{other}`"),
+    }
     assert_eq!(
         immutable_attempt_one_snapshot(&f).await,
         immutable_attempt_one
@@ -833,12 +931,34 @@ async fn typed_evidence_failed_retry_v1() {
     let after_dispatch =
         djinn_db::test_support::typed_evidence_finding_snapshot_for_test(&f.db, &f.finding_id)
             .await;
-    assert_eq!(after_dispatch.lifecycle, "spike_active");
-    assert_eq!(after_dispatch.attempt_id, first.allocation.attempt_id);
-    assert_eq!(
-        &after_dispatch.transitions[..before_retry.transitions.len()],
-        before_retry.transitions.as_slice()
-    );
+    let dispatched = open_evidence_tasks().await;
+    match pinned(["dispatch", "restart_redrive"]).as_str() {
+        "same_task_and_attempt" => {
+            assert_eq!(after_dispatch.lifecycle, "spike_active");
+            assert_eq!(after_dispatch.attempt_id, first.allocation.attempt_id);
+            assert_eq!(
+                dispatched
+                    .iter()
+                    .map(|task| task.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec![first.allocation.spike_task_id.as_str()],
+                "the restart re-drives the exact allocated task, never a replacement",
+            );
+        }
+        "new_task" => assert!(
+            !dispatched
+                .iter()
+                .any(|task| task.id == first.allocation.spike_task_id),
+            "the fixture claims the restart re-drives onto a replacement task"
+        ),
+        other => panic!("unknown restart-redrive disposition `{other}`"),
+    }
+    if immutable_facets.iter().any(|facet| facet == "transitions") {
+        assert_eq!(
+            &after_dispatch.transitions[..before_retry.transitions.len()],
+            before_retry.transitions.as_slice()
+        );
+    }
     assert_eq!(
         immutable_attempt_one_snapshot(&f).await,
         immutable_attempt_one
@@ -864,21 +984,28 @@ async fn typed_evidence_failed_retry_v1() {
         &f.finding_id,
     )
     .await;
-    assert_eq!(receipt.finding_lifecycle, "evidence_received");
+    assert_eq!(
+        receipt.finding_lifecycle,
+        pinned(["terminal", "attempt_2_durable_receipt"]),
+        "the retried attempt lands the durable receipt the fixture pins"
+    );
     assert_eq!(receipt.transition_count, 1);
     assert_eq!(
         immutable_attempt_one_snapshot(&f).await,
         immutable_attempt_one
     );
+    let attempt_one_status = TaskRepository::new(f.db.clone(), EventBus::noop())
+        .get(&f.spike_task_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .status;
     assert_eq!(
-        TaskRepository::new(f.db.clone(), EventBus::noop())
-            .get(&f.spike_task_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        "closed",
-        "terminal attempt one never reopens"
+        attempt_one_status == "closed",
+        fixture_json["terminal"]["attempt_1_task_never_reopens"]
+            .as_bool()
+            .expect("`terminal.attempt_1_task_never_reopens` is a boolean"),
+        "attempt one's terminal task status must match the fixture claim; observed {attempt_one_status}",
     );
 }
 

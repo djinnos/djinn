@@ -1,5 +1,6 @@
 {
   "version": "typed_evidence_lifecycle_v1",
+  "lifecycles": ["demanded", "spike_active", "evidence_received", "failed", "resolved", "withdrawn"],
   "allowed_transitions": [
     ["demanded", "spike_active"], ["demanded", "withdrawn"],
     ["spike_active", "evidence_received"], ["spike_active", "failed"],
@@ -10,8 +11,8 @@
   "unresolved": ["demanded", "spike_active", "evidence_received", "failed"],
   "terminal_controls": {
     "generic_transition_error": "terminal transitions require dispose_in_transaction",
-    "resolved_requires": ["judge_attribution", "committed_folding_revision"],
-    "withdrawn_requires": ["judge_attribution", "committed_folding_revision", "nonempty_rationale", "non_load_bearing_assertion"]
+    "resolved_requires": ["nonempty_rationale", "judge_attribution", "committed_folding_revision"],
+    "withdrawn_requires": ["nonempty_rationale", "judge_attribution", "committed_folding_revision", "non_load_bearing_assertion"]
   },
   "scenarios": [
     "identical_demand_idempotent", "distinct_demand_no_write_conflict",
