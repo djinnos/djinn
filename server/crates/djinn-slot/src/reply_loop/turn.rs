@@ -270,7 +270,15 @@ async fn launch_prepared_covered_attempt<T>(
 /// B1 acceptance is the launch linearization point. Construct the terminal
 /// owner before awaiting `mark_active`, so an active-write failure drops the
 /// guard (abort/observe/reconcile) rather than a pre-send permit (refund).
-async fn launch_prepared_covered_attempt_with_lease(
+///
+/// `pub` for the same reason [`CoveredAttemptTerminalGuard`] is: `mod turn` is
+/// private in a production build and public only under `test`/`test-support`,
+/// so this widens nothing downstream. It is reachable from the test-support
+/// build because this — not `start_watchdog`, and not `run_turn_watchdog_v1` —
+/// is the single production function an enforced turn goes through on its way
+/// to a spawned watchdog, and proposal `96fy`'s conformance target has to enter
+/// the chain at the top to prove the whole of it.
+pub async fn launch_prepared_covered_attempt_with_lease(
     preparation: ModelTurnPreparation,
     launch: impl FnOnce() -> anyhow::Result<(
         djinn_provider::provider::client::ProviderSseAttemptV1,

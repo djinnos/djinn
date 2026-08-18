@@ -325,8 +325,26 @@ pub const MODEL_TURN_LEARNED_CONCURRENCY_MAX: i64 = 1_024;
 pub struct ModelTurnLearnedConcurrencyInput {
     pub pool_id: i64,
     pub learned_concurrency: i64,
-    /// The writing leader's controller generation. Carried so a caller cannot
-    /// commit a target without naming the tick it came from.
+    /// The writing leader's controller generation.
+    ///
+    /// **It is not part of the fence, and it is not persisted.** It is
+    /// validated (`>= 0`) and then goes nowhere:
+    /// [`ModelTurnAdmissionRepository::apply_learned_concurrency`] binds
+    /// `pool_id`, `learned_concurrency` and the two
+    /// [`ModelTurnControllerFence`] fields, and nothing else. This field
+    /// previously claimed that it was "carried so a caller cannot commit a
+    /// target without naming the tick it came from", which was true only in the
+    /// sense that the caller must type a number; adversarial verification of
+    /// proposal `96fy` flagged the comment as asserting a fence that does not
+    /// exist, and a doc comment claiming a guarantee is how the surrounding
+    /// gaps stayed invisible.
+    ///
+    /// Contrast [`ModelTurnModeChangeInput::controller_generation`], which is
+    /// persisted verbatim into `model_turn_pool_mode_transitions` and *is*
+    /// attributable. Making this one attributable would need a column on
+    /// `model_turn_pools` (or its own ledger) to write it to; until that
+    /// exists, the only durable authority on this write is the incarnation
+    /// fence.
     pub controller_generation: i64,
     pub fence: ModelTurnControllerFence,
 }

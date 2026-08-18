@@ -12,8 +12,8 @@ use djinn_db::{
 };
 
 use crate::model_turn_admission::{
-    JoinedCapabilityReportV1, PhaseCAttemptEvidenceOutcomeV1, PhaseCAttemptStageEvidenceV1,
-    PhaseCAttemptStageV1, PhaseCLearnerWindowV1, learner_catalog_qualified_phase_c_window_v1,
+    PhaseCAttemptEvidenceOutcomeV1, PhaseCAttemptStageEvidenceV1, PhaseCAttemptStageV1,
+    PhaseCLearnerWindowV1, learner_catalog_qualified_phase_c_window_v1,
 };
 use djinn_provider::{ProviderAttemptAbortResultV1, ProviderAttemptTerminalV1, ProviderOutcomeV1};
 
@@ -142,7 +142,6 @@ fn complete_attempt(path: &ExpectedAttemptPathV1) -> PhaseCAdmittedAttemptV1 {
 fn projection(paths: Vec<ExpectedAttemptPathV1>) -> ExpectedAttemptPathProjectionV1 {
     ExpectedAttemptPathProjectionV1 {
         expected_paths: paths,
-        joined_reports: Vec::<JoinedCapabilityReportV1>::new(),
     }
 }
 

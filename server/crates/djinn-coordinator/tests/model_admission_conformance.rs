@@ -1769,6 +1769,201 @@ async fn the_turn_watchdog_commits_every_twenty_seconds_and_aborts_after_forty()
     close(db).await;
 }
 
+/// An inert frame parser.
+///
+/// The spawn test below never feeds the guard a frame — its provider stream is
+/// permanently pending — so the adapter's only job is to exist. Producing no
+/// events is the honest choice: a parser that invented one would put text into
+/// a turn no provider sent.
+struct CfniInertFrameParser;
+
+impl djinn_provider::provider::ProviderSseFrameParserV1 for CfniInertFrameParser {
+    fn parse(
+        &mut self,
+        _frame: djinn_provider::provider::client::SseFrame,
+    ) -> Vec<anyhow::Result<djinn_provider::provider::StreamEvent>> {
+        Vec::new()
+    }
+}
+
+/// A production launch of an enforced covered attempt actually **spawns** the
+/// turn watchdog.
+///
+/// `the_turn_watchdog_commits_every_twenty_seconds_and_aborts_after_forty`
+/// proves the loop's *behaviour* by driving `run_turn_watchdog_v1` directly.
+/// That is the right shape for a timer proof and the wrong shape for a
+/// reachability one. Adversarial verification round two of proposal `96fy`
+/// neutralised the single line inside
+/// `CoveredAttemptTerminalGuard::start_watchdog` that spawns the loop —
+/// leaving the constants, the loop body, the guard and the timer test all
+/// exactly where they were — and every test in this target stayed green. That
+/// is not a missing diagnostic: a dispatched turn that never heartbeats runs
+/// its lease down to the 90-second boundary, where the reaper expires and
+/// quarantines it. An unspawned watchdog is every enforced attempt losing its
+/// lease mid-flight.
+///
+/// So this test starts at the top of the production chain and asserts that a
+/// **row moves because of it**. It does not call `start_watchdog` and it does
+/// not call `run_turn_watchdog_v1`; it calls
+/// `launch_prepared_covered_attempt_with_lease`, which is the function
+/// `run_reply_loop` uses to launch a prepared turn, and then reads
+/// `model_turn_leases.heartbeat_at`.
+///
+/// **What each half rules out.**
+///
+/// * Deleting `guard.start_watchdog()` from the launch path, or neutralising
+///   the `run_turn_watchdog_v1(…)` call inside `start_watchdog`, leaves
+///   `heartbeat_at` null forever, and the second assertion fails naming the
+///   spawn. A source-text scan for the call would survive an `if false { … }`
+///   wrapper or a spawn moved behind a condition that is never true; a
+///   committed heartbeat survives neither, because the row only moves if the
+///   loop actually ran.
+/// * The first assertion is the other side of that bound: at t≈0 the row must
+///   still be null, so the transition observed twenty seconds later is the
+///   watchdog's tick and not something the launch itself wrote.
+///   `mark_active` moves `lifecycle` and `active_at` and touches
+///   `heartbeat_at` never — but asserting it here means a future writer that
+///   did cannot be mistaken for a running watchdog.
+///
+/// The premise is checked before either: the pool enforces, so `prepare` hands
+/// back a permit that genuinely **owns a lease**. A shadow permit carries no
+/// lease and `start_watchdog` returns immediately by design, so a fixture that
+/// accidentally produced one would prove nothing at all.
+///
+/// The millisecond nudges and the pinned spinner are there for the same reason
+/// they are in the cadence test above; see its comment.
+#[tokio::test]
+async fn an_enforced_covered_attempt_launch_spawns_the_turn_watchdog() {
+    use djinn_slot::reply_loop::model_turn_admission::{
+        ModelTurnAdmissionCoordinator, ModelTurnAdmissionRequest, ModelTurnPreparation,
+    };
+    use djinn_slot::reply_loop::turn::launch_prepared_covered_attempt_with_lease;
+
+    /// Enough to cross a deadline, far too little to reach the next one.
+    const NUDGE: std::time::Duration = std::time::Duration::from_millis(2);
+    /// Real-time budget for the *negative* observation at t≈0.
+    const SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+    /// Real-time cap on the positive observation. It waits on the condition,
+    /// not on a budget; this only stops a hang if the condition never arrives.
+    const PATIENCE: std::time::Duration = std::time::Duration::from_secs(15);
+
+    let db = djinn_coordinator::test_helpers::create_test_db();
+    let repository = ModelTurnAdmissionRepository::new(db.clone());
+    let pool_id = cfni_seed_pool(&db, "cfni-watchdog-spawn", "enforce").await;
+    repository
+        .seed_request_bucket_binding_for_test(pool_id, 4, 4)
+        .await
+        .expect("seed the request binding");
+
+    let coordinator =
+        ModelTurnAdmissionCoordinator::new(repository.clone()).with_catalog(cfni_catalog());
+    let preparation = coordinator
+        .prepare(
+            &cfni_plan(request_debit(1)),
+            ModelTurnAdmissionRequest {
+                credential_id: "cfni-watchdog-spawn".to_owned(),
+                request_id: "cfni-watchdog-spawn-request".to_owned(),
+                owner_pod_uid: Some("pod-cfni-watchdog-spawn".to_owned()),
+                generation: 1,
+            },
+        )
+        .await
+        .expect("prepare must not error");
+    let lease = match &preparation {
+        ModelTurnPreparation::Permit(permit) => permit
+            .lease
+            .clone()
+            .expect("an enforcing pool must hand back a permit that owns a lease"),
+        other => panic!("the seeded pool must admit; got {other:?}"),
+    };
+
+    let heartbeat_at = async |lease_id: &str| {
+        djinn_db::test_support::model_turn_lease_heartbeat_snapshot_fixture(&db, lease_id)
+            .await
+            .1
+    };
+    assert_eq!(
+        heartbeat_at(&lease.lease_id).await,
+        None,
+        "the lease must start with no heartbeat instant at all, or the \
+         null-to-non-null transition below is not the watchdog's"
+    );
+
+    tokio::time::pause();
+    let spin = tokio_util::sync::CancellationToken::new();
+    let spinner = tokio::spawn({
+        let spin = spin.clone();
+        async move {
+            while !spin.is_cancelled() {
+                tokio::task::yield_now().await;
+            }
+        }
+    });
+
+    // The provider attempt never yields a frame and never terminates on its
+    // own, so the only thing that can move the lease row is the watchdog.
+    let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+    let abort = djinn_provider::ProviderAttemptAbortHandleV1::new();
+    let guard = launch_prepared_covered_attempt_with_lease(
+        preparation,
+        move || {
+            Ok((
+                djinn_provider::provider::client::ProviderSseAttemptV1::for_test(
+                    Box::pin(futures::stream::pending()),
+                    abort,
+                    outcome_rx,
+                ),
+                Box::new(CfniInertFrameParser)
+                    as Box<dyn djinn_provider::provider::ProviderSseFrameParserV1>,
+            ))
+        },
+        coordinator,
+        tokio_util::sync::CancellationToken::new(),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .expect("the enforced launch must hand back a terminal guard");
+
+    // t≈0. The spawned loop takes its immediate first `interval` tick, which
+    // is the loop starting rather than a heartbeat.
+    settle_without_advancing_virtual_time(SETTLE).await;
+    tokio::time::advance(NUDGE).await;
+    settle_without_advancing_virtual_time(SETTLE).await;
+    assert_eq!(
+        heartbeat_at(&lease.lease_id).await,
+        None,
+        "the launch itself must not write a heartbeat instant; only the \
+         watchdog's tick may"
+    );
+
+    // t=20: the cadence. If nothing spawned the loop, this never arrives.
+    tokio::time::advance(std::time::Duration::from_secs(20) + NUDGE).await;
+    let mut committed = false;
+    let waited = std::time::Instant::now();
+    while waited.elapsed() < PATIENCE {
+        if heartbeat_at(&lease.lease_id).await.is_some() {
+            committed = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        committed,
+        "twenty seconds after a production launch of an enforced covered \
+         attempt the lease has committed no heartbeat, so nothing spawned \
+         `run_turn_watchdog_v1`: either the launch path stopped calling \
+         `CoveredAttemptTerminalGuard::start_watchdog`, or `start_watchdog` \
+         stopped reaching the loop"
+    );
+
+    spin.cancel();
+    tokio::time::resume();
+    let _ = spinner.await;
+    drop(outcome_tx);
+    drop(guard);
+    close(db).await;
+}
+
 /// The subscription controller is reachable from the fenced leader cycle, and
 /// `model_turn_pools.learned_concurrency` has a production writer.
 ///
@@ -4934,8 +5129,8 @@ async fn scenario_09_every_compatibility_prerequisite_is_independently_load_bear
             AlignedPhaseCWindowV1, PhaseCCapabilityEvidenceV1,
         };
         use djinn_db::{
-            ModelTurnControllerFence, ModelTurnLearnedConcurrencyInput,
-            ModelTurnLeaseMutationOutcome,
+            MODEL_TURN_LEARNED_CONCURRENCY_MAX, ModelTurnControllerFence,
+            ModelTurnLearnedConcurrencyInput, ModelTurnLeaseMutationOutcome,
         };
 
         let pool_id = cfni_seed_pool(&db, "cfni-phase-c-trainable", "shadow").await;
@@ -5135,6 +5330,48 @@ async fn scenario_09_every_compatibility_prerequisite_is_independently_load_bear
             9,
             "and the identical write under the live fence does land"
         );
+
+        // The bounds, at the same writer, under the *live* fence — so a
+        // refusal here is the bound and not leadership.
+        //
+        // Zero is the dangerous one. `acquire_turn` admits against this column,
+        // so a committed zero stops the pool admitting anything, silently and
+        // without a `model_turn_pool_mode_transitions` row: it is an
+        // undocumented second way to close a pool, and only the mode ledger may
+        // do that. Adversarial verification round two found the guard real and
+        // undefended — relaxing `learned_concurrency < 1` to `< 0` left the
+        // whole target green — so this is what defends it.
+        //
+        // Each case asserts *two* things, because either alone is weak. The
+        // `Err` alone would be satisfied by a writer that updated the row and
+        // then complained; the unchanged target alone would be satisfied by a
+        // writer that silently did nothing to anything. Together they say the
+        // input was refused before it reached the statement.
+        for refused in [0, -1, MODEL_TURN_LEARNED_CONCURRENCY_MAX + 1] {
+            let error = repository
+                .apply_learned_concurrency(ModelTurnLearnedConcurrencyInput {
+                    pool_id,
+                    learned_concurrency: refused,
+                    controller_generation: CFNI_GENERATION,
+                    fence: cfni_fence(),
+                })
+                .await
+                .expect_err(
+                    "a learned concurrency outside [1, MODEL_TURN_LEARNED_CONCURRENCY_MAX] \
+                     must be refused by the writer, not committed",
+                );
+            assert!(
+                matches!(error, djinn_db::Error::InvalidData(_)),
+                "the refusal must be the validation guard and not an incidental \
+                 database error; got {error:?}"
+            );
+            assert_eq!(
+                target_now(pool_id).await,
+                9,
+                "and the refused target {refused} must leave the last committed \
+                 target exactly where it was"
+            );
+        }
     }
 
     // ── Phase D drains before a later acquisition commits ─────────────────
@@ -5893,6 +6130,15 @@ const REQUIRED_SUPPORTING_TESTS: &[SupportingTest] = &[
                  abort.",
         name: "the_turn_watchdog_commits_every_twenty_seconds_and_aborts_after_forty",
         test: the_turn_watchdog_commits_every_twenty_seconds_and_aborts_after_forty,
+    },
+    SupportingTest {
+        group: 1,
+        clause: "A production launch of an enforced covered attempt spawns the watchdog: the \
+                 lease commits a real heartbeat twenty seconds later, so criterion 1's cadence \
+                 describes something every enforced attempt reaches and not only a loop that \
+                 would behave if anything ran it.",
+        name: "an_enforced_covered_attempt_launch_spawns_the_turn_watchdog",
+        test: an_enforced_covered_attempt_launch_spawns_the_turn_watchdog,
     },
     SupportingTest {
         group: 6,
