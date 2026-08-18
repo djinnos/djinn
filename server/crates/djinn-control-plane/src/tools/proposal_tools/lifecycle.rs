@@ -34,6 +34,11 @@ use djinn_db::{
 
 use super::{err_single, evaluate_composed_gate, proposal_not_found_error};
 
+// The production call sites for the proposal attempt branch / draft-PR
+// lifecycle. `proposal_graduate` starts an attempt and the abort cascade stops
+// one; both are inert while the `direct_delivery_v1` epoch is disabled.
+mod attempt_wiring;
+
 // ── Param structs ───────────────────────────────────────────────────────────
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -189,6 +194,14 @@ impl DjinnMcpServer {
             if let Some(err) = gate.to_error_string() {
                 return Json(err_single(err));
             }
+        }
+
+        // Direct delivery (dser): reserve this attempt's branch from the exact
+        // observed `main` SHA and open its single draft attempt PR before any
+        // build task exists to append to it. A no-op while the
+        // `direct_delivery_v1` epoch is disabled, which is the default.
+        if let Err(e) = self.start_proposal_build_attempt(&proposal).await {
+            return Json(err_single(e));
         }
 
         // A human-readable target list for the breakdown task's design.
@@ -430,7 +443,7 @@ impl DjinnMcpServer {
         &self,
         repo: &ProposalRepository,
         proposal: &djinn_core::models::Proposal,
-        _reason: &str,
+        reason: &str,
         preview: bool,
     ) -> Json<ProposalStopBuildResponse> {
         let abort_err = |msg: String| {
@@ -473,6 +486,14 @@ impl DjinnMcpServer {
                 disposition: proposal_disposition_summary(&plan),
                 error: None,
             });
+        }
+        // Direct delivery (dser): close the unmerged draft attempt PR with
+        // `build_attempt_stopped` and retire the attempt branch as an immutable
+        // tag before the build itself is disposed, so a re-graduation reserves
+        // a distinct branch and PR identity. A no-op while the
+        // `direct_delivery_v1` epoch is disabled, which is the default.
+        if let Err(e) = self.stop_proposal_build_attempt(proposal, reason).await {
+            return abort_err(e);
         }
         let mut tx = match self.state.db().pool().begin().await {
             Ok(tx) => tx,
@@ -726,3 +747,7 @@ mod stop_build_tests;
 // so they are paired with the lifecycle concern.
 #[cfg(test)]
 mod graduation_readiness_tests;
+
+// Production wiring regressions for the attempt branch / draft-PR lifecycle.
+#[cfg(test)]
+mod attempt_wiring_tests;

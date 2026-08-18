@@ -10,6 +10,21 @@ use crate::{
     ProposalBuildAttemptRepository, ReserveProposalBuildAttemptInput, TaskRepository,
 };
 
+/// Every retained build attempt a proposal owns, oldest first, including the
+/// reserved and parked ones production reads never surface.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn proposal_build_attempt_ids_for_test(db: &Database, proposal_id: &str) -> Vec<String> {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_scalar(
+        "SELECT id FROM proposal_build_attempts WHERE proposal_id = $1 ORDER BY created_at, id",
+    )
+    .bind(proposal_id)
+    .fetch_all(db.pool())
+    .await
+    .expect("failed to read proposal build attempts")
+}
+
 /// Activate the dormant direct-delivery epoch for focused cross-crate tests.
 ///
 /// **Not for production use.** Panics on SQL errors.
