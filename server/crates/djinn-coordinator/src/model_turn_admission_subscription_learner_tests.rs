@@ -9,7 +9,10 @@
 
 use super::*;
 use djinn_core::models::{Model, Pricing, Provider};
-use djinn_db::{Database, repositories::test_support::seed_scoped_model_turn_admission_fixture};
+use djinn_db::{
+    Database, ModelTurnControllerFence,
+    repositories::test_support::seed_scoped_model_turn_admission_fixture,
+};
 
 use crate::model_turn_admission::{
     ExpectedAttemptPathV1, PhaseCWindowAccountingV1, PhaseCWindowDiagnosticCodeV1,
@@ -417,6 +420,19 @@ fn the_target_never_leaves_one_through_thirty_two() {
 
 // ── Production ingestion ────────────────────────────────────────────────────
 
+/// Register a real coordinator-incarnation lease and fence writes on it.
+async fn live_fence(db: &Database) -> ModelTurnControllerFence {
+    let incarnation_id = uuid::Uuid::now_v7().to_string();
+    djinn_db::CoordinatorIncarnationRepository::new(db.clone())
+        .register(&incarnation_id)
+        .await
+        .expect("register coordinator incarnation");
+    ModelTurnControllerFence {
+        incarnation_id,
+        live_since_at: "1970-01-01T00:00:00Z".into(),
+    }
+}
+
 fn yh4d_catalog() -> CatalogService {
     let catalog = CatalogService::new();
     catalog.add_custom_provider(
@@ -457,6 +473,7 @@ fn activity() -> WindowActivityV1 {
 #[tokio::test]
 async fn production_ingestion_only_learns_from_a_catalog_qualified_durable_window() {
     let db = Database::ephemeral().await.expect("db");
+    let fence = live_fence(&db).await;
     let pool_id = seed_scoped_model_turn_admission_fixture(
         &db,
         "yh4d-ingest",
@@ -519,6 +536,7 @@ async fn production_ingestion_only_learns_from_a_catalog_qualified_durable_windo
                 code: PhaseCWindowDiagnosticCodeV1::MissingUsage,
             }],
         },
+        &fence,
     )
     .await
     .expect("persist diagnostic window");
@@ -539,6 +557,7 @@ async fn production_ingestion_only_learns_from_a_catalog_qualified_durable_windo
             admitted: true,
             diagnostics: Vec::new(),
         },
+        &fence,
     )
     .await
     .expect("persist trainable window");
@@ -558,6 +577,7 @@ async fn production_ingestion_only_learns_from_a_catalog_qualified_durable_windo
             admitted: true,
             diagnostics: Vec::new(),
         },
+        &fence,
     )
     .await
     .expect("persist short window");
@@ -576,6 +596,7 @@ async fn production_ingestion_only_learns_from_a_catalog_qualified_durable_windo
             admitted: true,
             diagnostics: Vec::new(),
         },
+        &fence,
     )
     .await
     .expect("persist trainable window");

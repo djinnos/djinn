@@ -113,6 +113,19 @@ fn complete_attempt(path: ExpectedAttemptPathV1) -> PhaseCAdmittedAttemptV1 {
     }
 }
 
+/// Register a real coordinator-incarnation lease and fence writes on it.
+async fn live_fence(db: &Database) -> ModelTurnControllerFence {
+    let incarnation_id = uuid::Uuid::now_v7().to_string();
+    djinn_db::CoordinatorIncarnationRepository::new(db.clone())
+        .register(&incarnation_id)
+        .await
+        .expect("register coordinator incarnation");
+    ModelTurnControllerFence {
+        incarnation_id,
+        live_since_at: "1970-01-01T00:00:00Z".into(),
+    }
+}
+
 async fn seed(db: &Database, credential: &str) -> i64 {
     seed_scoped_model_turn_admission_fixture(
         db,
@@ -148,6 +161,7 @@ async fn learner(
 #[tokio::test]
 async fn a_complete_window_round_trips_through_the_migrated_ledger() {
     let db = Database::ephemeral().await.expect("db");
+    let fence = live_fence(&db).await;
     let pool_id = seed(&db, "hb3s-complete").await;
     let repository = ModelTurnAdmissionRepository::new(db);
     let catalog = catalog();
@@ -170,6 +184,7 @@ async fn a_complete_window_round_trips_through_the_migrated_ledger() {
         &path,
         accounting(),
         &qualification,
+        &fence,
     )
     .await
     .expect("persist the qualified window");
@@ -213,6 +228,7 @@ async fn a_complete_window_round_trips_through_the_migrated_ledger() {
 #[tokio::test]
 async fn every_diagnostic_window_persists_and_stays_learner_invisible() {
     let db = Database::ephemeral().await.expect("db");
+    let fence = live_fence(&db).await;
     let repository = ModelTurnAdmissionRepository::new(db.clone());
     let catalog = catalog();
     let base = path(0, "revision-1");
@@ -398,6 +414,7 @@ async fn every_diagnostic_window_persists_and_stays_learner_invisible() {
             &path,
             accounting(),
             &qualification,
+            &fence,
         )
         .await
         .unwrap_or_else(|error| panic!("{label} must persist as a diagnostic window: {error}"));
@@ -461,6 +478,7 @@ async fn every_diagnostic_window_persists_and_stays_learner_invisible() {
         &expected,
         accounting(),
         &qualification,
+        &fence,
     )
     .await
     .expect("persist the unknown-path diagnostic window");
@@ -481,6 +499,7 @@ async fn every_diagnostic_window_persists_and_stays_learner_invisible() {
 #[tokio::test]
 async fn multi_pool_qualification_keeps_every_diagnostic_pool_local() {
     let db = Database::ephemeral().await.expect("db");
+    let fence = live_fence(&db).await;
     let first = seed(&db, "hb3s-pool-a").await;
     let second = seed(&db, "hb3s-pool-b").await;
     let repository = ModelTurnAdmissionRepository::new(db);
@@ -523,6 +542,7 @@ async fn multi_pool_qualification_keeps_every_diagnostic_pool_local() {
             path,
             accounting(),
             &qualification,
+            &fence,
         )
         .await
         .expect("persist per-pool diagnostics");
@@ -589,6 +609,7 @@ async fn multi_pool_qualification_keeps_every_diagnostic_pool_local() {
                 ..accounting()
             },
             &forged,
+            &fence,
         )
         .await
         .is_ok(),

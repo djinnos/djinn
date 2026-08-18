@@ -294,6 +294,18 @@ pub struct ModelTurnControllerWindowSummary {
     pub trainable: bool,
     pub diagnostics: Vec<ModelTurnControllerWindowDiagnostic>,
 }
+/// The durable leadership fence a controller write must clear.
+///
+/// It is the existing coordinator-incarnation lease, not a competing leadership
+/// mechanism: `incarnation_id` is the writer's own immutable incarnation and
+/// `live_since_at` is the renewal floor below which that incarnation is
+/// considered to have stopped renewing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelTurnControllerFence {
+    pub incarnation_id: String,
+    pub live_since_at: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelTurnControllerWindowInput {
     pub pool_id: i64,
@@ -303,6 +315,7 @@ pub struct ModelTurnControllerWindowInput {
     pub admitted_turns: i64,
     pub completed_turns: i64,
     pub summary: ModelTurnControllerWindowSummary,
+    pub fence: ModelTurnControllerFence,
 }
 /// Exact-bound DB projection. It deliberately contains no diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -553,6 +566,40 @@ impl ModelTurnAdmissionRepository {
         }))
     }
 
+    /// Every pool the coordinator is durably observing for Phase C.
+    ///
+    /// A pool row *is* the coordinator's dispatch topology: it exists only
+    /// because admission created it for one exact credential/provider/model
+    /// route. `off` and `draining` pools are excluded — `off` has not been
+    /// opted in, and a pool already draining has nothing left for a controller
+    /// window to say. This is the topology half of the denominator; the live
+    /// slot inventory is the other half, and neither is a report.
+    pub async fn list_observable_pools(&self, limit: i64) -> Result<Vec<ModelTurnPool>> {
+        self.db.ensure_initialized().await?;
+        let rows: Vec<ModelTurnPoolRow> = sqlx::query_as(
+            "SELECT id, credential_id, provider_id, model_id, phase, identity_state, capability_state, learned_concurrency, in_flight \
+             FROM model_turn_pools WHERE phase IN ('shadow', 'enforce') ORDER BY id LIMIT $1",
+        )
+        .bind(limit.clamp(1, 512))
+        .fetch_all(self.db.pool())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ModelTurnPool {
+                    id: row.id,
+                    credential_id: row.credential_id,
+                    provider_id: row.provider_id,
+                    model_id: row.model_id,
+                    phase: parse_phase(&row.phase)?,
+                    identity_state: parse_identity(&row.identity_state)?,
+                    capability_state: parse_capability(&row.capability_state)?,
+                    learned_concurrency: row.learned_concurrency,
+                    in_flight: row.in_flight,
+                })
+            })
+            .collect()
+    }
+
     /// Persist a decision before returning a shadow send permit. Inputs contain
     /// only a one-way request fingerprint and bounded diagnostic vocabulary.
     pub async fn record_decision(&self, input: ModelTurnDecisionRecordInput) -> Result<()> {
@@ -660,20 +707,103 @@ impl ModelTurnAdmissionRepository {
     }
 
     /// Typed bounded storage; production catalog qualification belongs to coordinator.
+    ///
+    /// The write is **fenced in the same statement** as the insert: the row
+    /// materialises only if the named coordinator incarnation still exists, is
+    /// not draining, and has renewed since `fence.live_since_at`. A stale
+    /// generation therefore cannot commit a controller window after succession
+    /// — not because it checked and lost a race, but because its INSERT selects
+    /// no rows.
     pub async fn upsert_controller_window(
         &self,
         input: ModelTurnControllerWindowInput,
-    ) -> Result<()> {
+    ) -> Result<ModelTurnLeaseMutationOutcome> {
         self.db.ensure_initialized().await?;
         validate_controller_window_input(&input)?;
         let summary = serde_json::to_string(&input.summary)
             .map_err(|e| crate::Error::InvalidData(e.to_string()))?;
-        let changed = sqlx::query("INSERT INTO model_turn_controller_windows (pool_id, window_sequence, started_at, ended_at, admitted_turns, completed_turns, summary) SELECT id, $2, $3::timestamptz, $4::timestamptz, $5, $6, $7 FROM model_turn_pools WHERE id = $1 ON CONFLICT (pool_id, window_sequence) DO UPDATE SET started_at = EXCLUDED.started_at, ended_at = EXCLUDED.ended_at, admitted_turns = EXCLUDED.admitted_turns, completed_turns = EXCLUDED.completed_turns, summary = EXCLUDED.summary")
-            .bind(input.pool_id).bind(input.window_sequence).bind(&input.started_at).bind(&input.ended_at).bind(input.admitted_turns).bind(input.completed_turns).bind(summary).execute(self.db.pool()).await?;
-        if changed.rows_affected() != 1 {
+        let changed = sqlx::query("INSERT INTO model_turn_controller_windows (pool_id, window_sequence, started_at, ended_at, admitted_turns, completed_turns, summary) SELECT p.id, $2, $3::timestamptz, $4::timestamptz, $5, $6, $7 FROM model_turn_pools p JOIN coordinator_incarnations c ON c.id = $8 WHERE p.id = $1 AND c.draining_at IS NULL AND c.last_renewed_at >= $9 ON CONFLICT (pool_id, window_sequence) DO UPDATE SET started_at = EXCLUDED.started_at, ended_at = EXCLUDED.ended_at, admitted_turns = EXCLUDED.admitted_turns, completed_turns = EXCLUDED.completed_turns, summary = EXCLUDED.summary")
+            .bind(input.pool_id).bind(input.window_sequence).bind(&input.started_at).bind(&input.ended_at).bind(input.admitted_turns).bind(input.completed_turns).bind(summary)
+            .bind(&input.fence.incarnation_id).bind(&input.fence.live_since_at)
+            .execute(self.db.pool()).await?;
+        Ok(if changed.rows_affected() == 1 {
+            ModelTurnLeaseMutationOutcome::Applied
+        } else {
+            ModelTurnLeaseMutationOutcome::Fenced
+        })
+    }
+
+    /// Every in-flight lease observation that is stale at the 90-second
+    /// boundary, read entirely from persisted `reserved_at`/`heartbeat_at`.
+    ///
+    /// A successor resumes from this list alone: there is no local timer, no
+    /// process-local semaphore, and no in-memory record of what the previous
+    /// owner had seen. Each row is the exact compare-and-swap observation
+    /// [`Self::expire_lease`] requires, so a lease that heartbeats between the
+    /// read and the swap is simply not expired.
+    pub async fn list_stale_lease_observations(
+        &self,
+        boundary_at: &str,
+        limit: i64,
+    ) -> Result<Vec<ModelTurnLeaseExpiryInput>> {
+        self.db.ensure_initialized().await?;
+        if boundary_at.trim().is_empty() {
             return invalid_phase_c();
         }
-        Ok(())
+        let rows: Vec<(String, i64, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT lease_id::text, generation, request_id, lifecycle, heartbeat_at::text \
+             FROM model_turn_leases \
+             WHERE lifecycle IN ('reserved', 'dispatching', 'active') \
+               AND COALESCE(heartbeat_at, reserved_at) <= $1::timestamptz - interval '90 seconds' \
+             ORDER BY COALESCE(heartbeat_at, reserved_at) ASC, lease_id ASC \
+             LIMIT $2",
+        )
+        .bind(boundary_at)
+        .bind(limit.clamp(1, 256))
+        .fetch_all(self.db.pool())
+        .await?;
+        rows.into_iter()
+            .map(
+                |(lease_id, generation, request_id, lifecycle, heartbeat_at)| {
+                    Ok(ModelTurnLeaseExpiryInput {
+                        identity: ModelTurnLeaseIdentity {
+                            lease_id,
+                            generation,
+                            request_id,
+                        },
+                        observed_lifecycle: parse_lease_lifecycle(&lifecycle)?,
+                        observed_heartbeat_at: heartbeat_at,
+                        boundary_at: boundary_at.to_owned(),
+                    })
+                },
+            )
+            .collect()
+    }
+
+    /// Atomically move the named enforcing pools to `draining`.
+    ///
+    /// `acquire_turn` reads the pool row `FOR UPDATE` inside a serializable
+    /// transaction, so once this commits no later acquisition can commit
+    /// against the old phase. Breaker state, identity state, and learned
+    /// concurrency are untouched. Returns the pools that actually transitioned.
+    pub async fn drain_enforcing_pools(&self, pool_ids: &[i64]) -> Result<Vec<i64>> {
+        self.db.ensure_initialized().await?;
+        if pool_ids.iter().any(|pool_id| *pool_id <= 0) {
+            return invalid_phase_c();
+        }
+        if pool_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut tx = self.db.pool().begin().await?;
+        let drained: Vec<(i64,)> = sqlx::query_as(
+            "UPDATE model_turn_pools SET phase = 'draining', updated_at = now() \
+             WHERE id = ANY($1::bigint[]) AND phase = 'enforce' RETURNING id",
+        )
+        .bind(pool_ids)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(drained.into_iter().map(|(id,)| id).collect())
     }
 
     /// Read one persisted typed summary for cross-crate storage regressions.
@@ -700,6 +830,76 @@ impl ModelTurnAdmissionRepository {
                     .map_err(|error| crate::Error::InvalidData(error.to_string()))
             })
             .transpose()
+    }
+
+    /// Seed one request-bucket binding so a scoped fixture pool can admit.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn seed_request_bucket_binding_for_test(
+        &self,
+        pool_id: i64,
+        capacity_units: i64,
+        available_units: i64,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "INSERT INTO model_turn_bucket_bindings (pool_id, bucket_kind, capacity_units, available_units) \
+             VALUES ($1, 'request', $2, $3) \
+             ON CONFLICT (pool_id, bucket_kind) DO UPDATE SET \
+               capacity_units = EXCLUDED.capacity_units, available_units = EXCLUDED.available_units",
+        )
+        .bind(pool_id)
+        .bind(capacity_units)
+        .bind(available_units)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Backdate one lease's persisted observation timestamps.
+    ///
+    /// This is how a fake-time reaper regression makes a lease *durably* old
+    /// without a wall-clock sleep: the reaper reads exactly these columns, so
+    /// moving them is moving the only clock it has.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn backdate_lease_for_test(
+        &self,
+        identity: &ModelTurnLeaseIdentity,
+        reserved_at: &str,
+        heartbeat_at: Option<&str>,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let changed = sqlx::query(
+            "UPDATE model_turn_leases SET reserved_at = $4::timestamptz, heartbeat_at = $5::timestamptz \
+             WHERE lease_id = $1::uuid AND generation = $2 AND request_id = $3",
+        )
+        .bind(&identity.lease_id)
+        .bind(identity.generation)
+        .bind(&identity.request_id)
+        .bind(reserved_at)
+        .bind(heartbeat_at)
+        .execute(self.db.pool())
+        .await?;
+        if changed.rows_affected() != 1 {
+            return invalid_phase_c();
+        }
+        Ok(())
+    }
+
+    /// Read one pool's durable control state for cross-crate regressions.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn pool_control_state_for_test(
+        &self,
+        pool_id: i64,
+    ) -> Result<Option<(String, String, String, i64, i64)>> {
+        self.db.ensure_initialized().await?;
+        sqlx::query_as(
+            "SELECT phase, identity_state, capability_state, learned_concurrency, in_flight \
+             FROM model_turn_pools WHERE id = $1",
+        )
+        .bind(pool_id)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(Into::into)
     }
 
     /// Overwrite the durable pool label pair for a fail-closed learner
@@ -1380,6 +1580,8 @@ fn validate_controller_window_input(input: &ModelTurnControllerWindowInput) -> R
             .iter()
             .any(|d| d.pool_id != 0 && d.pool_id != input.pool_id)
         || oversize
+        || uuid::Uuid::parse_str(&input.fence.incarnation_id).is_err()
+        || chrono::DateTime::parse_from_rfc3339(&input.fence.live_since_at).is_err()
     {
         return Err(crate::Error::InvalidData(
             "invalid model-turn controller window".to_owned(),
@@ -1614,6 +1816,10 @@ mod tests {
             admitted_turns: 0,
             completed_turns: 0,
             summary,
+            fence: ModelTurnControllerFence {
+                incarnation_id: "00000000-0000-7000-8000-000000000001".into(),
+                live_since_at: "1970-01-01T00:00:00Z".into(),
+            },
         };
         assert!(validate_controller_window_input(&input).is_ok());
         let unrelated = ModelTurnControllerWindowInput {
@@ -1643,6 +1849,10 @@ mod tests {
                 model_id: "model".into(),
                 trainable: true,
                 diagnostics: Vec::new(),
+            },
+            fence: ModelTurnControllerFence {
+                incarnation_id: "00000000-0000-7000-8000-000000000001".into(),
+                live_since_at: "1970-01-01T00:00:00Z".into(),
             },
         };
         assert!(validate_controller_window_input(&valid).is_ok());
