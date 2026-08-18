@@ -348,6 +348,25 @@ pub async fn seed_canonical_typed_evidence_ingress_fixture_for_test(
     }
 }
 
+/// Count terminal dispositions recorded for one finding.
+///
+/// A refused disposition must write nothing, and "nothing" is only checkable
+/// as a row count — the returned error message proves only that the caller was
+/// told no.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn typed_evidence_disposition_count_for_finding_for_test(
+    db: &Database,
+    finding_id: &str,
+) -> i64 {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_scalar("SELECT count(*) FROM typed_evidence_dispositions WHERE finding_id=$1")
+        .bind(finding_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
+
 /// Count receipt and terminal-disposition transitions for the finding owning a
 /// validation result. Demand/allocation transitions predate durable ingress and
 /// are intentionally outside this replay-idempotency assertion.

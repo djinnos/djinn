@@ -327,6 +327,11 @@ pub struct TypedEvidenceBackfillReport {
 
 const LEGACY_LINK_ONLY_CLAIM: &str = "__typed_evidence_legacy_link_only";
 
+/// Debate-trail kinds that are the legacy face of a typed evidence finding.
+/// Only these bind a debate row to the typed lifecycle; objections, rebuttals,
+/// and verdicts are argument about the spec, not about the demand.
+const EVIDENCE_LIFECYCLE_DEBATE_KINDS: [&str; 2] = ["needs_evidence", "evidence_findings"];
+
 pub struct TypedEvidenceRepository {
     db: Database,
 }
@@ -1412,6 +1417,38 @@ impl TypedEvidenceRepository {
             folding_revision: row.get("folding_revision"),
             failure_detail: row.get("failure_detail"),
         }))
+    }
+
+    /// The unresolved typed finding a debate entry is bound to, if any.
+    ///
+    /// Evidence-lifecycle debate rows (`needs_evidence` and its
+    /// `evidence_findings` receipt) are the legacy face of a typed finding.
+    /// Resolving one generically would look like settling the demand while
+    /// leaving `typed_evidence_findings.lifecycle` untouched, so the generic
+    /// resolve path asks this first and refuses.
+    ///
+    /// Binding is by proposal, which the schema makes exact: the partial
+    /// unique index `typed_evidence_one_unresolved_finding_per_proposal`
+    /// permits at most one unresolved finding per proposal, so an
+    /// evidence-lifecycle row on that proposal can only mean that finding.
+    pub async fn unresolved_finding_for_debate_entry(
+        &self,
+        debate_entry_id: &str,
+    ) -> Result<Option<UnresolvedTypedEvidenceProjection>> {
+        nonempty(&[debate_entry_id])?;
+        let Some(row) =
+            sqlx::query("SELECT proposal_id,kind FROM proposal_debate_trail WHERE id=$1")
+                .bind(debate_entry_id)
+                .fetch_optional(self.db.pool())
+                .await?
+        else {
+            return Ok(None);
+        };
+        if !EVIDENCE_LIFECYCLE_DEBATE_KINDS.contains(&row.get::<String, _>("kind").as_str()) {
+            return Ok(None);
+        }
+        self.unresolved_projection(&row.get::<String, _>("proposal_id"))
+            .await
     }
 
     /// Compare typed and legacy evidence authority for a proposal.
