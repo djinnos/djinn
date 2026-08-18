@@ -29,6 +29,18 @@
   "include": [
     "src"
   ],
+  // `files` entries are never removed by `exclude`, so this one test file is
+  // typechecked by the CI-gated `pnpm tsc --noEmit` even though every other
+  // `*.test.ts` is excluded below.
+  //
+  // It has to be: the generated-type drift guard's assertions are *type-level*
+  // — a dropped enum member or a deleted legacy field produces no runtime
+  // failure at all, only a compile error. `pnpm test:typecheck` does typecheck
+  // the test tree, but nothing in CI runs it, so without this line the whole
+  // guard passes while proving nothing.
+  "files": [
+    "src/api/generated/evidenceLifecycleTypes.test.ts"
+  ],
   "exclude": [
     "src/**/*.test.ts",
     "src/**/*.test.tsx",

@@ -994,3 +994,134 @@ async fn typed_evidence_disposition_isolates_decode_roles_and_stale_lifecycle() 
     assert_eq!(empty_finding["conflict_code"], "finding_not_found");
     assert_eq!(disposition_snapshot(&db, &proposal.id).await, before);
 }
+
+// ── Typed evidence presentation projection (ggfc) ───────────────────────────
+//
+// `proposal_show` is the browser's only source for the typed section. Two of
+// its fields cannot be derived in the browser at all: retry authority is a
+// join over the running refinement's open Advocate/Judge tasks, and the
+// citable failed transition is append-only server state. If either is wrong
+// the UI either hides an action the server would admit, or offers one the
+// server will reject.
+
+/// Build a `proposal_show` gate status under a chosen typed-evidence stage,
+/// as a chosen caller. The caller matters: `retry_permitted` is per-user.
+async fn typed_gate_section(
+    db: &Database,
+    proposal_id: &str,
+    caller_user_id: &str,
+    mode: crate::tools::proposal_tools::TypedEvidenceGateMode,
+) -> serde_json::Value {
+    let server =
+        DjinnMcpServer::new(test_mcp_state(db.clone()).with_typed_evidence_gate_mode(mode));
+    let response = djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(caller_user_id.to_owned()), async {
+            server
+                .dispatch_tool("proposal_show", serde_json::json!({ "id": proposal_id }))
+                .await
+                .unwrap()
+        })
+        .await;
+    response["gate_status"]["typed_evidence"].clone()
+}
+
+#[tokio::test]
+async fn typed_gate_projects_retry_authority_per_caller_and_the_citable_failed_transition() {
+    use djinn_db::test_support::{
+        TypedEvidenceRetryAuthorityForTest, TypedEvidenceRetryScenarioForTest,
+    };
+    for (authority, expected_permitted) in [
+        (TypedEvidenceRetryAuthorityForTest::Advocate, true),
+        (TypedEvidenceRetryAuthorityForTest::Judge, true),
+        (TypedEvidenceRetryAuthorityForTest::Unauthorized, false),
+    ] {
+        let (_server, db, proposal, fixture) =
+            retry_fixture(TypedEvidenceRetryScenarioForTest::Failed, authority).await;
+        let typed = typed_gate_section(
+            &db,
+            &proposal.id,
+            &fixture.caller_user_id,
+            crate::tools::proposal_tools::TypedEvidenceGateMode::Enforce,
+        )
+        .await;
+        assert_eq!(
+            typed["lifecycle"],
+            serde_json::json!("failed"),
+            "fixture must present a failed finding: {typed}"
+        );
+        assert_eq!(
+            typed["retry_permitted"],
+            serde_json::json!(expected_permitted),
+            "{authority:?} must project retry_permitted={expected_permitted}: {typed}"
+        );
+        assert_eq!(
+            typed["failed_transition_id"],
+            serde_json::json!(fixture.failed_transition_id),
+            "the browser must be handed the exact transition a retry has to cite: {typed}"
+        );
+
+        // The projection is not a label: whatever it says, the write path
+        // agrees. Drive the real retry tool as the same caller and check the
+        // outcome matches the projected permission.
+        let retried = retry_call(&_server, &fixture.caller_user_id, &fixture).await;
+        assert_eq!(
+            retried["accepted"],
+            serde_json::json!(expected_permitted),
+            "projected retry_permitted={expected_permitted} must match what \
+             proposal_refinement_retry_evidence actually does: {retried}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn typed_gate_projects_attempts_checks_anchors_and_gaps_for_the_browser() {
+    use djinn_db::test_support::{
+        TypedEvidenceRetryAuthorityForTest, TypedEvidenceRetryScenarioForTest,
+    };
+    let (_server, db, proposal, fixture) = retry_fixture(
+        TypedEvidenceRetryScenarioForTest::Failed,
+        TypedEvidenceRetryAuthorityForTest::Judge,
+    )
+    .await;
+    let typed = typed_gate_section(
+        &db,
+        &proposal.id,
+        &fixture.caller_user_id,
+        crate::tools::proposal_tools::TypedEvidenceGateMode::Enforce,
+    )
+    .await;
+
+    // Attempts are the durable spike history, not a count re-derived from
+    // tasks: the projected spike task id must be the persisted one.
+    let attempts = typed["attempts"]
+        .as_array()
+        .expect("the typed section must carry an attempts array");
+    assert_eq!(attempts.len(), 1, "one seeded attempt: {typed}");
+    assert_eq!(attempts[0]["sequence"], serde_json::json!(1));
+    assert_eq!(
+        attempts[0]["spike_task_id"],
+        serde_json::json!(fixture.prior_spike_task_id),
+        "the attempt must name the persisted spike task: {typed}"
+    );
+
+    // Planned checks carry the method the plan froze. The fixture seeds
+    // exactly one `code` check.
+    let checks = typed["planned_checks"]
+        .as_array()
+        .expect("the typed section must carry a planned_checks array");
+    assert_eq!(checks.len(), 1, "one seeded planned check: {typed}");
+    assert_eq!(
+        checks[0]["check_id"],
+        serde_json::json!("retry-fixture-check")
+    );
+    assert_eq!(checks[0]["method"], serde_json::json!("code"));
+
+    // Arrays the schema declares as always-present must actually be present,
+    // or a generated client that types them non-optional breaks at runtime.
+    for key in ["attempts", "planned_checks", "gaps", "usable_findings"] {
+        assert!(
+            typed[key].is_array(),
+            "{key} must always be an array, even when empty: {typed}"
+        );
+    }
+}

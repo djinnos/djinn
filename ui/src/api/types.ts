@@ -223,6 +223,41 @@ export interface NeedsEvidenceStatus {
 }
 
 /**
+ * Durable lifecycle vocabulary for a typed evidence finding.
+ *
+ * Aliased to the generated union rather than re-typed by hand: this is the
+ * one place the browser learns the state set, so a server that adds or
+ * renames a state breaks the build instead of silently rendering a fallback.
+ */
+export type TypedEvidenceLifecycle =
+  ProposalShowOutputSchema.TypedEvidenceLifecycleModel;
+
+/** Validated outcome of a durable evidence return. */
+export type TypedEvidenceOutcome =
+  ProposalShowOutputSchema.TypedEvidenceOutcomeModel;
+
+/** One spike attempt against a typed evidence finding. */
+export type TypedEvidenceAttempt =
+  ProposalShowOutputSchema.TypedEvidenceAttemptModel;
+
+/** One planned check of the latest attempt, with server-derived anchor health. */
+export type TypedEvidencePlannedCheck =
+  ProposalShowOutputSchema.TypedEvidencePlannedCheckModel;
+
+/** A Judge's recorded terminal decision for a typed finding. */
+export type TypedEvidenceDisposition =
+  ProposalShowOutputSchema.TypedEvidenceDispositionModel;
+
+/**
+ * Typed evidence authority section of the composed gate status.
+ *
+ * Every field here is projected by `TypedEvidenceRepository`; the browser
+ * renders it and never re-derives it, so this is a straight generated alias.
+ */
+export type TypedEvidenceGateStatus =
+  ProposalShowOutputSchema.TypedEvidenceGateStatus;
+
+/**
  * Composed gate status for a proposal: deterministic DoR + tribunal
  * conditions. Returned by `proposal_show` so the UI can render readiness
  * without recomputing it client-side.
@@ -248,6 +283,12 @@ export interface ProposalGateStatus {
   unresolved_blocking_ids: string[];
   /** Needs-evidence spike parking state. null when not parked. */
   needs_evidence?: NeedsEvidenceStatus | null;
+  /**
+   * Typed evidence authority. Absent when the rollout mode is `off`, when
+   * there is no unresolved typed finding, and when typed and legacy
+   * authority agree — so an absent section means "render legacy only".
+   */
+  typed_evidence?: TypedEvidenceGateStatus | null;
   /** Whether a current human override exists for this revision. */
   human_override_active: boolean;
   /** Human-readable explanations of all gate failures. Empty when ready is true. */

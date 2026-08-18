@@ -294,6 +294,43 @@ pub struct UnresolvedTypedEvidenceContext {
     pub gaps: Vec<String>,
 }
 
+/// A Judge's recorded terminal decision for a finding, as `proposal_show`
+/// renders it. Read straight from `typed_evidence_dispositions`; nothing here
+/// is re-derived from debate rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypedEvidenceRecordedDisposition {
+    /// `resolved` or `withdrawn`.
+    pub disposition: String,
+    /// `resolved`, `partial`, or `unresolved`.
+    pub outcome: String,
+    pub folding_revision: i32,
+    pub judge_task_id: String,
+    pub rationale: String,
+}
+
+/// Everything the browser is told about the proposal's unresolved typed
+/// finding beyond [`UnresolvedTypedEvidenceProjection`].
+///
+/// Deliberately separate from [`UnresolvedTypedEvidenceContext`]: that one
+/// feeds role prompts and its shape is pinned by prompt snapshots, so a change
+/// to what a human sees must not be able to move an agent's context.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct TypedEvidencePresentation {
+    /// Every attempt against the finding, oldest first.
+    pub attempts: Vec<UnresolvedTypedEvidenceAttempt>,
+    /// Planned checks of the latest attempt, with server-derived anchor health.
+    pub planned_checks: Vec<UnresolvedTypedEvidenceCheck>,
+    /// Normalized failures and gaps of the latest validated return.
+    pub gaps: Vec<String>,
+    /// Conclusions the server accepted as usable for the latest attempt.
+    pub usable_findings: Vec<String>,
+    /// The Judge's recorded disposition, when one exists.
+    pub disposition: Option<TypedEvidenceRecordedDisposition>,
+    /// The latest `-> failed` transition id. A retry must cite exactly this
+    /// one, so no caller can construct a retry without it.
+    pub latest_failed_transition_id: Option<String>,
+}
+
 /// Why the typed and legacy evidence authorities disagree for a proposal.
 ///
 /// Consumers fail closed on any variant; the code exists so a refusal names
@@ -1575,6 +1612,124 @@ impl TypedEvidenceRepository {
             planned_checks,
             gaps,
         }))
+    }
+
+    /// Project the presentation detail for one finding: attempts, the latest
+    /// attempt's planned checks and anchors, its gaps and usable conclusions,
+    /// the Judge's disposition, and the retry-citable failed transition.
+    ///
+    /// Every field is read; none is inferred from tasks or debate rows.
+    pub async fn presentation_for_finding(
+        &self,
+        finding_id: &str,
+    ) -> Result<TypedEvidencePresentation> {
+        let attempt_rows = sqlx::query(
+            "SELECT a.id,a.sequence,a.spike_task_id, \
+                    (SELECT v.outcome FROM typed_evidence_validation_results v \
+                      WHERE v.attempt_id=a.id) AS outcome, \
+                    (SELECT t.metadata->>'validation_error' FROM typed_evidence_transitions t \
+                      WHERE t.finding_id=a.finding_id AND t.actor_task_id=a.spike_task_id \
+                        AND t.to_lifecycle='failed' \
+                        AND t.metadata->>'validation_error' IS NOT NULL \
+                      ORDER BY t.ordinal DESC LIMIT 1) AS failure_detail \
+               FROM typed_evidence_attempts a \
+              WHERE a.finding_id=$1 ORDER BY a.sequence",
+        )
+        .bind(finding_id)
+        .fetch_all(self.db.pool())
+        .await?;
+        let latest_attempt_id: Option<String> = attempt_rows.last().map(|row| row.get("id"));
+        let attempts = attempt_rows
+            .iter()
+            .map(|row| UnresolvedTypedEvidenceAttempt {
+                sequence: row.get("sequence"),
+                spike_task_id: row.get("spike_task_id"),
+                outcome: row.get("outcome"),
+                failure_detail: row.get("failure_detail"),
+            })
+            .collect();
+
+        let (planned_checks, gaps, usable_findings) = match latest_attempt_id {
+            None => (Vec::new(), Vec::new(), Vec::new()),
+            Some(attempt_id) => {
+                let checks = sqlx::query(
+                    "SELECT c.check_id,c.method, \
+                            r.status AS status, \
+                            (SELECT an.locator FROM typed_evidence_anchors an \
+                              WHERE an.check_result_id=r.id ORDER BY an.id LIMIT 1) AS locator, \
+                            (SELECT h.health FROM typed_evidence_anchors an \
+                               JOIN typed_evidence_anchor_health h ON h.anchor_id=an.id \
+                              WHERE an.check_result_id=r.id ORDER BY an.id LIMIT 1) AS health \
+                       FROM typed_evidence_planned_checks c \
+                       LEFT JOIN typed_evidence_check_results r ON r.planned_check_id=c.id \
+                      WHERE c.attempt_id=$1 ORDER BY c.ordinal",
+                )
+                .bind(&attempt_id)
+                .fetch_all(self.db.pool())
+                .await?
+                .iter()
+                .map(|row| UnresolvedTypedEvidenceCheck {
+                    check_id: row.get("check_id"),
+                    method: row.get("method"),
+                    status: row.get("status"),
+                    anchor_locator: row.get("locator"),
+                    anchor_health: row.get("health"),
+                })
+                .collect();
+                let gaps = sqlx::query_scalar::<_, String>(
+                    "SELECT i.kind || ' ' || i.code || ': ' || i.detail \
+                       FROM typed_evidence_issues i \
+                       JOIN typed_evidence_validation_results v ON v.id=i.validation_result_id \
+                      WHERE v.attempt_id=$1 ORDER BY i.kind,i.id",
+                )
+                .bind(&attempt_id)
+                .fetch_all(self.db.pool())
+                .await?;
+                let usable_findings = sqlx::query_scalar::<_, String>(
+                    "SELECT f.conclusion FROM typed_evidence_return_findings f \
+                       JOIN typed_evidence_validation_results v ON v.id=f.validation_result_id \
+                      WHERE v.attempt_id=$1 AND f.usable=TRUE ORDER BY f.id",
+                )
+                .bind(&attempt_id)
+                .fetch_all(self.db.pool())
+                .await?;
+                (checks, gaps, usable_findings)
+            }
+        };
+
+        let disposition = sqlx::query(
+            "SELECT disposition,outcome,folding_revision,judge_task_id,rationale \
+               FROM typed_evidence_dispositions WHERE finding_id=$1 \
+              ORDER BY folding_revision DESC LIMIT 1",
+        )
+        .bind(finding_id)
+        .fetch_optional(self.db.pool())
+        .await?
+        .map(|row| TypedEvidenceRecordedDisposition {
+            disposition: row.get("disposition"),
+            outcome: row.get("outcome"),
+            folding_revision: row.get("folding_revision"),
+            judge_task_id: row.get("judge_task_id"),
+            rationale: row.get("rationale"),
+        });
+
+        let latest_failed_transition_id = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM typed_evidence_transitions \
+              WHERE finding_id=$1 AND to_lifecycle='failed' \
+              ORDER BY ordinal DESC LIMIT 1",
+        )
+        .bind(finding_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        Ok(TypedEvidencePresentation {
+            attempts,
+            planned_checks,
+            gaps,
+            usable_findings,
+            disposition,
+            latest_failed_transition_id,
+        })
     }
 
     /// Compare typed and legacy evidence authority for a proposal.
