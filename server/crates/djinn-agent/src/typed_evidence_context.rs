@@ -97,27 +97,9 @@ mod tests {
     /// here first.
     #[test]
     fn typed_evidence_context_shape_is_closed() {
-        let value = serde_json::to_value(full_context()).unwrap();
-        let mut fields: Vec<&str> = value
-            .as_object()
-            .expect("the context serializes as an object")
-            .keys()
-            .map(String::as_str)
-            .collect();
-        fields.sort_unstable();
-        assert_eq!(
-            fields,
-            TYPED_EVIDENCE_ROLE_CONTEXT_V1_FIELDS.to_vec(),
-            "the typed evidence context field set is closed; update \
-             TYPED_EVIDENCE_ROLE_CONTEXT_V1_FIELDS deliberately, and only for a field \
-             that is not a free-text question collection"
-        );
-        // The pinned list must itself stay sorted and duplicate-free, or the
-        // comparison above could pass against a list that hides a field.
-        let mut sorted = TYPED_EVIDENCE_ROLE_CONTEXT_V1_FIELDS.to_vec();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert_eq!(sorted, TYPED_EVIDENCE_ROLE_CONTEXT_V1_FIELDS.to_vec());
+        // One shared implementation, so `typed_evidence_demand` cannot drift
+        // from this contract.
+        djinn_roles::typed_evidence_context::assert_closed_shape(&full_context());
     }
 
     #[test]

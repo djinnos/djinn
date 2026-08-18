@@ -53,6 +53,7 @@ pub mod task_run_resize_admission;
 pub mod task_run_resize_drop_gate;
 pub(crate) mod truncate;
 pub mod typed_evidence_context;
+pub mod typed_evidence_demand;
 pub mod warmer;
 
 // ─── Resource monitoring ─────────────────────────────────────────────────────

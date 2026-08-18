@@ -213,6 +213,45 @@ impl TypedEvidenceRoleContextV1 {
     }
 }
 
+/// The sorted serialized field names of a context value.
+///
+/// The single source of truth for the closed-shape contract. Both the role
+/// renderer's tests and the demand-guidance tests compare this against
+/// [`TYPED_EVIDENCE_ROLE_CONTEXT_V1_FIELDS`], so neither path can grow a field
+/// — least of all a free-text question collection — without the other seeing
+/// it.
+pub fn serialized_field_names(context: &TypedEvidenceRoleContextV1) -> Vec<String> {
+    let value = serde_json::to_value(context).expect("the context always serializes");
+    let mut fields: Vec<String> = value
+        .as_object()
+        .expect("the context serializes as an object")
+        .keys()
+        .cloned()
+        .collect();
+    fields.sort();
+    fields
+}
+
+/// Assert the closed-shape contract for one context value.
+///
+/// Shared by `typed_evidence_context` and `typed_evidence_demand` so a single
+/// implementation covers both surfaces.
+pub fn assert_closed_shape(context: &TypedEvidenceRoleContextV1) {
+    assert_eq!(
+        serialized_field_names(context),
+        TYPED_EVIDENCE_ROLE_CONTEXT_V1_FIELDS.to_vec(),
+        "the typed evidence context field set is closed; update \
+         TYPED_EVIDENCE_ROLE_CONTEXT_V1_FIELDS deliberately, and only for a field that \
+         is not a free-text question collection"
+    );
+    // The pinned list must itself stay sorted and duplicate-free, or the
+    // comparison above could pass against a list that hides a field.
+    let mut sorted = TYPED_EVIDENCE_ROLE_CONTEXT_V1_FIELDS.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted, TYPED_EVIDENCE_ROLE_CONTEXT_V1_FIELDS.to_vec());
+}
+
 /// Whether a role is shown the demand-threshold surface.
 ///
 /// The Adversary raises demands and the Judge adjudicates them. The Advocate

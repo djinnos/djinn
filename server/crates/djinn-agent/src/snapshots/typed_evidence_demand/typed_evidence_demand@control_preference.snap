@@ -1,0 +1,15 @@
+---
+source: crates/djinn-agent/src/typed_evidence_demand.rs
+expression: render(case)
+---
+# Typed evidence
+
+Finding `01a01188-0000-7000-8000-0000000d0018` is `demanded`, demanded against revision 2.
+Claim under demand: Should the retry budget be expressed in attempts or in seconds?
+
+## Demand thresholds
+
+Category: preference
+Load-bearing: no
+Threshold: A preference between two workable designs is not an evidence demand. Nothing about the spec is unknown; the choice is a judgement.
+Expected checks: none — this remains an ordinary objection rather than an evidence demand.
