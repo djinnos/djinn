@@ -14,7 +14,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use djinn_db::ModelTurnAdmissionRepository;
+use djinn_db::{
+    ModelTurnAdmissionRepository, ModelTurnControllerFence, ModelTurnLearnedConcurrencyInput,
+    ModelTurnLeaseMutationOutcome,
+};
 use djinn_provider::{ProviderAttemptLossV1, ProviderAttemptTerminalV1, catalog::CatalogService};
 
 use super::{
@@ -472,6 +475,92 @@ pub async fn ingest_qualified_window_v1(
         bootstrap_seed: (request.pool_id as u64) ^ (window.start_second() as u64),
     };
     Ok(observe_window_v1(state, &observation))
+}
+
+/// The transitions that actually moved the controller's target, and are
+/// therefore the only ones with anything to commit.
+///
+/// Every other transition is a hold: the target the pool already carries is
+/// still the controller's answer, so re-writing it would be a write that says
+/// nothing. Keeping this predicate explicit is what stops the writer from
+/// stamping `MIN_TARGET` onto pools the controller has never actually decided
+/// anything about.
+#[must_use]
+pub fn transition_moved_target_v1(transition: ControllerTransitionV1) -> bool {
+    matches!(
+        transition,
+        ControllerTransitionV1::Grew | ControllerTransitionV1::BackedOff
+    )
+}
+
+/// What one production learner pass did for one pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SubscriptionLearningOutcomeV1 {
+    pub transition: ControllerTransitionV1,
+    /// The target committed to `model_turn_pools.learned_concurrency`, or
+    /// `None` when the window moved nothing and there was nothing to commit.
+    pub committed_target: Option<i64>,
+    /// True when the durable fence refused the commit. The controller's
+    /// in-memory target still moved; the pool's persisted one did not.
+    pub fenced: bool,
+}
+
+/// Ingest one completed window and commit the resulting target.
+///
+/// This is the production path from a durable Phase-C window to
+/// `model_turn_pools.learned_concurrency`, and the two halves are deliberately
+/// welded together here rather than left for a caller to pair up:
+///
+/// * the window is re-read through [`ingest_qualified_window_v1`], so only a
+///   window the durable ledger itself calls trainable can reach the controller;
+/// * the resulting target is committed through
+///   [`ModelTurnAdmissionRepository::apply_learned_concurrency`], under the same
+///   durable leadership fence the window row was written under, so a superseded
+///   leader's late decision cannot land.
+///
+/// Only a transition that actually moved the target writes anything — see
+/// [`transition_moved_target_v1`]. A fenced commit is reported, not swallowed:
+/// the caller learns that the persisted target and the in-memory controller
+/// have diverged.
+pub async fn learn_and_persist_window_target_v1(
+    repository: &ModelTurnAdmissionRepository,
+    catalog: &CatalogService,
+    fence: &ModelTurnControllerFence,
+    controller_generation: i64,
+    state: &mut SubscriptionControllerStateV1,
+    request: &QualifiedWindowRequestV1,
+    activity: &WindowActivityV1,
+) -> djinn_db::Result<SubscriptionLearningOutcomeV1> {
+    let transition =
+        ingest_qualified_window_v1(repository, catalog, state, request, activity).await?;
+    if !transition_moved_target_v1(transition) {
+        return Ok(SubscriptionLearningOutcomeV1 {
+            transition,
+            committed_target: None,
+            fenced: false,
+        });
+    }
+    let target = state.target();
+    let applied = repository
+        .apply_learned_concurrency(ModelTurnLearnedConcurrencyInput {
+            pool_id: request.pool_id,
+            learned_concurrency: target,
+            controller_generation,
+            fence: fence.clone(),
+        })
+        .await?;
+    Ok(match applied {
+        ModelTurnLeaseMutationOutcome::Applied => SubscriptionLearningOutcomeV1 {
+            transition,
+            committed_target: Some(target),
+            fenced: false,
+        },
+        _ => SubscriptionLearningOutcomeV1 {
+            transition,
+            committed_target: None,
+            fenced: true,
+        },
+    })
 }
 
 #[cfg(test)]

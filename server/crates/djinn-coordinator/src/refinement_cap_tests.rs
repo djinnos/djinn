@@ -173,6 +173,7 @@ pub(crate) fn build_refinement_actor(
         prune_tick_counter: 0,
         last_phase_c_window_start: None,
         last_phase_c_window_trainable: false,
+        model_turn_subscription_controllers: std::collections::BTreeMap::new(),
         throughput_events: HashMap::new(),
         pr_status_cache: HashMap::new(),
         pr_draft_first_seen: HashMap::new(),

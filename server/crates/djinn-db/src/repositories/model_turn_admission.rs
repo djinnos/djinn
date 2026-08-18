@@ -306,6 +306,31 @@ pub struct ModelTurnControllerFence {
     pub live_since_at: String,
 }
 
+/// The upper bound this storage boundary accepts for a learned target.
+///
+/// The subscription controller's own contract is `[1, 32]`; this is the
+/// storage-side sanity bound, deliberately looser so the two are not one
+/// constant pretending to be two. Zero is rejected outright: `acquire_turn`
+/// compares `learned_concurrency` against `in_flight`, so committing zero would
+/// silently close a pool, and the only thing that may stop a pool admitting is
+/// the mode ledger.
+pub const MODEL_TURN_LEARNED_CONCURRENCY_MAX: i64 = 1_024;
+
+/// One fenced write of a pool's learned concurrency target.
+///
+/// `learned_concurrency` is the target the subscription controller arrived at,
+/// and `fence` is the same durable coordinator-incarnation lease every other
+/// controller write has to clear.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelTurnLearnedConcurrencyInput {
+    pub pool_id: i64,
+    pub learned_concurrency: i64,
+    /// The writing leader's controller generation. Carried so a caller cannot
+    /// commit a target without naming the tick it came from.
+    pub controller_generation: i64,
+    pub fence: ModelTurnControllerFence,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelTurnControllerWindowInput {
     pub pool_id: i64,
@@ -1219,6 +1244,65 @@ impl ModelTurnAdmissionRepository {
             .bind(input.pool_id).bind(input.window_sequence).bind(&input.started_at).bind(&input.ended_at).bind(input.admitted_turns).bind(input.completed_turns).bind(summary)
             .bind(&input.fence.incarnation_id).bind(&input.fence.live_since_at)
             .execute(self.db.pool()).await?;
+        Ok(if changed.rows_affected() == 1 {
+            ModelTurnLeaseMutationOutcome::Applied
+        } else {
+            ModelTurnLeaseMutationOutcome::Fenced
+        })
+    }
+
+    /// Commit one learned concurrency target for one pool, under the fence.
+    ///
+    /// This is the **production writer** of
+    /// `model_turn_pools.learned_concurrency`. `acquire_turn` reads that column
+    /// as the concurrency target it admits against; before this existed the
+    /// only writer in the tree was
+    /// [`Self::set_pool_learned_concurrency_for_test`], so the column was
+    /// consumed but never produced and the subscription controller had nowhere
+    /// to put its answer.
+    ///
+    /// The fence is applied **in the same statement** as the update, exactly as
+    /// [`Self::upsert_controller_window`] does it: the `UPDATE` matches no row
+    /// unless the named coordinator incarnation still exists, is not draining,
+    /// and has renewed since `fence.live_since_at`. A superseded leader cannot
+    /// move a pool's target after succession — not because it checked and lost
+    /// a race, but because its statement updates nothing and the last committed
+    /// target stands.
+    ///
+    /// Re-committing the same target is `Applied`, not `Fenced`: the row is
+    /// matched, so the write is idempotent rather than refused.
+    pub async fn apply_learned_concurrency(
+        &self,
+        input: ModelTurnLearnedConcurrencyInput,
+    ) -> Result<ModelTurnLeaseMutationOutcome> {
+        self.db.ensure_initialized().await?;
+        if input.pool_id <= 0
+            || input.learned_concurrency < 1
+            || input.learned_concurrency > MODEL_TURN_LEARNED_CONCURRENCY_MAX
+            || input.controller_generation < 0
+            || uuid::Uuid::parse_str(&input.fence.incarnation_id).is_err()
+            || chrono::DateTime::parse_from_rfc3339(&input.fence.live_since_at).is_err()
+        {
+            return Err(crate::Error::InvalidData(
+                "invalid model-turn learned concurrency write".to_owned(),
+            ));
+        }
+        let changed = sqlx::query(
+            // `coordinator_incarnations.last_renewed_at` is a VARCHAR holding a
+            // fixed-width UTC RFC 3339 rendering, so the renewal floor is the
+            // same lexicographic comparison `upsert_controller_window` makes.
+            "UPDATE model_turn_pools SET learned_concurrency = $2, updated_at = now() \
+             WHERE id = $1 AND EXISTS ( \
+               SELECT 1 FROM coordinator_incarnations c \
+                WHERE c.id = $3 AND c.draining_at IS NULL \
+                  AND c.last_renewed_at >= $4)",
+        )
+        .bind(input.pool_id)
+        .bind(input.learned_concurrency)
+        .bind(&input.fence.incarnation_id)
+        .bind(&input.fence.live_since_at)
+        .execute(self.db.pool())
+        .await?;
         Ok(if changed.rows_affected() == 1 {
             ModelTurnLeaseMutationOutcome::Applied
         } else {

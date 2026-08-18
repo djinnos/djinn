@@ -160,6 +160,7 @@ fn completed<'a>(
         capability_evidence,
         admitted_attempts,
         counts,
+        activity: BTreeMap::new(),
     }
 }
 
@@ -194,6 +195,7 @@ async fn a_completed_window_reaches_persistence_with_exact_bounds_and_counts() {
         &fence,
         &completed(&projection, &evidence, &attempts, counts(pool_id, 11, 9)),
         7,
+        &mut BTreeMap::new(),
     )
     .await
     .expect("controller cycle");
@@ -254,6 +256,7 @@ async fn a_stale_controller_generation_cannot_commit_after_succession() {
                 counts(pool_id, admitted, admitted),
             ),
             7,
+            &mut BTreeMap::new(),
         )
         .await
         .expect("controller cycle")
@@ -364,6 +367,7 @@ async fn coverage_loss_drains_enforcing_pools_before_the_next_acquisition() {
         &fence,
         &completed(&projection, &[], &attempts, counts(pool_id, 4, 4)),
         7,
+        &mut BTreeMap::new(),
     )
     .await
     .expect("controller cycle");
@@ -434,6 +438,7 @@ async fn coverage_loss_drains_enforcing_pools_before_the_next_acquisition() {
         &fence,
         &completed(&projection, &[], &attempts, counts(pool_id, 4, 4)),
         7,
+        &mut BTreeMap::new(),
     )
     .await
     .expect("controller cycle");

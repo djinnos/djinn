@@ -23,6 +23,10 @@ use super::{
     PhaseCAttemptStageV1, PhaseCCapabilityEvidenceV1, PhaseCWindowAccountingV1,
     PhaseCWindowDiagnosticCodeV1, PhaseCWindowQualificationV1, eligible_live_slot,
     persist_catalog_qualified_phase_c_window_v1, qualify_aligned_phase_c_window_v1,
+    subscription_learner::{
+        ControllerTransitionV1, QualifiedWindowRequestV1, SubscriptionControllerStateV1,
+        WindowActivityV1, learn_and_persist_window_target_v1,
+    },
 };
 
 /// Admitted and completed turn counts for one pool over one aligned window.
@@ -45,6 +49,15 @@ pub struct PhaseCControllerCycleOutcomeV1 {
     pub qualification: PhaseCWindowQualificationV1,
     /// Enforcing pools this cycle moved to draining after coverage loss.
     pub drained_pools: Vec<i64>,
+    /// What the subscription controller did with each pool's window. Every
+    /// persisted pool appears exactly once, holds included.
+    pub learner_transitions: BTreeMap<i64, ControllerTransitionV1>,
+    /// `(pool_id, target)` for every pool whose `learned_concurrency` this
+    /// cycle actually committed. A held or fenced pool is absent.
+    pub learned_pools: Vec<(i64, i64)>,
+    /// Pools whose learned target moved in memory but whose commit the durable
+    /// fence refused. The persisted target and the controller have diverged.
+    pub learner_fenced_pools: Vec<i64>,
 }
 
 /// Codes that mean complete capability coverage did not hold for the full
@@ -73,6 +86,11 @@ pub struct PhaseCCompletedWindowV1<'a> {
     pub admitted_attempts: &'a [PhaseCAdmittedAttemptV1],
     /// Per-pool counts observed over the window.
     pub counts: BTreeMap<i64, PhaseCWindowCountsV1>,
+    /// Per-pool stream and attempt-terminal activity the subscription
+    /// controller learns from. A pool with no entry contributes no activity,
+    /// which is the fail-closed case: no active wall clock means no eligible
+    /// window and no target movement.
+    pub activity: BTreeMap<i64, WindowActivityV1>,
 }
 
 /// Run one completed-window controller cycle under the durable leadership fence.
@@ -80,14 +98,27 @@ pub struct PhaseCCompletedWindowV1<'a> {
 /// The order is the contract. The authoritative denominator and evidence are
 /// projected by the caller from live inventory; the fail-closed qualifier runs
 /// over them; the typed verdict is written through the catalog-qualified
-/// persistence seam under the fence; and only a write that actually committed
-/// may go on to drain a pool. A fenced cycle mutates nothing at all.
+/// persistence seam under the fence; the subscription controller then re-reads
+/// each durable window and commits any target it moved; and only a write that
+/// actually committed may go on to drain a pool. A fenced cycle mutates nothing
+/// at all.
+///
+/// The learner runs **after** persistence on purpose. It re-reads the window it
+/// is about to learn from through the exact-bound, catalog-qualified seam, so it
+/// can only ever train on a verdict that is already durable — the in-memory
+/// qualification computed above is never handed to it.
+///
+/// `controllers` is the leader's per-pool controller state, carried across
+/// windows. It is `&mut` rather than rebuilt per cycle because a controller with
+/// no memory has no baseline, no probe count and no plateau, and would therefore
+/// never do anything but establish a baseline forever.
 pub async fn run_completed_window_cycle_v1(
     repository: &ModelTurnAdmissionRepository,
     catalog: &CatalogService,
     fence: &ModelTurnControllerFence,
     completed: &PhaseCCompletedWindowV1<'_>,
     controller_generation: i64,
+    controllers: &mut BTreeMap<i64, SubscriptionControllerStateV1>,
 ) -> djinn_db::Result<PhaseCControllerCycleOutcomeV1> {
     let qualification = qualify_aligned_phase_c_window_v1(
         completed.window,
@@ -136,6 +167,46 @@ pub async fn run_completed_window_cycle_v1(
                 outcome.fenced = true;
                 return Ok(outcome);
             }
+        }
+    }
+
+    // The subscription controller. One pass per pool whose window row is now
+    // durable, in pool order so a trace replays identically.
+    for pool_id in outcome.persisted_pools.clone() {
+        let request = QualifiedWindowRequestV1 {
+            pool_id,
+            window: completed.window,
+            started_at: completed.started_at.clone(),
+            ended_at: completed.ended_at.clone(),
+        };
+        let activity = completed.activity.get(&pool_id).cloned().unwrap_or(
+            // No observed activity is the fail-closed case, not an error: an
+            // empty union of active wall clock makes the window ineligible and
+            // the controller holds.
+            WindowActivityV1 {
+                streams: Vec::new(),
+                terminals: Vec::new(),
+            },
+        );
+        let state = controllers.entry(pool_id).or_default();
+        let learned = learn_and_persist_window_target_v1(
+            repository,
+            catalog,
+            fence,
+            controller_generation,
+            state,
+            &request,
+            &activity,
+        )
+        .await?;
+        outcome
+            .learner_transitions
+            .insert(pool_id, learned.transition);
+        if let Some(target) = learned.committed_target {
+            outcome.learned_pools.push((pool_id, target));
+        }
+        if learned.fenced {
+            outcome.learner_fenced_pools.push(pool_id);
         }
     }
 
@@ -433,16 +504,33 @@ impl crate::CoordinatorActor {
             capability_evidence: &capability_evidence,
             admitted_attempts: &admitted_attempts,
             counts,
+            // What the durable ledgers can honestly say about this window's
+            // streams and attempt terminals — which today is *nothing*.
+            // `model_turn_phase_c_evidence` records per-attempt stage instants
+            // but no stream start/end interval, and `model_turn_observations`
+            // records per-pool totals with no per-attempt output usage
+            // (proposal `96fy` Phase B1/B2). The two ways to fill this map from
+            // what exists — widening a stage instant into an interval, or
+            // defaulting the missing usage to zero — would forge exactly the
+            // evidence the qualifier already refuses to fabricate, so the
+            // leader supplies none and every production window is ineligible.
+            // The learner below is nonetheless the production path: when B1/B2
+            // persist coverage intervals and per-attempt usage, this map is
+            // what they populate.
+            activity: BTreeMap::new(),
         };
-        match run_completed_window_cycle_v1(
+        let mut controllers = std::mem::take(&mut self.model_turn_subscription_controllers);
+        let cycle = run_completed_window_cycle_v1(
             &repository,
             &self.catalog,
             &fence,
             &completed,
             self.model_turn_controller_generation(),
+            &mut controllers,
         )
-        .await
-        {
+        .await;
+        self.model_turn_subscription_controllers = controllers;
+        match cycle {
             Ok(outcome) => {
                 if !outcome.fenced {
                     self.last_phase_c_window_start = Some(window.start_second());
@@ -457,6 +545,8 @@ impl crate::CoordinatorActor {
                     drained = outcome.drained_pools.len(),
                     fenced = outcome.fenced,
                     trainable = outcome.qualification.admitted,
+                    learned = outcome.learned_pools.len(),
+                    learner_fenced = outcome.learner_fenced_pools.len(),
                     "Phase-C controller window"
                 );
             }
