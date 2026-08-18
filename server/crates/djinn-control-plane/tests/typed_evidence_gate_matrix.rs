@@ -24,13 +24,15 @@ use djinn_core::events::EventBus;
 use djinn_core::models::{NeedsEvidenceClaim, TribunalEvidenceLifecycle};
 use djinn_db::{
     AdmitRefinementRunRequest, AtomicEvidenceDispositionInput, Database, DemandTypedEvidenceInput,
-    ProjectRepository, ProposalCreateInput, ProposalDebateTrailCreateInput, ProposalRepository,
-    ProposalUpdateInput, RefinementAdmissionOutcome, RefinementAdmissionSource, TaskRepository,
-    TypedEvidenceRepository, legacy_demand_hash,
+    NeedsEvidenceClaimLink, ProjectRepository, ProposalCreateInput, ProposalDebateTrailCreateInput,
+    ProposalRepository, ProposalUpdateInput, RefinementAdmissionOutcome, RefinementAdmissionSource,
+    TaskRepository, TypedEvidenceRepository, legacy_demand_hash,
     test_support::{
         CanonicalTypedEvidenceReturnOutcomeForTest, UsageTestTaskSeed,
         dispose_typed_evidence_validation_for_test, materialize_judge_authority_for_test,
         seed_canonical_typed_evidence_ingress_fixture_for_test, seed_task_row,
+        switch_to_advocate_authority_for_test,
+        typed_evidence_disposition_count_for_finding_for_test,
     },
 };
 use serde::Deserialize;
@@ -81,6 +83,13 @@ struct Row {
     revision_offset: i32,
     verdict_form: String,
     expected: String,
+    /// A closure attempt made before the transitions run. `none` for the
+    /// ordinary cross-product rows.
+    bypass: String,
+    /// Which fail-closed shape the refusal takes: `typed_diagnostics` (the
+    /// finding is named) or `parity_fail_closed` (typed and legacy authority
+    /// disagree, so neither may admit the transition).
+    expected_refusal: String,
 }
 
 impl Row {
@@ -343,6 +352,8 @@ impl Case {
                 .unwrap();
         }
 
+        self.attempt_bypass(row, spike_task_id).await;
+
         self.blocking_finding_id = TypedEvidenceRepository::new(self.db.clone())
             .unresolved_projection(&self.proposal_id)
             .await
@@ -355,6 +366,181 @@ impl Case {
             self.blocking_finding_id.is_some(),
             row.expects_block(),
             "row {} did not reach the lifecycle it declares",
+            row.name
+        );
+    }
+
+    /// Attempt this row's closure bypass and assert it was refused.
+    ///
+    /// Each of these is a path that used to look like it settled the demand
+    /// while leaving `typed_evidence_findings.lifecycle` exactly where it was.
+    /// The assertion is always on the persisted lifecycle, re-read afterwards,
+    /// never on the returned message.
+    async fn attempt_bypass(&self, row: &Row, spike_task_id: &str) {
+        if row.bypass == "none" {
+            return;
+        }
+        let typed = TypedEvidenceRepository::new(self.db.clone());
+        let before = typed
+            .unresolved_projection(&self.proposal_id)
+            .await
+            .unwrap()
+            .expect("a bypass row must start with an unresolved finding");
+        let dispositions_before =
+            typed_evidence_disposition_count_for_finding_for_test(&self.db, &before.finding_id)
+                .await;
+
+        match row.bypass.as_str() {
+            // The generic debate-resolve path against the demand's own row.
+            "generic_debate_resolve" => {
+                let entry = self
+                    .proposals
+                    .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                        proposal_id: &self.proposal_id,
+                        kind: "needs_evidence",
+                        body: "evidence demanded for the cgroup claim",
+                        blocking: true,
+                        agent_role: "judge",
+                        author_kind: "agent",
+                        author_model: Some("matrix-judge"),
+                        source_task_id: Some(spike_task_id),
+                        against_revision_seq: 1,
+                        round: 1,
+                        body_metadata: Some(
+                            &NeedsEvidenceClaimLink::from_claim(
+                                &self.proposal_id,
+                                spike_task_id,
+                                &self.claim(spike_task_id),
+                            )
+                            .to_value(),
+                        ),
+                    })
+                    .await
+                    .unwrap();
+                let response = djinn_core::auth_context::SESSION_USER_ID
+                    .scope(Some(self.user_id.clone()), async {
+                        self.server()
+                            .dispatch_tool("proposal_debate_resolve", json!({ "id": entry.id }))
+                            .await
+                    })
+                    .await
+                    .unwrap();
+                let error = response
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("{}: generic resolution must be refused", row.name));
+                assert!(
+                    error.contains("typed_evidence_generic_resolution_forbidden"),
+                    "{}: refusal must be typed: {error}",
+                    row.name
+                );
+                assert!(
+                    error.contains(&before.finding_id),
+                    "{}: refusal must name the bound finding: {error}",
+                    row.name
+                );
+                // The debate row itself must still be open.
+                assert!(
+                    self.proposals
+                        .get_debate_trail_entry(&entry.id)
+                        .await
+                        .unwrap()
+                        .expect("the debate entry persists")
+                        .resolved_at
+                        .is_none(),
+                    "{}: a refused generic resolution must not resolve the row",
+                    row.name
+                );
+            }
+            // A disposition attempted by the Advocate rather than the Judge.
+            "advocate_disposition" => {
+                let judge_task_id = self.materialize_judge().await;
+                switch_to_advocate_authority_for_test(&self.db, &judge_task_id).await;
+                let creator = TaskRepository::new(self.db.clone(), EventBus::noop())
+                    .get(&judge_task_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .created_by_user_id;
+                let validation_id =
+                    djinn_db::test_support::typed_evidence_validation_snapshot_for_finding_for_test(
+                        &self.db,
+                        &before.finding_id,
+                    )
+                    .await
+                    .validation_id;
+                for (tool, args) in [
+                    (
+                        "proposal_refinement_resolve_evidence",
+                        json!({
+                            "finding_id": before.finding_id,
+                            "validation_result_id": validation_id,
+                            "folding_revision": 1,
+                            "rationale": "the advocate considers this settled",
+                        }),
+                    ),
+                    (
+                        "proposal_refinement_withdraw_evidence",
+                        json!({
+                            "finding_id": before.finding_id,
+                            "folding_revision": 1,
+                            "rationale": "the advocate considers this non-load-bearing",
+                            "withdrawal_is_non_load_bearing": true,
+                        }),
+                    ),
+                ] {
+                    let response = djinn_core::auth_context::SESSION_USER_ID
+                        .scope(Some(creator.clone()), async {
+                            self.server().dispatch_tool(tool, args).await
+                        })
+                        .await
+                        .unwrap();
+                    let error = response
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| {
+                            panic!("{}: {tool} by the Advocate must be refused", row.name)
+                        });
+                    assert!(
+                        error.contains("active_judge_required") || error.contains("unauthorized"),
+                        "{}: {tool} refusal must name the authority failure: {error}",
+                        row.name
+                    );
+                }
+            }
+            // Task closure alone, with no durable evidence return.
+            "spike_task_closed" => {
+                TaskRepository::new(self.db.clone(), EventBus::noop())
+                    .set_status_with_reason(spike_task_id, "closed", Some("completed"))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    djinn_db::test_support::task_status_for_test(&self.db, spike_task_id).await,
+                    "closed",
+                    "{}: the fixture must actually close the spike",
+                    row.name
+                );
+            }
+            other => unreachable!("unknown bypass {other}"),
+        }
+
+        // The persisted lifecycle is unchanged and nothing was disposed.
+        let after = typed
+            .unresolved_projection(&self.proposal_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{}: the bypass cleared the finding", row.name));
+        assert_eq!(
+            (after.finding_id.as_str(), after.lifecycle),
+            (before.finding_id.as_str(), before.lifecycle),
+            "{}: the bypass changed the persisted lifecycle",
+            row.name
+        );
+        assert_eq!(
+            typed_evidence_disposition_count_for_finding_for_test(&self.db, &before.finding_id)
+                .await,
+            dispositions_before,
+            "{}: the bypass wrote a typed_evidence_dispositions row",
             row.name
         );
     }
@@ -599,18 +785,32 @@ async fn run_row(harness: &Harness, transitions: &[String], row: &Row) {
                 .expect("a blocking row must have an unresolved finding");
             let error =
                 error.unwrap_or_else(|| panic!("{}/{transition} must be refused", row.name));
-            // AC2: all four typed diagnostics in every refusal.
-            for (label, needle) in [
-                ("finding id", finding_id.as_str()),
-                ("claim", CLAIM_QUESTION),
-                ("lifecycle", row.lifecycle.as_str()),
-                ("originating revision seq", "demanded against revision 1"),
-            ] {
-                assert!(
-                    error.contains(needle),
-                    "{}/{transition} refusal must name the {label}: {error}",
+            match row.expected_refusal.as_str() {
+                // AC2: all four typed diagnostics in every refusal.
+                "typed_diagnostics" => {
+                    for (label, needle) in [
+                        ("finding id", finding_id.as_str()),
+                        ("claim", CLAIM_QUESTION),
+                        ("lifecycle", row.lifecycle.as_str()),
+                        ("originating revision seq", "demanded against revision 1"),
+                    ] {
+                        assert!(
+                            error.contains(needle),
+                            "{}/{transition} refusal must name the {label}: {error}",
+                            row.name
+                        );
+                    }
+                }
+                // Closing the linked spike leaves the compatibility link on an
+                // inactive task. The dual read has always called that drift, so
+                // the gate refuses with the parity reason instead — still a
+                // refusal, and the finding is still unresolved.
+                "parity_fail_closed" => assert!(
+                    error.contains("typed_evidence_parity_mismatch"),
+                    "{}/{transition} must fail closed on parity: {error}",
                     row.name
-                );
+                ),
+                other => panic!("row {} has unknown refusal shape {other:?}", row.name),
             }
             assert!(
                 !case.persisted(transition).await,
@@ -653,10 +853,16 @@ async fn run_row(harness: &Harness, transitions: &[String], row: &Row) {
             TypedEvidenceGateMode::Enforce,
         )
         .await;
+        // The composed gate must refuse in the same shape the transition did.
+        let needle = if row.expected_refusal == "parity_fail_closed" {
+            "typed_evidence_parity_mismatch"
+        } else {
+            "unresolved typed evidence finding"
+        };
         let composed_blocks = composed
             .failures()
             .iter()
-            .any(|failure| failure.contains("unresolved typed evidence finding"));
+            .any(|failure| failure.contains(needle));
         assert_eq!(
             composed_blocks,
             row.expects_block(),
@@ -667,7 +873,7 @@ async fn run_row(harness: &Harness, transitions: &[String], row: &Row) {
 }
 
 /// Every fixture row, grouped so nextest runs the groups in parallel.
-async fn run_group(predicate: impl Fn(&Row) -> bool) -> usize {
+async fn run_group(predicate: impl Fn(&Row) -> bool) {
     let matrix = matrix();
     let rows: Vec<Row> = matrix
         .rows
@@ -680,62 +886,56 @@ async fn run_group(predicate: impl Fn(&Row) -> bool) -> usize {
     for row in &rows {
         run_row(&harness, &matrix.transitions, row).await;
     }
-    rows.len()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn typed_evidence_gate_matrix_demanded() {
-    assert_eq!(run_group(|row| row.lifecycle == "demanded").await, 6);
+    run_group(|row| row.lifecycle == "demanded").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn typed_evidence_gate_matrix_spike_active() {
-    assert_eq!(run_group(|row| row.lifecycle == "spike_active").await, 6);
+    run_group(|row| row.lifecycle == "spike_active").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn typed_evidence_gate_matrix_evidence_received_resolved() {
-    assert_eq!(
-        run_group(|row| row.lifecycle == "evidence_received"
-            && row.evidence_outcome.as_deref() == Some("resolved"))
-        .await,
-        6
-    );
+    run_group(|row| {
+        row.lifecycle == "evidence_received" && row.evidence_outcome.as_deref() == Some("resolved")
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn typed_evidence_gate_matrix_evidence_received_partial() {
-    assert_eq!(
-        run_group(|row| row.lifecycle == "evidence_received"
-            && row.evidence_outcome.as_deref() == Some("partial"))
-        .await,
-        6
-    );
+    run_group(|row| {
+        row.lifecycle == "evidence_received" && row.evidence_outcome.as_deref() == Some("partial")
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn typed_evidence_gate_matrix_evidence_received_unresolved() {
-    assert_eq!(
-        run_group(|row| row.lifecycle == "evidence_received"
-            && row.evidence_outcome.as_deref() == Some("unresolved"))
-        .await,
-        6
-    );
+    run_group(|row| {
+        row.lifecycle == "evidence_received"
+            && row.evidence_outcome.as_deref() == Some("unresolved")
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn typed_evidence_gate_matrix_failed() {
-    assert_eq!(run_group(|row| row.lifecycle == "failed").await, 6);
+    run_group(|row| row.lifecycle == "failed").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn typed_evidence_gate_matrix_resolved() {
-    assert_eq!(run_group(|row| row.lifecycle == "resolved").await, 6);
+    run_group(|row| row.lifecycle == "resolved").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn typed_evidence_gate_matrix_withdrawn() {
-    assert_eq!(run_group(|row| row.lifecycle == "withdrawn").await, 6);
+    run_group(|row| row.lifecycle == "withdrawn").await;
 }
 
 /// One lifecycle group's membership predicate.
@@ -774,18 +974,55 @@ fn typed_evidence_gate_matrix_groups_cover_every_row() {
             row.name
         );
     }
+    let cross_product: Vec<&Row> = matrix
+        .rows
+        .iter()
+        .filter(|row| row.bypass == "none")
+        .collect();
     assert_eq!(
-        matrix.rows.len(),
+        cross_product.len(),
         48,
         "8 lifecycles x 3 revisions x 2 verdict forms"
     );
+    assert!(
+        cross_product
+            .iter()
+            .all(|row| row.expected_refusal == "typed_diagnostics"),
+        "the ordinary cross product must always name the finding"
+    );
+    // Every closure bypass is exercised, and every bypass row must block.
+    for bypass in [
+        "generic_debate_resolve",
+        "advocate_disposition",
+        "spike_task_closed",
+    ] {
+        let rows: Vec<&Row> = matrix
+            .rows
+            .iter()
+            .filter(|row| row.bypass == bypass)
+            .collect();
+        assert_eq!(rows.len(), 2, "{bypass} must cover both verdict forms");
+        let expected_shape = if bypass == "spike_task_closed" {
+            "parity_fail_closed"
+        } else {
+            "typed_diagnostics"
+        };
+        assert!(
+            rows.iter()
+                .all(|row| row.expected_refusal == expected_shape),
+            "{bypass} must refuse as {expected_shape}"
+        );
+        assert!(
+            rows.iter().all(|row| row.expects_block()),
+            "{bypass} must never admit"
+        );
+    }
     let names: std::collections::BTreeSet<&str> =
         matrix.rows.iter().map(|row| row.name.as_str()).collect();
     assert_eq!(names.len(), matrix.rows.len(), "row names must be unique");
     for offset in [0, 1, 2] {
         assert_eq!(
-            matrix
-                .rows
+            cross_product
                 .iter()
                 .filter(|row| row.revision_offset == offset)
                 .count(),
@@ -795,8 +1032,7 @@ fn typed_evidence_gate_matrix_groups_cover_every_row() {
     }
     for form in ["structured", "prose_only"] {
         assert_eq!(
-            matrix
-                .rows
+            cross_product
                 .iter()
                 .filter(|row| row.verdict_form == form)
                 .count(),
@@ -804,6 +1040,123 @@ fn typed_evidence_gate_matrix_groups_cover_every_row() {
             "every verdict form must be exercised across all eight lifecycles"
         );
     }
+}
+
+/// A `resolved` lifecycle is only reachable with an active Judge and a
+/// committed folding revision. A disposition missing either is refused at the
+/// repository boundary, and refusal is asserted by re-reading the finding.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_evidence_gate_matrix_resolution_requires_a_judge_and_a_committed_revision() {
+    let harness = Harness::new().await;
+    let row = Row {
+        name: "resolution-boundary".into(),
+        lifecycle: "evidence_received".into(),
+        evidence_outcome: Some("resolved".into()),
+        revision_offset: 0,
+        verdict_form: "structured".into(),
+        expected: "blocked".into(),
+        bypass: "none".into(),
+        expected_refusal: "typed_diagnostics".into(),
+    };
+    let case = harness.case(&row).await;
+    let validation_id =
+        djinn_db::test_support::typed_evidence_validation_snapshot_for_finding_for_test(
+            &case.db,
+            &case.finding_id,
+        )
+        .await
+        .validation_id;
+    let judge_task_id = case.materialize_judge().await;
+    let judge_creator = TaskRepository::new(case.db.clone(), EventBus::noop())
+        .get(&judge_task_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .created_by_user_id;
+
+    // No Judge attribution: a caller with no active Judge task of their own.
+    let stranger = djinn_db::UserRepository::new(case.db.clone())
+        .upsert_from_github(
+            770_000 + i64::from(std::process::id() % 90_000),
+            &format!("stranger-{}", uuid::Uuid::now_v7()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let attempts = [
+        ("no active Judge attribution", stranger.id.clone(), 1),
+        (
+            "uncommitted folding revision",
+            judge_creator.clone(),
+            // The head is revision 1, so 99 names no committed spec revision.
+            99,
+        ),
+    ];
+    for (label, caller_user_id, folding_revision) in attempts {
+        let dispositions_before =
+            djinn_db::test_support::typed_evidence_disposition_count_for_finding_for_test(
+                &case.db,
+                &case.finding_id,
+            )
+            .await;
+        case.proposals
+            .dispose_evidence_atomically(AtomicEvidenceDispositionInput {
+                finding_id: case.finding_id.clone(),
+                validation_result_id: Some(validation_id.clone()),
+                folding_revision,
+                disposition: TribunalEvidenceLifecycle::Resolved,
+                rationale: "the evidence settles the claim".into(),
+                withdrawal_is_non_load_bearing: false,
+                caller_user_id,
+            })
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{label} must be refused at the repository boundary"));
+        assert_eq!(
+            TypedEvidenceRepository::new(case.db.clone())
+                .unresolved_projection(&case.proposal_id)
+                .await
+                .unwrap()
+                .map(|projection| projection.finding_id)
+                .as_deref(),
+            Some(case.finding_id.as_str()),
+            "{label} must leave the finding unresolved"
+        );
+        assert_eq!(
+            djinn_db::test_support::typed_evidence_disposition_count_for_finding_for_test(
+                &case.db,
+                &case.finding_id
+            )
+            .await,
+            dispositions_before,
+            "{label} must write no disposition row"
+        );
+    }
+
+    // Both together do resolve it, so the refusals above are the assertions'
+    // and not the fixture's.
+    case.proposals
+        .dispose_evidence_atomically(AtomicEvidenceDispositionInput {
+            finding_id: case.finding_id.clone(),
+            validation_result_id: Some(validation_id),
+            folding_revision: 1,
+            disposition: TribunalEvidenceLifecycle::Resolved,
+            rationale: "the evidence settles the claim".into(),
+            withdrawal_is_non_load_bearing: false,
+            caller_user_id: judge_creator,
+        })
+        .await
+        .expect("an active Judge and a committed revision must resolve");
+    assert_eq!(
+        TypedEvidenceRepository::new(case.db.clone())
+            .unresolved_projection(&case.proposal_id)
+            .await
+            .unwrap(),
+        None,
+        "a well-formed resolution must clear the gate"
+    );
 }
 
 /// AC3 — a withdrawal that does not carry the non-load-bearing assertion, or
@@ -819,6 +1172,8 @@ async fn typed_evidence_gate_matrix_rejects_a_non_load_bearing_withdrawal() {
         revision_offset: 0,
         verdict_form: "structured".into(),
         expected: "blocked".into(),
+        bypass: "none".into(),
+        expected_refusal: "typed_diagnostics".into(),
     };
     let case = harness.case(&row).await;
     let validation_id =

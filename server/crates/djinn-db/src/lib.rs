@@ -100,6 +100,7 @@ pub mod test_support {
         structured_evidence_handoff_counts_for_test, switch_to_adversary_authority_for_test,
         switch_to_advocate_authority_for_test, switch_to_judge_authority_for_test,
         task_attempt_count_for_test, task_row_count_for_test, task_status_for_test,
+        typed_evidence_disposition_count_for_finding_for_test,
         typed_evidence_disposition_snapshot_for_test, typed_evidence_finding_snapshot_for_test,
         typed_evidence_retry_snapshot_for_test, typed_evidence_rollout_snapshot_for_test,
         typed_evidence_transition_count_for_validation_for_test,

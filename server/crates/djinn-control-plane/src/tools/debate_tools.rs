@@ -608,6 +608,36 @@ impl DjinnMcpServer {
                 Err(e) => Json(err_debate(e.to_string())),
             };
         }
+        // An evidence-lifecycle row is the legacy face of a typed finding.
+        // Resolving it generically would mark the demand addressed while
+        // `typed_evidence_findings.lifecycle` stayed exactly where it was — a
+        // settled-looking debate trail resting on an unproven claim. The typed
+        // terminal path (`proposal_refinement_resolve_evidence` /
+        // `_withdraw_evidence`, Judge-authorized) is the only way to close it.
+        match djinn_db::TypedEvidenceRepository::new(self.state.db().clone())
+            .unresolved_finding_for_debate_entry(&entry.id)
+            .await
+        {
+            Ok(Some(projection)) => {
+                return Json(err_debate(format!(
+                    "typed_evidence_generic_resolution_forbidden: debate entry {} is bound to \
+                     unresolved typed evidence finding {} (lifecycle: {}); resolve or withdraw it \
+                     through the Judge-authorized typed disposition instead",
+                    entry.id,
+                    projection.finding_id,
+                    projection.lifecycle.as_str(),
+                )));
+            }
+            Ok(None) => {}
+            // An unreadable typed authority is indistinguishable from a bound
+            // one for the purposes of admitting a generic resolution.
+            Err(error) => {
+                return Json(err_debate(format!(
+                    "typed_evidence_generic_resolution_forbidden: typed authority unreadable ({error})"
+                )));
+            }
+        }
+
         match repo.resolve_debate_trail_entry(&p.id).await {
             Ok(updated) => Json(ProposalDebateTrailResponse {
                 entry: Some((&updated).into()),
