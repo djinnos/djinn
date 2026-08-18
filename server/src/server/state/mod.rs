@@ -167,17 +167,108 @@ impl StartupReconnectabilityMeasurement {
     }
 }
 
-/// Closed Stage A identity gate. Invalid identities and identities omitted
-/// from the immutable non-terminal ledger census fail closed.
+/// Pre-mutation resolution of one running session's durable task-run identity.
+///
+/// Every arm is a *different* fact, and the design matrix gives two of them
+/// opposite verdicts: a NULL identity positively proves the session cannot own
+/// a task-run Job, whereas a blank non-null identity is malformed data — and
+/// malformed data is not absence proof. Collapsing the two is exactly the bug
+/// this enum exists to prevent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StageAIdentity {
+    /// No authoritative census (a configured inventory whose LIST failed, or a
+    /// ledger read that errored). Nothing about any identity is decidable, so
+    /// every shape fails closed.
+    Unresolved,
+    /// `sessions.task_run_id IS NULL`: a shape that cannot own a task-run Job.
+    Null,
+    /// Non-null but whitespace-only.
+    Malformed,
+    /// Non-null identity with no durable `task_runs` row at all.
+    MissingLedger,
+    /// A durable row whose status this build does not recognize.
+    UnrecognizedStatus,
+    /// A durable terminal row: the ledger itself proves there is no
+    /// non-terminal executor-bearing run behind this session.
+    Terminal,
+    /// A durable `starting`/`running` row the census witnessed.
+    NonTerminal,
+}
+
+/// Closed Stage A identity gate implementing the proposal's design matrix.
+///
+/// Destructive rows: a NULL identity, a terminal ledger row, and a witnessed
+/// non-terminal row the census proved destructively gone. Everything else —
+/// malformed, missing from the ledger, unrecognized status, unresolved census,
+/// or a live/creation-transit/unknown witness — preserves.
+///
+/// `connected == true` is preservation-only: live RPC connectivity can only
+/// ever save a session, never condemn one. `connected == false` supplies no
+/// absence evidence of its own; it merely stops overriding the census.
 pub(crate) fn stage_a_identity_is_destructive(
     task_run_id: Option<&str>,
+    identity: StageAIdentity,
     positive_gone: &HashSet<&str>,
     connected: bool,
 ) -> bool {
-    let Some(task_run_id) = task_run_id.map(str::trim).filter(|id| !id.is_empty()) else {
+    if connected {
         return false;
+    }
+    match identity {
+        StageAIdentity::Null | StageAIdentity::Terminal => true,
+        StageAIdentity::NonTerminal => task_run_id
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .is_some_and(|id| positive_gone.contains(id)),
+        StageAIdentity::Unresolved
+        | StageAIdentity::Malformed
+        | StageAIdentity::MissingLedger
+        | StageAIdentity::UnrecognizedStatus => false,
+    }
+}
+
+/// Resolve one running session's identity against the immutable census and the
+/// pre-mutation task-run ledger the census was built from.
+///
+/// The census already read every non-terminal row before any startup mutation,
+/// so a witnessed identity needs no second read. Only identities the census did
+/// not witness — terminal, missing, or corrupt rows, which `list_startup_live`
+/// deliberately excludes — cost one bounded lookup, and that lookup happens
+/// before Stage A writes anything.
+pub(crate) async fn resolve_stage_a_identity(
+    census: &StartupCensus,
+    runs: &djinn_db::TaskRunRepository,
+    task_run_id: Option<&str>,
+) -> StageAIdentity {
+    if census.availability() != InventoryAvailability::Available {
+        return StageAIdentity::Unresolved;
+    }
+    let Some(raw) = task_run_id else {
+        return StageAIdentity::Null;
     };
-    !connected && positive_gone.contains(task_run_id)
+    let id = raw.trim();
+    if id.is_empty() {
+        return StageAIdentity::Malformed;
+    }
+    if census.runs().iter().any(|run| run.task_run_id == id) {
+        return StageAIdentity::NonTerminal;
+    }
+    match runs.get(id).await {
+        Ok(Some(run)) => match run.status.parse::<djinn_core::models::TaskRunStatus>() {
+            Ok(status) if status.is_terminal() => StageAIdentity::Terminal,
+            Ok(_) => StageAIdentity::NonTerminal,
+            Err(_) => StageAIdentity::UnrecognizedStatus,
+        },
+        Ok(None) => StageAIdentity::MissingLedger,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                task_run_id = %id,
+                "Stage A could not resolve a durable identity; preserving"
+            );
+            StageAIdentity::Unresolved
+        }
+    }
 }
 
 /// Build a `QdrantConfig` from `QDRANT_URL` (and friends), falling back to
@@ -2588,6 +2679,7 @@ impl AppState {
                         .then_some(run.task_run_id.as_str())
                 })
                 .collect();
+            let runs = djinn_db::TaskRunRepository::new(self.db().clone());
             let mut session_ids = HashSet::new();
             match repo.list_active().await {
                 Ok(sessions) => {
@@ -2602,19 +2694,37 @@ impl AppState {
                                     && matches!(run.witness, TaskRunWitness::Unknown)
                             })
                         });
+                        let identity =
+                            resolve_stage_a_identity(census, &runs, session.task_run_id.as_deref())
+                                .await;
                         if stage_a_identity_is_destructive(
                             session.task_run_id.as_deref(),
+                            identity,
                             &gone,
                             connected,
                         ) {
                             session_ids.insert(session.id);
-                        } else if unknown {
+                            continue;
+                        }
+                        // Each preserved shape reports its own reason. They are
+                        // not interchangeable: "the census could not see this
+                        // run" and "this identity is malformed" are different
+                        // facts and only one of them is about the cluster.
+                        let reason = match identity {
+                            _ if unknown => Some("unknown"),
+                            StageAIdentity::Malformed => Some("malformed_identity"),
+                            StageAIdentity::MissingLedger => Some("missing_ledger"),
+                            StageAIdentity::UnrecognizedStatus => Some("unrecognized_status"),
+                            StageAIdentity::Unresolved => Some("unknown"),
+                            _ => None,
+                        };
+                        if let Some(reason) = reason {
                             tracing::info!(
                                 stage = "startup_stage_a",
-                                reason = "unknown",
+                                reason,
                                 session_id = %session.id,
                                 task_run_id = ?session.task_run_id,
-                                "startup session reaper deferred unknown census evidence"
+                                "startup session reaper deferred census candidate"
                             );
                         }
                     }
