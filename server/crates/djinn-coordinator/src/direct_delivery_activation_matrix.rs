@@ -243,6 +243,17 @@ async fn c0_the_shipped_epoch_is_disabled_at_rest_even_with_a_complete_census() 
             .all(|(id, _, generation)| id == &fixture.incarnation_id && *generation == 1),
         "capabilities are advertised by this incarnation at the target generation: {rows:?}"
     );
+
+    // Positive control. Everything above is an absence, and an absence proves
+    // nothing on its own: record the request and the identical pass, over the
+    // identical census, activates. So the epoch stayed disabled because of the
+    // request and nothing else.
+    fixture.request_activation().await;
+    assert_eq!(
+        fixture.leader_pass().await,
+        ActivationPassOutcome::Activated { generation: 1 }
+    );
+    fixture.assert_epoch("active", 1).await;
 }
 
 // ─── C1 / C2 / C3: capability prerequisites ────────────────────────────────
@@ -772,6 +783,16 @@ async fn activation_rejects_legacy_task_pr_writes_for_a_direct_identity() {
         }
         other => panic!("activation must reject legacy task-PR writes, got {other:?}"),
     }
+    // Control the absence below: prove the recorder was live for this call
+    // rather than silently inert, by pinning the operations it *did* observe.
+    assert_eq!(
+        observed,
+        vec![
+            BoundaryOperation::CapabilityProbe,
+            BoundaryOperation::ResolveTaskActiveAttempt,
+        ],
+        "the refusal is taken at the epoch probe and the canonical resolver"
+    );
     assert!(
         !observed.iter().any(|operation| matches!(
             operation,
