@@ -29,9 +29,9 @@
     "This list is a debt ledger. It must only ever shrink."
   ],
   "measuredAt": "2026-08-18",
-  "measuredOnCommit": "2b827e5c8",
+  "measuredOnCommit": "a14b5c1ad",
   "measuredWith": "pnpm --dir ui test  (vitest 4.1.2, --pool=vmThreads, node 22)",
-  "totalTests": 1596,
+  "totalTests": 1600,
   "totalTestFiles": 136,
   "totalKnownFailures": 23,
   "knownFailureFiles": 9,

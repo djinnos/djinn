@@ -4,7 +4,7 @@ expression: render(case)
 ---
 # Typed evidence
 
-Finding `01a01188-0000-7000-8000-0000000d0013` is `demanded`, demanded against revision 2.
+Finding `01a01188-0000-7000-8000-0000000d0001` is `demanded`, demanded against revision 2.
 Claim under demand: Does the new launcher protocol parse a payload written by the previous release?
 
 ## Demand thresholds

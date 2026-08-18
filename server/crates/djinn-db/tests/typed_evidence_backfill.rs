@@ -8,10 +8,15 @@ use djinn_db::{
 };
 use serde_json::{Value, json};
 
-/// `fixtures/typed_evidence_backfill.json` is the single declaration of the
-/// legacy claim shape, the two backfill projections, and the rollback
-/// expectation. Every key in it is read below, so corrupting any one of them
-/// reddens `cargo test -p djinn-db typed_evidence_backfill`.
+/// `fixtures/typed_evidence_backfill.json` is the single declaration of the two
+/// backfill projections and the rollback expectation. Every key in it is read
+/// below, so corrupting any one of them reddens
+/// `cargo test -p djinn-db typed_evidence_backfill`.
+///
+/// It no longer declares the legacy claim shape. That block seeded the legacy
+/// claim AND supplied the expectation the finding was compared against, so
+/// corrupting it moved input and expectation together and could never redden;
+/// it was removed and the shape now lives in `fn claim(&Seed)` below.
 fn fixture() -> Value {
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/typed_evidence_backfill.json"))

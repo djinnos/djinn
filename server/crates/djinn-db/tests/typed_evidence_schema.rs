@@ -10,6 +10,8 @@ use djinn_db::{
     RefinementAdmissionOutcome, RefinementAdmissionSource, TypedEvidenceRepository,
 };
 
+mod scenario_ledger;
+
 async fn seed(db: &Database) -> (String, String, String, String) {
     let project_id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
@@ -247,7 +249,7 @@ async fn typed_evidence_lifecycle_v1() {
                 .to_owned()
         })
         .collect();
-    let mut proven_scenarios: Vec<&'static str> = Vec::new();
+    let mut proven = scenario_ledger::ProvenScenarios::new();
 
     let db = Database::open_in_memory().unwrap();
     db.ensure_initialized().await.unwrap();
@@ -302,11 +304,10 @@ async fn typed_evidence_lifecycle_v1() {
     .await
     .unwrap();
     assert_eq!(created.finding.id, finding_id);
-    assert!(
+    let unresolved_at_n =
         TypedEvidenceRepository::has_unresolved_in_transaction(&mut tx, &proposal_id)
             .await
-            .unwrap()
-    );
+            .unwrap();
     // A replay from N+2 returns the original finding; a distinct N+1 demand
     // is blocked proposal-wide without adding history or another task binding.
     let replay = TypedEvidenceRepository::demand_in_transaction(
@@ -315,59 +316,81 @@ async fn typed_evidence_lifecycle_v1() {
     )
     .await
     .unwrap();
-    assert_eq!(replay.finding.id, finding_id);
-    proven_scenarios.push("identical_demand_idempotent");
-    proven_scenarios.push("cross_revision_n_n1_n2_blocking");
-    assert!(matches!(
-        TypedEvidenceRepository::demand_in_transaction(
-            &mut tx,
-            demand(uuid::Uuid::now_v7().to_string(), "different-demand", 2),
-        )
-        .await,
-        Err(djinn_db::Error::InvalidTransition(message)) if message == conflict_error
-    ));
+    proven.observes(
+        "identical_demand_idempotent",
+        replay.finding.id.clone(),
+        finding_id.clone(),
+        "an identical demand hash raised from a later revision returns the original finding",
+    );
+    let distinct = TypedEvidenceRepository::demand_in_transaction(
+        &mut tx,
+        demand(uuid::Uuid::now_v7().to_string(), "different-demand", 2),
+    )
+    .await;
+    let distinct_refused = matches!(
+        &distinct,
+        Err(djinn_db::Error::InvalidTransition(message)) if *message == conflict_error
+    );
+    proven.observes(
+        "cross_revision_n_n1_n2_blocking",
+        (unresolved_at_n, distinct_refused),
+        (true, true),
+        "one unresolved finding blocks the proposal at N, admits the N+2 replay, and \
+         refuses the distinct N+1 demand",
+    );
     let transitions: i64 =
         sqlx::query_scalar("SELECT count(*) FROM typed_evidence_transitions WHERE finding_id=$1")
             .bind(&finding_id)
             .fetch_one(&mut *tx)
             .await
             .unwrap();
-    assert_eq!(transitions, 1, "conflict writes no transition");
-    proven_scenarios.push("distinct_demand_no_write_conflict");
+    proven.observes(
+        "distinct_demand_no_write_conflict",
+        transitions,
+        1,
+        "the refused distinct demand writes no transition",
+    );
 
     // Persist an allowed non-terminal edge, then reject an unlisted edge.
-    TypedEvidenceRepository::append_transition_in_transaction(
-        &mut tx,
-        AppendTypedEvidenceTransitionInput {
-            id: uuid::Uuid::now_v7().to_string(),
-            finding_id: finding_id.clone(),
-            ordinal: 2,
-            from_lifecycle: Some(TribunalEvidenceLifecycle::Demanded),
-            to_lifecycle: TribunalEvidenceLifecycle::SpikeActive,
-            actor_task_id: Some(judge_task_id.clone()),
-            metadata: serde_json::json!({}),
-        },
-    )
-    .await
-    .unwrap();
-    assert!(matches!(
+    proven.accepts(
+        "persisted_nonterminal_transition",
         TypedEvidenceRepository::append_transition_in_transaction(
             &mut tx,
             AppendTypedEvidenceTransitionInput {
                 id: uuid::Uuid::now_v7().to_string(),
                 finding_id: finding_id.clone(),
-                ordinal: 3,
-                from_lifecycle: Some(TribunalEvidenceLifecycle::SpikeActive),
-                to_lifecycle: TribunalEvidenceLifecycle::Demanded,
+                ordinal: 2,
+                from_lifecycle: Some(TribunalEvidenceLifecycle::Demanded),
+                to_lifecycle: TribunalEvidenceLifecycle::SpikeActive,
                 actor_task_id: Some(judge_task_id.clone()),
                 metadata: serde_json::json!({}),
             },
         )
         .await,
-        Err(djinn_db::Error::InvalidTransition(message)) if message == "spike_active -> demanded"
-    ));
-    proven_scenarios.push("persisted_nonterminal_transition");
-    proven_scenarios.push("unlisted_transition_rejected");
+        "an edge the allowed set lists is persisted",
+    );
+    let unlisted = TypedEvidenceRepository::append_transition_in_transaction(
+        &mut tx,
+        AppendTypedEvidenceTransitionInput {
+            id: uuid::Uuid::now_v7().to_string(),
+            finding_id: finding_id.clone(),
+            ordinal: 3,
+            from_lifecycle: Some(TribunalEvidenceLifecycle::SpikeActive),
+            to_lifecycle: TribunalEvidenceLifecycle::Demanded,
+            actor_task_id: Some(judge_task_id.clone()),
+            metadata: serde_json::json!({}),
+        },
+    )
+    .await;
+    proven.observes(
+        "unlisted_transition_rejected",
+        matches!(
+            &unlisted,
+            Err(djinn_db::Error::InvalidTransition(message)) if message == "spike_active -> demanded"
+        ),
+        true,
+        "an edge the allowed set omits is refused by name",
+    );
     TypedEvidenceRepository::append_transition_in_transaction(
         &mut tx,
         AppendTypedEvidenceTransitionInput {
@@ -384,24 +407,29 @@ async fn typed_evidence_lifecycle_v1() {
     .unwrap();
 
     // Terminal edges can only be appended by the Judge disposition primitive.
-    assert!(matches!(
-        TypedEvidenceRepository::append_transition_in_transaction(
-            &mut tx,
-            AppendTypedEvidenceTransitionInput {
-                id: uuid::Uuid::now_v7().to_string(),
-                finding_id: finding_id.clone(),
-                ordinal: 2,
-                from_lifecycle: Some(TribunalEvidenceLifecycle::Demanded),
-                to_lifecycle: TribunalEvidenceLifecycle::Withdrawn,
-                actor_task_id: None,
-                metadata: serde_json::json!({}),
-            },
-        )
-        .await,
-        Err(djinn_db::Error::InvalidTransition(message))
-            if message == generic_transition_error
-    ));
-    proven_scenarios.push("generic_terminal_transition_rejected");
+    let generic_terminal = TypedEvidenceRepository::append_transition_in_transaction(
+        &mut tx,
+        AppendTypedEvidenceTransitionInput {
+            id: uuid::Uuid::now_v7().to_string(),
+            finding_id: finding_id.clone(),
+            ordinal: 2,
+            from_lifecycle: Some(TribunalEvidenceLifecycle::Demanded),
+            to_lifecycle: TribunalEvidenceLifecycle::Withdrawn,
+            actor_task_id: None,
+            metadata: serde_json::json!({}),
+        },
+    )
+    .await;
+    proven.observes(
+        "generic_terminal_transition_rejected",
+        matches!(
+            &generic_terminal,
+            Err(djinn_db::Error::InvalidTransition(message))
+                if *message == generic_transition_error
+        ),
+        true,
+        "the generic append primitive refuses every terminal edge",
+    );
     let dispose = |disposition,
                    judge_task_id: String,
                    folding_revision,
@@ -455,6 +483,7 @@ async fn typed_evidence_lifecycle_v1() {
                 "`terminal_controls.{key}` names `{token}`, which no probe in this test enforces",
             );
         }
+        let mut refused: Vec<String> = Vec::new();
         for token in TERMINAL_REQUIREMENTS {
             let (input, refusal) = match token {
                 "nonempty_rationale" => (
@@ -478,19 +507,28 @@ async fn typed_evidence_lifecycle_v1() {
             let error = TypedEvidenceRepository::dispose_in_transaction(&mut tx, input)
                 .await
                 .expect_err("an invalid terminal disposition never persists");
-            let refused = matches!(
+            if matches!(
                 &error,
                 djinn_db::Error::InvalidData(message) if message == refusal
-            );
-            assert_eq!(
-                refused,
-                required.contains(&token.to_owned()),
-                "`terminal_controls.{key}` must list `{token}` exactly when {disposition:?} is refused for it; got {error:?}",
-            );
+            ) {
+                refused.push((*token).to_owned());
+            }
         }
+        refused.sort();
+        let mut want = required.clone();
+        want.sort();
+        // The scenario is recorded BY this comparison, so deleting it deletes
+        // the ledger entry too.
+        proven.observes(
+            match key {
+                "resolved_requires" => "resolved_requires_judge_and_committed_folding_revision",
+                _ => "withdrawn_requires_rationale_and_non_load_bearing_assertion",
+            },
+            refused,
+            want,
+            "`terminal_controls` lists exactly the tokens this disposition is refused for",
+        );
     }
-    proven_scenarios.push("resolved_requires_judge_and_committed_folding_revision");
-    proven_scenarios.push("withdrawn_requires_rationale_and_non_load_bearing_assertion");
     tx.commit().await.unwrap();
 
     insert_committed_revision(&db, &proposal_id, 1).await;
@@ -511,11 +549,10 @@ async fn typed_evidence_lifecycle_v1() {
         resolved.finding_lifecycle,
         TribunalEvidenceLifecycle::Resolved
     );
-    assert!(
-        !TypedEvidenceRepository::has_unresolved_in_transaction(&mut tx, &proposal_id)
+    let unresolved_after_resolved =
+        TypedEvidenceRepository::has_unresolved_in_transaction(&mut tx, &proposal_id)
             .await
-            .unwrap()
-    );
+            .unwrap();
     tx.commit().await.unwrap();
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -560,50 +597,43 @@ async fn typed_evidence_lifecycle_v1() {
         withdrawn.finding_lifecycle,
         TribunalEvidenceLifecycle::Withdrawn
     );
-    assert!(
-        !TypedEvidenceRepository::has_unresolved_in_transaction(&mut tx, &proposal_id)
+    let unresolved_after_withdrawn =
+        TypedEvidenceRepository::has_unresolved_in_transaction(&mut tx, &proposal_id)
             .await
-            .unwrap()
-    );
+            .unwrap();
     tx.commit().await.unwrap();
-    proven_scenarios.push("resolved_and_withdrawn_clear_unresolved_projection");
+    proven.observes(
+        "resolved_and_withdrawn_clear_unresolved_projection",
+        (unresolved_after_resolved, unresolved_after_withdrawn),
+        (false, false),
+        "both terminal dispositions clear the proposal-wide unresolved projection",
+    );
 
     // Database append-only triggers protect lifecycle transition history.
-    for statement in [
+    let mutations = [
         "UPDATE typed_evidence_transitions SET metadata='{}'::jsonb WHERE finding_id=$1",
         "DELETE FROM typed_evidence_transitions WHERE finding_id=$1",
-    ] {
+    ];
+    let mut rejected: Vec<&str> = Vec::new();
+    for statement in mutations {
         let error = sqlx::query(statement)
             .bind(&finding_id)
             .execute(db.pool())
             .await
             .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("typed evidence transitions are append-only"),
-            "transition history rejects mutation: {statement}",
-        );
+        if error
+            .to_string()
+            .contains("typed evidence transitions are append-only")
+        {
+            rejected.push(statement);
+        }
     }
-    proven_scenarios.push("append_only_history");
+    proven.observes(
+        "append_only_history",
+        rejected,
+        mutations.to_vec(),
+        "the append-only trigger refuses both an update and a delete of transition history",
+    );
 
-    let mut proven: Vec<String> = proven_scenarios
-        .iter()
-        .map(|scenario| (*scenario).to_owned())
-        .collect();
-    proven.sort();
-    proven.dedup();
-    let mut declared = declared_scenarios.clone();
-    declared.sort();
-    declared.dedup();
-    assert_eq!(
-        declared.len(),
-        declared_scenarios.len(),
-        "the fixture must not declare a scenario twice",
-    );
-    assert_eq!(
-        proven, declared,
-        "every scenario the fixture declares must be proven by this body, and every scenario \
-         proven here must be declared by the fixture",
-    );
+    scenario_ledger::assert_ledger_reconciles(proven.into_sorted(), &declared_scenarios);
 }

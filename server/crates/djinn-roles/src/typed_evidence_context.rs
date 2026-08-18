@@ -244,12 +244,13 @@ pub fn assert_closed_shape(context: &TypedEvidenceRoleContextV1) {
          TYPED_EVIDENCE_ROLE_CONTEXT_V1_FIELDS deliberately, and only for a field that \
          is not a free-text question collection"
     );
-    // The pinned list must itself stay sorted and duplicate-free, or the
-    // comparison above could pass against a list that hides a field.
-    let mut sorted = TYPED_EVIDENCE_ROLE_CONTEXT_V1_FIELDS.to_vec();
-    sorted.sort_unstable();
-    sorted.dedup();
-    assert_eq!(sorted, TYPED_EVIDENCE_ROLE_CONTEXT_V1_FIELDS.to_vec());
+    // There was a follow-up here asserting that
+    // TYPED_EVIDENCE_ROLE_CONTEXT_V1_FIELDS is itself sorted and duplicate-free.
+    // It could not fail: `serialized_field_names` sorts, and a JSON object's
+    // keys are unique, so once the comparison above passes the pinned list is
+    // provably sorted and deduplicated. An assertion implied by the line before
+    // it reads as a second guard and is not one, so it is gone rather than
+    // sitting here claiming coverage it does not add.
 }
 
 /// Whether a role is shown the demand-threshold surface.

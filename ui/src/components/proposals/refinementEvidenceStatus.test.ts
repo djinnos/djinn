@@ -484,6 +484,10 @@ interface MatrixRow {
 const matrix = actionMatrix as unknown as {
   lifecycles: string[];
   outcomes: string[];
+  /** Server-projected retry authority. Both values must be covered. */
+  permissions: boolean[];
+  /** Whether the server named a failed transition. Both values must be covered. */
+  failed_transition_present: boolean[];
   rows: MatrixRow[];
 };
 
@@ -509,6 +513,13 @@ describe("typed evidence action matrix", () => {
     expect([...matrix.outcomes].sort()).toEqual(
       ["none", "partial", "resolved", "unresolved"].sort(),
     );
+    // The last two axes are read from the fixture rather than hardcoded here.
+    // They used to be declared in the JSON and consumed by nobody: the loops
+    // below wrote `["false", "true"]` inline, so editing either axis changed
+    // nothing at all. Now removing a value from `permissions` shrinks `wanted`
+    // and the row-set comparison fails.
+    expect([...matrix.permissions].sort()).toEqual([false, true]);
+    expect([...matrix.failed_transition_present].sort()).toEqual([false, true]);
 
     const key = (row: MatrixRow) =>
       [
@@ -521,14 +532,20 @@ describe("typed evidence action matrix", () => {
     const wanted: string[] = [];
     for (const lifecycle of matrix.lifecycles) {
       for (const outcome of matrix.outcomes) {
-        for (const permitted of ["false", "true"]) {
-          for (const hasTransition of ["false", "true"]) {
+        for (const permitted of matrix.permissions) {
+          for (const hasTransition of matrix.failed_transition_present) {
             wanted.push(`${lifecycle}|${outcome}|${permitted}|${hasTransition}`);
           }
         }
       }
     }
     expect([...seen].sort()).toEqual([...wanted].sort());
+    expect(wanted).toHaveLength(
+      matrix.lifecycles.length *
+        matrix.outcomes.length *
+        matrix.permissions.length *
+        matrix.failed_transition_present.length,
+    );
     expect(wanted).toHaveLength(6 * 4 * 2 * 2);
     expect(matrix.rows).toHaveLength(wanted.length);
   });
@@ -640,16 +657,30 @@ describe("typed evidence action matrix", () => {
   // ---- AC3: no resolve/withdraw affordance, anywhere ----------------------
 
   it("exposes no resolve or withdraw affordance on any row", () => {
+    // This used to be 96 runtime `expect(actions.resolve).toBe(false)`
+    // iterations. They could not fail: `refinementEvidenceStatus.ts` declares
+    // `resolve: false` and `withdraw: false` as literal *types*, so TypeScript
+    // already rejects any other value at the assignment and the runtime check
+    // restated what the compiler had proven.
+    //
+    // The guard that can fail is therefore a compile-time one. Widening either
+    // field to `boolean` — the change that would actually let an affordance
+    // appear — stops the two annotations below from compiling, and
+    // `pnpm test:typecheck:gate` covers this file.
+    const actions = classifyRow(matrix.rows[0]).typed.actions;
+    const resolveIsLiterallyFalse: false = actions.resolve;
+    const withdrawIsLiterallyFalse: false = actions.withdraw;
+    expect(resolveIsLiterallyFalse).toBe(false);
+    expect(withdrawIsLiterallyFalse).toBe(false);
+
+    // The action surface is closed on EVERY row: retry/resolve/withdraw and
+    // nothing else, so a future action cannot be added without updating this.
     for (const row of matrix.rows) {
-      const actions = classifyRow(row).typed.actions;
-      expect(actions.resolve, row.name).toBe(false);
-      expect(actions.withdraw, row.name).toBe(false);
+      expect(
+        Object.keys(classifyRow(row).typed.actions).sort(),
+        row.name,
+      ).toEqual(["resolve", "retry", "withdraw"]);
     }
-    // The action surface is closed: retry/resolve/withdraw and nothing else,
-    // so a future action cannot be added without updating this assertion.
-    expect(
-      Object.keys(classifyRow(matrix.rows[0]).typed.actions).sort(),
-    ).toEqual(["resolve", "retry", "withdraw"]);
   });
 
   // ---- AC4: the four blocking states are distinct from the clean states ---

@@ -33,6 +33,16 @@ struct Fixture {
     typed_demand_result_fields: BTreeSet<String>,
     typed_retry_response_fields: BTreeSet<String>,
     typed_disposition_response_fields: BTreeSet<String>,
+    /// The **complete** input-property set of each evidence tool, by tool name.
+    ///
+    /// This is the checkable form of "the demand schema exposes no free-text
+    /// question collection". The three `assert!(!properties.contains(...))`
+    /// lines that stood here named `open_questions`, `question_form` and
+    /// `prose` — none of which has ever been a field in any schema in this
+    /// repository, so they could not fail. A closed set can: adding ANY
+    /// property to any of the four tools reddens this test, whether or not
+    /// whoever added it thought to name it something a blocklist anticipated.
+    evidence_tool_input_properties: std::collections::BTreeMap<String, BTreeSet<String>>,
     demand_example: Value,
 }
 
@@ -221,10 +231,35 @@ fn typed_evidence_legacy_contract() {
         );
     }
 
-    for schema in [&demand, &retry, &resolve, &withdraw] {
-        let properties = keys(schema, &["inputSchema", "properties"]);
-        assert!(!properties.contains("open_questions"));
-        assert!(!properties.contains("question_form"));
-        assert!(!properties.contains("prose"));
+    // Each evidence tool's input surface is closed, and the fixture is where the
+    // closure is written down. A blocklist of names that never existed proved
+    // nothing; this fails on any property the fixture does not declare.
+    let mut declared_tools: BTreeSet<String> = fixture
+        .evidence_tool_input_properties
+        .keys()
+        .cloned()
+        .collect();
+    for (name, schema) in [
+        ("proposal_refinement_demand_evidence", &demand),
+        ("proposal_refinement_retry_evidence", &retry),
+        ("proposal_refinement_resolve_evidence", &resolve),
+        ("proposal_refinement_withdraw_evidence", &withdraw),
+    ] {
+        assert!(
+            declared_tools.remove(name),
+            "the fixture must declare the closed input-property set of {name}"
+        );
+        assert_eq!(
+            keys(schema, &["inputSchema", "properties"]),
+            fixture.evidence_tool_input_properties[name],
+            "{name}'s input properties are closed; a new field here is a new \
+             channel into the demand path and must be added to the fixture \
+             deliberately, and only for a field that is not a free-text \
+             question collection"
+        );
     }
+    assert!(
+        declared_tools.is_empty(),
+        "the fixture declares input properties for tools this test never checks: {declared_tools:?}"
+    );
 }
