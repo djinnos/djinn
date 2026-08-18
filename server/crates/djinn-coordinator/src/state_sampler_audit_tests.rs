@@ -701,3 +701,161 @@ fn state_sampler_audit_allows_referenced_unsafe_rows_and_rejects_bad_ones() {
     );
     assert!(validate_inventory(&undeclared, &DECLARED).is_err());
 }
+
+// ─── Documented-rule ↔ code binding (task `03im`) ────────────────────────────
+//
+// `validate_startup_row_resolves` above checks paths, symbol definitions and
+// call adjacency. It does not read a row's decision rule, which is how commit
+// `5df6e3425` changed the Stage A and Stage C authorization rules and left the
+// audit green while both rows stated the opposite of the code — one commit
+// after `cv5r` was created to stop exactly that drift.
+//
+// The rule is therefore no longer only English. Each startup row that gates on
+// a closed enum names its variants as a set, and the test below compares that
+// set against the set the production predicate actually authorizes, over every
+// variant the enum declares. Both sides can move; either move reddens the test.
+// Stage A's gate lives in `djinn-server`, which depends on this crate, so its
+// half of the binding is `server/src/server/tests/state_sampler_stage_a_binding.rs`.
+
+/// The variant names an `enum <name> { .. }` block declares in `source`.
+///
+/// Read from the source text rather than hand-listed so that adding a variant
+/// to the production enum cannot silently escape the documented set: the new
+/// name appears here, matches nothing in the document, and the comparison fails.
+fn declared_variants(source: &str, enum_name: &str) -> Vec<String> {
+    let header = format!("enum {enum_name} {{");
+    let start = source
+        .find(&header)
+        .unwrap_or_else(|| panic!("`{enum_name}` is not declared in the cited source"));
+    let body = &source[start + header.len()..];
+    let end = body
+        .find("\n}")
+        .unwrap_or_else(|| panic!("`{enum_name}` has no closing brace at file scope"));
+    body[..end]
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("//") && !line.starts_with('#'))
+        .map(|line| {
+            let variant = line.trim_end_matches(',');
+            assert!(
+                !variant.is_empty()
+                    && variant
+                        .chars()
+                        .all(|character| character.is_alphanumeric() || character == '_'),
+                "`{enum_name}` declares `{variant}`, which this contract cannot read as a plain \
+                 unit variant"
+            );
+            variant.to_owned()
+        })
+        .collect()
+}
+
+/// The `<key> = {A, B, C}` set an audit cell names, in the document's own words.
+fn documented_variant_set(cell: &str, key: &str) -> HashSet<String> {
+    let opening = format!("{key} = {{");
+    let start = cell
+        .find(&opening)
+        .unwrap_or_else(|| panic!("audit cell names no `{key}` variant set: {cell}"));
+    let body = &cell[start + opening.len()..];
+    let end = body
+        .find('}')
+        .unwrap_or_else(|| panic!("`{key}` variant set is not closed in the audit cell"));
+    let named: Vec<_> = body[..end]
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .collect();
+    assert!(!named.is_empty(), "`{key}` names no variant at all");
+    let unique: HashSet<_> = named.iter().cloned().collect();
+    assert_eq!(
+        unique.len(),
+        named.len(),
+        "`{key}` names a variant twice: {named:?}"
+    );
+    unique
+}
+
+/// The nine cells of the inventory row carrying `sampler_id`.
+fn audit_row(sampler_id: &str) -> Vec<&'static str> {
+    audit_rows(AUDIT)
+        .expect("inventory parses")
+        .into_iter()
+        .find(|row| row[0].starts_with(&format!("`{sampler_id}`")))
+        .unwrap_or_else(|| panic!("audit has no `{sampler_id}` row"))
+}
+
+/// Stage C: the projections the document admits to the age/owner classifier
+/// must be exactly the projections `startup_attempt_classification_authorized`
+/// admits, and the two documented sets together must cover the whole enum.
+#[test]
+fn startup_audit_stage_c_admitted_set_matches_the_code() {
+    use crate::startup_census::TaskCensusProjection;
+
+    // Exhaustive by construction: adding a variant stops this compiling.
+    fn name(projection: TaskCensusProjection) -> &'static str {
+        match projection {
+            TaskCensusProjection::Live => "Live",
+            TaskCensusProjection::CreationTransit => "CreationTransit",
+            TaskCensusProjection::Unknown => "Unknown",
+            TaskCensusProjection::DestructivelyGone => "DestructivelyGone",
+            TaskCensusProjection::NotApplicable => "NotApplicable",
+        }
+    }
+    const EVERY_PROJECTION: [TaskCensusProjection; 5] = [
+        TaskCensusProjection::Live,
+        TaskCensusProjection::CreationTransit,
+        TaskCensusProjection::Unknown,
+        TaskCensusProjection::DestructivelyGone,
+        TaskCensusProjection::NotApplicable,
+    ];
+
+    let declared: HashSet<_> =
+        declared_variants(include_str!("startup_census.rs"), "TaskCensusProjection")
+            .into_iter()
+            .collect();
+    let enumerated: HashSet<_> = EVERY_PROJECTION
+        .iter()
+        .map(|projection| name(*projection).to_owned())
+        .collect();
+    assert_eq!(
+        enumerated, declared,
+        "this contract does not cover every `TaskCensusProjection` variant the code declares"
+    );
+
+    let authorized: HashSet<String> = EVERY_PROJECTION
+        .iter()
+        .filter(|projection| {
+            crate::health::startup_attempt_classification_authorized(Some(**projection))
+        })
+        .map(|projection| name(*projection).to_owned())
+        .collect();
+    let deferred: HashSet<String> = EVERY_PROJECTION
+        .iter()
+        .filter(|projection| {
+            !crate::health::startup_attempt_classification_authorized(Some(**projection))
+        })
+        .map(|projection| name(*projection).to_owned())
+        .collect();
+
+    let cell = audit_row("startup-stage-c-pending-attempt-reap")[4];
+    assert_eq!(
+        documented_variant_set(cell, "stage_c_admitted"),
+        authorized,
+        "the Stage C audit row's admitted set does not match the projections \
+         `startup_attempt_classification_authorized` admits"
+    );
+    assert_eq!(
+        documented_variant_set(cell, "stage_c_deferred"),
+        deferred,
+        "the Stage C audit row's deferred set does not match the projections \
+         `startup_attempt_classification_authorized` refuses"
+    );
+
+    // The row also claims a missing projection is never admitted. That is the
+    // configured-but-unavailable census, and it is not a variant of the enum.
+    assert!(
+        !crate::health::startup_attempt_classification_authorized(None),
+        "the Stage C row claims a missing projection is never admitted"
+    );
+}

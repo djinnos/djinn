@@ -3139,7 +3139,7 @@ fn startup_task_run_mutation_authorized(run: &crate::startup_census::CensusTaskR
 ///
 /// A missing projection stays unauthorized: an unresolved census — including a
 /// configured but unavailable one — is not absence proof.
-fn startup_attempt_classification_authorized(
+pub(crate) fn startup_attempt_classification_authorized(
     projection: Option<crate::startup_census::TaskCensusProjection>,
 ) -> bool {
     matches!(
