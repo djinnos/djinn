@@ -193,6 +193,7 @@ async fn a_completed_window_reaches_persistence_with_exact_bounds_and_counts() {
         &catalog,
         &fence,
         &completed(&projection, &evidence, &attempts, counts(pool_id, 11, 9)),
+        7,
     )
     .await
     .expect("controller cycle");
@@ -252,6 +253,7 @@ async fn a_stale_controller_generation_cannot_commit_after_succession() {
                 &attempts,
                 counts(pool_id, admitted, admitted),
             ),
+            7,
         )
         .await
         .expect("controller cycle")
@@ -361,6 +363,7 @@ async fn coverage_loss_drains_enforcing_pools_before_the_next_acquisition() {
         &catalog,
         &fence,
         &completed(&projection, &[], &attempts, counts(pool_id, 4, 4)),
+        7,
     )
     .await
     .expect("controller cycle");
@@ -430,6 +433,7 @@ async fn coverage_loss_drains_enforcing_pools_before_the_next_acquisition() {
         &catalog,
         &fence,
         &completed(&projection, &[], &attempts, counts(pool_id, 4, 4)),
+        7,
     )
     .await
     .expect("controller cycle");

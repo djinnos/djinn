@@ -791,6 +791,7 @@ mod tests {
             rpc_registry: None,
             prune_tick_counter: 0,
             last_phase_c_window_start: None,
+            last_phase_c_window_trainable: false,
             throughput_events: std::collections::HashMap::new(),
             pr_status_cache: std::collections::HashMap::new(),
             pr_draft_first_seen: std::collections::HashMap::new(),
