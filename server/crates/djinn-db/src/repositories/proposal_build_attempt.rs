@@ -260,6 +260,18 @@ impl ProposalBuildAttemptRepository {
         row.map(TryInto::try_into).transpose()
     }
 
+    /// The single `active` attempt a proposal owns, if it has one. The
+    /// `proposal_build_attempts_one_active_per_proposal` partial unique index
+    /// makes this at most one row.
+    pub async fn active_attempt(
+        &self,
+        proposal_id: &str,
+    ) -> DbResult<Option<ProposalBuildAttempt>> {
+        self.require_capability(true).await?;
+        require_nonblank("proposal_id", proposal_id)?;
+        fetch_active_attempt(self.db.pool(), proposal_id).await
+    }
+
     pub async fn reserve(
         &self,
         input: &ReserveProposalBuildAttemptInput,

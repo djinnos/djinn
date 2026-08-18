@@ -77,8 +77,6 @@ pub mod invocation_lease_control;
 /// Coordinator-owned Phase-C expected-path denominator and bounded evidence projection.
 pub mod model_turn_admission;
 pub mod output_stash;
-/// Default-disabled branch and draft-PR lifecycle for direct build attempts.
-pub mod proposal_attempt_lifecycle;
 
 /// Terminalize the worker's in-flight attempt (and record a durable `reopened`
 /// marker) for a supervisor-driven rework reopen that the PR poller's

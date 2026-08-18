@@ -3,6 +3,8 @@
 pub mod bridge;
 pub mod dispatch;
 pub mod process;
+/// Default-disabled branch and draft-PR lifecycle for direct build attempts.
+pub mod proposal_attempt_lifecycle;
 pub mod readiness_kickoff;
 pub mod readiness_query;
 pub mod server;

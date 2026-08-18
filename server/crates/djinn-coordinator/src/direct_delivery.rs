@@ -66,7 +66,10 @@ pub enum BoundaryOperation {
     TaskPrSignoff,
     TaskPrCustomEnqueue,
     /// The attempt-scoped draft-PR request was issued before its provider
-    /// response was awaited or classified.
+    /// response was awaited or classified. Its only emitter is the graduation
+    /// path in `djinn-control-plane`, so no coordinator consumer may reach it;
+    /// the variant stays in the forbidden-operation lists that assert exactly
+    /// that.
     AttemptPrCreateOrAdoptRequest,
 }
 
