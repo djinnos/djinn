@@ -8,8 +8,8 @@
   // at all. `pnpm test:typecheck` (`tsconfig.test.json`) does compile the test
   // tree, but nothing in CI ran it, so the gap was invisible.
   //
-  // Why it is not simply `tsconfig.test.json`: that config reports 81 errors
-  // across the 21 files listed under `exclude` below. Gating on it would
+  // Why it is not simply `tsconfig.test.json`: that config reports 75 errors
+  // across the 20 files listed under `exclude` below. Gating on it would
   // produce a permanently red job, which is worse than no job. So this config
   // gates everything ELSE, which is clean, and — because `include` is the whole
   // of `src` — every NEW test file is covered by default. A future inert
@@ -19,7 +19,13 @@
   // its line here, and the gate widens. Do not add a line to make a new failure
   // go away.
   //
-  // Measured on 2026-08-18: `pnpm test:typecheck` => 81 errors / 21 files;
+  // `ReadinessPanel.test.tsx` came off this list under task `pxtd`: proposal
+  // `667e`'s AC7 names that file, so leaving it excluded meant no CI job
+  // typechecked the one UI file the criterion was written about. Its six errors
+  // were `null` fixture values for fields the generated MCP model declares as
+  // optional (`?: string`, never nullable) — corrected to `undefined`.
+  //
+  // Measured on 2026-08-18: `pnpm test:typecheck` => 75 errors / 20 files;
   // `pnpm test:typecheck:gate` => 0 errors.
   "extends": "./tsconfig.json",
   "compilerOptions": {
@@ -37,7 +43,6 @@
     "src/components/proposals/ProposalDebateTrail.test.tsx",
     "src/components/proposals/ProposalHistory.test.tsx",
     "src/components/proposals/ProposalRefinement.test.tsx",
-    "src/components/proposals/ReadinessPanel.test.tsx",
     "src/components/proposals/blocks/blocks.test.ts",
     "src/components/settings/AiPolicyTab.test.tsx",
     "src/components/settings/OrgDefaultLanesSection.test.tsx",

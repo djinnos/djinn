@@ -2763,6 +2763,14 @@ jobs:
       # dies mid-suite makes vitest itself exit 0 with no summary, which is how
       # the defect hid. The ledger currently allows 23 pre-existing failures in
       # 9 files; every other test in those files is still gated.
+      #
+      # It also fails on a file that reports `failed` with zero failing tests (a
+      # collection error — the file never loaded) and on a run that collects
+      # fewer tests than the ledger records. Both were added by task `pxtd`:
+      # counting failed assertions alone let a module-scope `throw` take 35
+      # tests out of the run while the gate printed PASSED. The wrapper runs its
+      # own unit tests (`ui/scripts/vitest-ci-analyze.test.mjs`, `node --test`)
+      # before it spawns vitest, so this step also gates the gate.
       - name: Tests
         run: pnpm test:ci
       - name: Production build
