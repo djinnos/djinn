@@ -1098,3 +1098,265 @@ describe("ReadinessPanel typed evidence finding", () => {
     expect(callMcpTool).not.toHaveBeenCalled();
   });
 });
+
+// ── Authorized retry action and rollback-safe hiding (gzw2) ──────────────────
+//
+// The retry control is the panel's only typed-evidence mutation. Its visibility
+// comes from the server projection alone, and its arguments are the server's
+// own `finding_id` and `failed_transition_id` — the write path admits exactly
+// the latest failed transition and rejects anything else, so a browser-derived
+// argument would be a button that always fails.
+
+const RETRY_LABEL = "Retry evidence";
+/** Labels no typed render path may ever produce. */
+const FORBIDDEN_ACTION_LABELS = [
+  /^Resolve evidence$/i,
+  /^Resolve finding$/i,
+  /^Withdraw$/i,
+  /^Withdraw evidence$/i,
+  /^Withdraw demand$/i,
+  /^Dispose$/i,
+];
+
+describe("ReadinessPanel typed evidence retry action", () => {
+  beforeEach(() => {
+    vi.mocked(callMcpTool).mockReset();
+    vi.mocked(showToast.success).mockClear();
+    vi.mocked(showToast.error).mockClear();
+  });
+
+  it("hides retry for every lifecycle other than failed, even when permitted", () => {
+    for (const lifecycle of TYPED_LIFECYCLES) {
+      if (lifecycle === "failed") continue;
+      const { unmount } = render(
+        <ReadinessPanel
+          proposalId="p-1"
+          gateStatus={gateStatus({
+            ready: false,
+            typed_evidence: typedEvidence({
+              lifecycle,
+              // Both other halves granted: only the lifecycle withholds it.
+              retry_permitted: true,
+              failed_transition_id: "transition-1",
+            }),
+          })}
+          refinement={refinement()}
+        />,
+      );
+      expect(screen.getByTestId("typed-evidence-finding")).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: RETRY_LABEL }),
+        lifecycle,
+      ).toBeNull();
+      unmount();
+    }
+    expect(callMcpTool).not.toHaveBeenCalled();
+  });
+
+  it("hides retry for a failed finding the server does not permit this caller to retry", () => {
+    render(
+      <ReadinessPanel
+        proposalId="p-1"
+        gateStatus={gateStatus({
+          ready: false,
+          typed_evidence: typedEvidence({
+            lifecycle: "failed",
+            retry_permitted: false,
+            failed_transition_id: "transition-1",
+          }),
+        })}
+        refinement={refinement()}
+      />,
+    );
+    expect(screen.getByTestId("typed-evidence-finding")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: RETRY_LABEL })).toBeNull();
+    expect(callMcpTool).not.toHaveBeenCalled();
+  });
+
+  it("hides retry when permission is granted but the server named no failed transition", () => {
+    render(
+      <ReadinessPanel
+        proposalId="p-1"
+        gateStatus={gateStatus({
+          ready: false,
+          typed_evidence: typedEvidence({
+            lifecycle: "failed",
+            retry_permitted: true,
+          }),
+        })}
+        refinement={refinement()}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: RETRY_LABEL })).toBeNull();
+    expect(callMcpTool).not.toHaveBeenCalled();
+  });
+
+  it("issues exactly one retry call with the server-supplied ids and then invalidates", async () => {
+    vi.mocked(callMcpTool).mockResolvedValue({ accepted: true });
+    const onChanged = vi.fn();
+    render(
+      <ReadinessPanel
+        proposalId="p-1"
+        gateStatus={gateStatus({
+          ready: false,
+          typed_evidence: typedEvidence({
+            lifecycle: "failed",
+            evidence_outcome: "unresolved",
+            retry_permitted: true,
+            finding_id: "finding-xyz",
+            failed_transition_id: "transition-42",
+          }),
+        })}
+        refinement={refinement()}
+        onChanged={onChanged}
+      />,
+    );
+    const button = screen.getByRole("button", { name: RETRY_LABEL });
+    await userEvent.click(button);
+
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+    expect(callMcpTool).toHaveBeenCalledTimes(1);
+    expect(callMcpTool).toHaveBeenCalledWith(
+      "proposal_refinement_retry_evidence",
+      {
+        finding_id: "finding-xyz",
+        failed_transition_id: "transition-42",
+      },
+    );
+    expect(showToast.success).toHaveBeenCalledTimes(1);
+    expect(showToast.error).not.toHaveBeenCalled();
+  });
+
+  it("does not invalidate when the retry is refused", async () => {
+    vi.mocked(callMcpTool).mockResolvedValue({
+      accepted: false,
+      error: "retry_requires_latest_failed_transition",
+    });
+    const onChanged = vi.fn();
+    render(
+      <ReadinessPanel
+        proposalId="p-1"
+        gateStatus={gateStatus({
+          ready: false,
+          typed_evidence: typedEvidence({
+            lifecycle: "failed",
+            retry_permitted: true,
+            failed_transition_id: "transition-stale",
+          }),
+        })}
+        refinement={refinement()}
+        onChanged={onChanged}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: RETRY_LABEL }));
+    await waitFor(() => expect(showToast.error).toHaveBeenCalledTimes(1));
+    expect(callMcpTool).toHaveBeenCalledTimes(1);
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("renders no resolve or withdraw control anywhere in the matrix", () => {
+    for (const lifecycle of TYPED_LIFECYCLES) {
+      for (const permitted of [false, true]) {
+        for (const hasTransition of [false, true]) {
+          const { unmount } = render(
+            <ReadinessPanel
+              proposalId="p-1"
+              gateStatus={gateStatus({
+                ready: false,
+                typed_evidence: typedEvidence({
+                  lifecycle,
+                  retry_permitted: permitted,
+                  ...(hasTransition
+                    ? { failed_transition_id: "transition-1" }
+                    : {}),
+                  judge_disposition: {
+                    disposition: "resolved",
+                    outcome: "resolved",
+                    folding_revision: 5,
+                    judge_task_id: "judge-1",
+                    rationale: "Folded into revision 5.",
+                  },
+                }),
+              })}
+              refinement={refinement()}
+            />,
+          );
+          const label = `${lifecycle}/${permitted}/${hasTransition}`;
+          for (const forbidden of FORBIDDEN_ACTION_LABELS) {
+            expect(
+              screen.queryByRole("button", { name: forbidden }),
+              `${label} ${forbidden}`,
+            ).toBeNull();
+          }
+          // The Judge disposition is rendered as a recorded server fact, and
+          // it still comes with no control to change it.
+          expect(
+            screen.getByTestId("typed-evidence-disposition"),
+          ).toHaveTextContent("Folded into revision 5.");
+          unmount();
+        }
+      }
+    }
+    expect(callMcpTool).not.toHaveBeenCalled();
+  });
+
+  it("issues zero calls with typed presentation hidden, and leaves legacy rendering unchanged", () => {
+    // AC4, in its checkable form. `hiding typed presentation must not strand an
+    // active task` is a server-side property no UI test can observe; what the
+    // browser CAN be held to is that it issues no mutation at all when the
+    // typed section is absent. Server-side stranding is covered by nyfd/115i.
+    const legacyGate = gateStatus({
+      ready: false,
+      blocked_explanations: ["Proposal parked on needs-evidence spike lg-1"],
+      needs_evidence: {
+        claim: "Legacy claim",
+        spike_task_id: "legacy-task-id",
+        spike_short_id: "lg-1",
+        spike_status: "in_progress",
+      },
+    });
+    const legacyRefinement = refinement({
+      evidence_lifecycle_state: "awaiting_evidence",
+    });
+
+    const withTyped = render(
+      <ReadinessPanel
+        proposalId="p-1"
+        gateStatus={{
+          ...legacyGate,
+          typed_evidence: typedEvidence({
+            lifecycle: "failed",
+            retry_permitted: true,
+            failed_transition_id: "transition-1",
+          }),
+        }}
+        refinement={legacyRefinement}
+      />,
+    );
+    expect(screen.getByRole("button", { name: RETRY_LABEL })).toBeInTheDocument();
+    const legacyNoteWithTyped = screen.getByText(
+      "Awaiting evidence: lg-1",
+    ).parentElement!.innerHTML;
+    withTyped.unmount();
+    vi.mocked(callMcpTool).mockReset();
+
+    // Same proposal with the typed presentation hidden — the exact rollback
+    // shape, since `typed_evidence` is absent whenever the rollout mode is
+    // `off`.
+    render(
+      <ReadinessPanel
+        proposalId="p-1"
+        gateStatus={legacyGate}
+        refinement={legacyRefinement}
+      />,
+    );
+    expect(screen.queryByTestId("typed-evidence-finding")).toBeNull();
+    expect(screen.queryByRole("button", { name: RETRY_LABEL })).toBeNull();
+    // The legacy note is byte-identical to what it was with typed present.
+    expect(
+      screen.getByText("Awaiting evidence: lg-1").parentElement!.innerHTML,
+    ).toBe(legacyNoteWithTyped);
+    // The whole point: zero mutations issued.
+    expect(callMcpTool).toHaveBeenCalledTimes(0);
+  });
+});
