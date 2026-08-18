@@ -59,8 +59,20 @@ libc = "0.2"
 tempfile = { version = "3", optional = true }
 workspace-hack.workspace = true
 
+[[test]]
+# Proposal 96fy's normative verification surface. Declared explicitly rather
+# than left to target auto-discovery so that deleting or renaming the file is a
+# hard build error instead of a command that silently selects nothing and exits
+# zero.
+name = "model_admission_conformance"
+path = "tests/model_admission_conformance.rs"
+
 [dev-dependencies]
 tempfile = "3"
+# Self dev-dependency so integration targets can use `test_helpers`, which is
+# gated behind `test-support`. Precedent: djinn-agent, djinn-slot,
+# djinn-control-plane and djinn-db all do the same.
+djinn-coordinator = { path = ".", features = ["test-support"] }
 djinn-agent = { path = "../djinn-agent", features = ["test-support"] }
 djinn-db = { path = "../djinn-db", features = ["test-support"] }
 # `pod_resize_fixture` — a stored `Pod` driven through the PRODUCTION observation,
