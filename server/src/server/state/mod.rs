@@ -396,6 +396,14 @@ struct Inner {
     /// Test-only credential-resolution result injected after real persistence.
     #[cfg(test)]
     test_reload_state_override: tokio::sync::RwLock<Option<CredentialSourceState>>,
+    /// Test-only cluster inventory injected into
+    /// [`AppState::startup_workload_inventory`] so a regression can drive the
+    /// real [`AppState::become_leader`] entry point with a configured census.
+    /// Production resolves the inventory from the cluster-backed graph warmer,
+    /// which needs a live apiserver and therefore cannot exist in a test.
+    #[cfg(test)]
+    test_startup_workload_inventory:
+        tokio::sync::RwLock<Option<Arc<dyn djinn_k8s::WorkloadInventory>>>,
     /// Per-project bare git mirrors on disk. Single shared instance so
     /// fetches serialize correctly and clones hit the same hardlink pool.
     /// Path resolution mirrors the vault key: `$DJINN_HOME/mirrors` or
@@ -658,6 +666,8 @@ impl AppState {
                 test_bypass_persist: tokio::sync::RwLock::new(false),
                 #[cfg(test)]
                 test_reload_state_override: tokio::sync::RwLock::new(None),
+                #[cfg(test)]
+                test_startup_workload_inventory: tokio::sync::RwLock::new(None),
                 mirror,
                 rpc_server: tokio::sync::Mutex::new(None),
                 rpc_registry: Arc::new(ConnectionRegistry::new()),
@@ -864,6 +874,41 @@ impl AppState {
         // the production shape so `TestRuntime` and dev boxes that never
         // ran `initialize()` still get correct semantics.
         Arc::new(build_in_process_graph_warmer(self.clone())) as Arc<dyn GraphWarmerService>
+    }
+
+    /// Resolve the cluster workload inventory that [`StartupCensus::acquire`]
+    /// consults in [`AppState::become_leader`].
+    ///
+    /// Production reads it off the cluster-backed [`K8sGraphWarmer`]; every
+    /// other runtime resolves `None`, which is the explicit "inventory not
+    /// configured" signal that pins the legacy startup transition table.
+    async fn startup_workload_inventory(&self) -> Option<Arc<dyn djinn_k8s::WorkloadInventory>> {
+        #[cfg(test)]
+        if let Some(injected) = self
+            .inner
+            .test_startup_workload_inventory
+            .read()
+            .await
+            .clone()
+        {
+            return Some(injected);
+        }
+        self.graph_warmer()
+            .await
+            .as_any()
+            .downcast_ref::<K8sGraphWarmer>()
+            .and_then(K8sGraphWarmer::workload_inventory)
+    }
+
+    /// Inject the cluster inventory `become_leader` hands to the startup
+    /// census. Test-only: the production source is a `K8sGraphWarmer`, which
+    /// requires a live apiserver.
+    #[cfg(test)]
+    pub(crate) async fn set_test_startup_workload_inventory(
+        &self,
+        inventory: Arc<dyn djinn_k8s::WorkloadInventory>,
+    ) {
+        *self.inner.test_startup_workload_inventory.write().await = Some(inventory);
     }
 
     /// Arm the observe-only disk dimension of build admission (proposal nquz,
@@ -2214,12 +2259,7 @@ impl AppState {
 
         // Acquire the only startup census before any Stage A/B/C lifecycle
         // mutation. Stage A borrows it; ownership moves into coordinator startup.
-        let inventory = self
-            .graph_warmer()
-            .await
-            .as_any()
-            .downcast_ref::<K8sGraphWarmer>()
-            .and_then(K8sGraphWarmer::workload_inventory);
+        let inventory = self.startup_workload_inventory().await;
         let startup_census = match StartupCensus::acquire(self.db().clone(), inventory).await {
             Ok(census) => census,
             Err(error) => {

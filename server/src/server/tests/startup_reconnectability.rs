@@ -19,7 +19,7 @@ use djinn_coordinator::startup_census::{
 };
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::test_support::{
-    backdate_task_attempt_created_at, capture_queries,
+    backdate_task_attempt_created_at, backdate_task_run_started_at, capture_queries,
     seed_legacy_session_without_task_run_ledger_for_test,
 };
 use djinn_db::{
@@ -2036,4 +2036,267 @@ fn startup_table_session_params<'a>(
         pricing: None,
         cost_basis: None,
     }
+}
+
+// ─── Production startup wiring (task 2j87) ───────────────────────────────────
+
+/// Cluster inventory injected into the real `become_leader` startup path.
+///
+/// It answers only about the two fixture identities: the live run's Job is in
+/// the LIST snapshot as non-terminal, the gone run's Job is authoritatively
+/// absent. Everything else stays `Uncertain`, so nothing is destroyed on
+/// unproven evidence.
+struct LeaderStartupInventory {
+    listed: Vec<WorkloadRecord>,
+    presence: HashMap<String, ObjectPresence>,
+}
+
+#[async_trait::async_trait]
+impl WorkloadInventory for LeaderStartupInventory {
+    async fn list(&self) -> Result<Vec<WorkloadRecord>, String> {
+        Ok(self.listed.clone())
+    }
+
+    async fn get_uid(&self, _: WorkloadObjectKind, _: &str, _: &str) -> UidGetResult {
+        UidGetResult::Uncertain
+    }
+
+    async fn presence(&self, _: WorkloadObjectKind, name: &str) -> ObjectPresence {
+        self.presence
+            .get(name)
+            .cloned()
+            .unwrap_or(ObjectPresence::Uncertain)
+    }
+}
+
+/// One durable identity chain — task, task-run, session, pending attempt —
+/// seeded old enough that the legacy startup transition table would act on it.
+struct LeaderStartupRows {
+    run_id: String,
+    session_id: String,
+    attempt_id: String,
+}
+
+async fn seed_leader_startup_project(db: &Database, events: &EventBus) -> (String, String) {
+    use djinn_db::{EpicCreateInput, EpicRepository, ProjectRepository};
+
+    let project = ProjectRepository::new(db.clone(), events.clone())
+        .create("leader-wiring-test", "owner", "repo")
+        .await
+        .expect("create leader wiring project");
+    let epic = EpicRepository::new(db.clone(), events.clone())
+        .create_for_project(
+            &project.id,
+            EpicCreateInput {
+                title: "leader-wiring-epic",
+                description: "",
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: None,
+                status: None,
+                auto_breakdown: None,
+                originating_adr_id: None,
+                blocked_by: None,
+            },
+        )
+        .await
+        .expect("create leader wiring epic");
+    (project.id, epic.id)
+}
+
+async fn seed_leader_startup_rows(
+    db: &Database,
+    events: &EventBus,
+    project_id: &str,
+    epic_id: &str,
+    run_id: &str,
+) -> LeaderStartupRows {
+    // A distinct task per identity: Stage C classifies attempts through the
+    // census's per-TASK projection, so sharing one task would collapse the
+    // live and gone identities into a single reduction.
+    let task = TaskRepository::new(db.clone(), events.clone())
+        .create(epic_id, run_id, "", "", "task", 0, "", Some("open"))
+        .await
+        .expect("create leader wiring task");
+    TaskRunRepository::new(db.clone())
+        .create(djinn_db::CreateTaskRunParams {
+            id: run_id,
+            project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .expect("create leader wiring task run");
+    let session_repo = SessionRepository::new(db.clone(), events.clone());
+    session_repo
+        .create(startup_table_session_params(
+            project_id,
+            &task.id,
+            Some(run_id),
+        ))
+        .await
+        .expect("create leader wiring session");
+    let session_id = session_repo
+        .list_for_task_run(run_id)
+        .await
+        .expect("read seeded session")
+        .first()
+        .expect("seeded session exists")
+        .id
+        .clone();
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    TaskAttemptRepository::new(db.clone())
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &attempt_id,
+            task_id: &task.id,
+            role: "worker",
+            dispatch_key: &format!("dispatch-{run_id}"),
+            session_id: None,
+            attempt_seq: None,
+            dispatch_owner_incarnation_id: None,
+            dispatch_group_id: None,
+        })
+        .await
+        .expect("seed pending attempt");
+    // Both startup age gates are 10s. Backdating by a minute puts every row
+    // past them while staying far inside the periodic sweeps' windows (4h for
+    // task-runs, 5m for pending attempts), so the periodic reapers cannot be
+    // the cause of any transition this regression observes.
+    backdate_task_run_started_at(db, run_id, "60 seconds").await;
+    backdate_task_attempt_created_at(db, &attempt_id, "60 seconds").await;
+    LeaderStartupRows {
+        run_id: run_id.to_owned(),
+        session_id,
+        attempt_id,
+    }
+}
+
+async fn leader_startup_statuses(
+    db: &Database,
+    events: &EventBus,
+    rows: &LeaderStartupRows,
+) -> (String, String, String) {
+    let session = SessionRepository::new(db.clone(), events.clone())
+        .get(&rows.session_id)
+        .await
+        .expect("read fixture session")
+        .expect("fixture session exists");
+    let run = TaskRunRepository::new(db.clone())
+        .get(&rows.run_id)
+        .await
+        .expect("read fixture task run")
+        .expect("fixture task run exists");
+    let attempt = TaskAttemptRepository::new(db.clone())
+        .get(&rows.attempt_id)
+        .await
+        .expect("read fixture attempt")
+        .expect("fixture attempt exists");
+    (session.status, run.status, attempt.outcome)
+}
+
+fn leader_startup_intact() -> (String, String, String) {
+    (
+        "running".to_owned(),
+        "running".to_owned(),
+        "pending".to_owned(),
+    )
+}
+
+/// The production startup wiring itself, driven through `AppState::become_leader`.
+///
+/// Every other regression in this epic composes `StartupCensus::acquire` ->
+/// Stage A -> `complete_startup_reaper_phase` by hand, so all of them stay
+/// green when the two lines that make the *server* do this are deleted. This
+/// one calls no stage directly: it seeds durable rows, hands `become_leader` a
+/// cluster inventory, and asserts the durable session/task-run/task-attempt
+/// transitions that only occur when the census `become_leader` captures
+/// reaches Stage A **and** is moved into coordinator startup for Stages B/C.
+///
+/// The two fixture identities are chosen so each production line owns a
+/// distinct observable:
+///
+/// * deleting the Stage A call leaves the census-gone run's session `running`;
+/// * deleting the `CoordinatorDeps::with_startup_census` handoff drops the
+///   coordinator onto the legacy age-threshold table, which reaps the LIVE
+///   run — the exact "a server restart is not evidence of death" regression.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn become_leader_drives_the_startup_census_through_every_stage() {
+    let db = create_test_db();
+    let events = test_events();
+    let live_run = "leader-wiring-live-run";
+    let gone_run = "leader-wiring-gone-run";
+    let (project_id, epic_id) = seed_leader_startup_project(&db, &events).await;
+    let live = seed_leader_startup_rows(&db, &events, &project_id, &epic_id, live_run).await;
+    let gone = seed_leader_startup_rows(&db, &events, &project_id, &epic_id, gone_run).await;
+
+    let mut presence = HashMap::new();
+    presence.insert(
+        djinn_k8s::taskrun_job_name(gone_run),
+        ObjectPresence::Absent,
+    );
+    let inventory: Arc<dyn WorkloadInventory> = Arc::new(LeaderStartupInventory {
+        listed: vec![job(live_run, false)],
+        presence,
+    });
+
+    // Pre-mutation truth: nothing has moved yet.
+    assert_eq!(
+        leader_startup_statuses(&db, &events, &live).await,
+        leader_startup_intact()
+    );
+    assert_eq!(
+        leader_startup_statuses(&db, &events, &gone).await,
+        leader_startup_intact()
+    );
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let state = AppState::new(db.clone(), cancel.clone());
+    state
+        .set_test_startup_workload_inventory(inventory.clone())
+        .await;
+
+    // The only call this regression makes. No stage is invoked by hand.
+    state.become_leader().await;
+
+    // `become_leader` moves the census into coordinator startup, which
+    // completes Stages B and C inside its own boot phase, so wait for the
+    // durable effect rather than for a log line.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    loop {
+        let (_, run_status, attempt_outcome) = leader_startup_statuses(&db, &events, &gone).await;
+        if run_status == "interrupted" && attempt_outcome == "interrupted" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "coordinator startup never completed Stage B/C for the census-gone identity \
+             (run={run_status}, attempt={attempt_outcome})"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    assert_eq!(
+        leader_startup_statuses(&db, &events, &gone).await,
+        (
+            "interrupted".to_owned(),
+            "interrupted".to_owned(),
+            "interrupted".to_owned()
+        ),
+        "become_leader must drive its own census through Stage A (session), Stage B \
+         (task run) and Stage C (attempt) for a run whose Job is authoritatively absent"
+    );
+    assert_eq!(
+        leader_startup_statuses(&db, &events, &live).await,
+        leader_startup_intact(),
+        "a restart is not evidence of death: the run whose Job the census observed \
+         alive keeps its session, its task run and its pending attempt, even though \
+         every one of those rows is old enough for the legacy startup thresholds"
+    );
+
+    cancel.cancel();
 }
