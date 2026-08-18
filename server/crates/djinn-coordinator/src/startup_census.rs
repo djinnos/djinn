@@ -562,7 +562,7 @@ mod tests {
     /// unreduced mixed-run census evidence, rather than an authorization helper.
     #[tokio::test]
     #[tracing_test::traced_test]
-    async fn startup_stage_c_task_projection() {
+    async fn startup_census_stage_c_projection_reduction_matrix() {
         let db = crate::test_helpers::create_test_db();
         let project = crate::test_helpers::create_test_project(&db).await;
         let live_task = seed_task(&db, &project.id, "stage c gone plus live").await;

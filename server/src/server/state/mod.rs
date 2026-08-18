@@ -2551,7 +2551,8 @@ impl AppState {
     /// [`crate::test_helpers::run_startup_stage_a`], the integration test that
     /// drives Stage A from inside the production dispatch seam — enter the
     /// configured Stage A path rather than the `NotConfigured` compatibility
-    /// path. Production reaches it from `run_startup_recovery`.
+    /// path. Production reaches it from [`AppState::become_leader`], which
+    /// captures the census and hands the same value to coordinator startup.
     pub(crate) async fn interrupt_stale_sessions_on_startup_with_census(
         &self,
         census: &StartupCensus,
