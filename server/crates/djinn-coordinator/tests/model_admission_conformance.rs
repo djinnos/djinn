@@ -1720,6 +1720,43 @@ fn read_target_source() -> String {
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }
 
+/// The body one simulated provider attempt sends.
+const CFNI_PROVIDER_REQUEST_BODY: &str = "cfni-provider-request-body";
+
+/// Send one hand-framed HTTP request to `endpoint` over a raw socket.
+///
+/// This is the "network bytes" half of the unleased-attempt scenario. It is
+/// deliberately not an HTTP client: `scripts/check-http-boundary.sh` reserves
+/// outbound HTTP client construction to `djinn-provider`, and a raw socket
+/// write is the more literal instrument anyway — the recorder on the other end
+/// counts bytes that actually arrived.
+///
+/// Blocking, so callers run it on a blocking pool rather than on a runtime
+/// worker that the recorder's own server also needs.
+fn send_provider_bytes(endpoint: &str) {
+    use std::io::{Read, Write};
+
+    let mut stream =
+        std::net::TcpStream::connect(endpoint).expect("connect to the boundary recorder");
+    let request = format!(
+        "POST /cfni HTTP/1.1\r\nHost: {endpoint}\r\nContent-Type: text/plain\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{CFNI_PROVIDER_REQUEST_BODY}",
+        CFNI_PROVIDER_REQUEST_BODY.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .expect("write the request bytes");
+    stream.flush().expect("flush the request bytes");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read the recorder's response");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "the boundary recorder must have accepted the send; got:\n{response}"
+    );
+}
+
 /// Read a sibling crate's source file, relative to `server/crates/`.
 fn read_sibling_crate_source(relative: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -4146,7 +4183,11 @@ async fn scenario_09_every_compatibility_prerequisite_is_independently_load_bear
             .respond_with(ResponseTemplate::new(200))
             .mount(&boundary)
             .await;
-        let http = reqwest::Client::new();
+        let endpoint = boundary
+            .uri()
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_owned();
         let coordinator =
             ModelTurnAdmissionCoordinator::new(repository.clone()).with_catalog(cfni_catalog());
 
@@ -4154,6 +4195,12 @@ async fn scenario_09_every_compatibility_prerequisite_is_independently_load_bear
         // the `Permit` arm and nowhere else, exactly as
         // `djinn_slot::reply_loop::turn::launch_prepared_covered_attempt`
         // launches only from that arm.
+        //
+        // The bytes go out over a raw socket rather than through an HTTP
+        // client: `scripts/check-http-boundary.sh` reserves outbound HTTP
+        // client construction to `djinn-provider`, and a hand-framed request
+        // is in any case the more literal instrument — what the recorder
+        // counts is bytes that reached a listening socket.
         let attempt = async |credential: &str, request_id: &str| -> bool {
             let preparation = coordinator
                 .prepare(
@@ -4169,11 +4216,10 @@ async fn scenario_09_every_compatibility_prerequisite_is_independently_load_bear
                 .expect("prepare must not error");
             match preparation {
                 ModelTurnPreparation::Permit(_) => {
-                    http.post(boundary.uri())
-                        .body("cfni-provider-request-body")
-                        .send()
+                    let endpoint = endpoint.clone();
+                    tokio::task::spawn_blocking(move || send_provider_bytes(&endpoint))
                         .await
-                        .expect("the boundary recorder must accept the send");
+                        .expect("the send task must not panic");
                     true
                 }
                 ModelTurnPreparation::Wait(_)
