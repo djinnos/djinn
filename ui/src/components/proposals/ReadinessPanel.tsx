@@ -488,6 +488,9 @@ export function ReadinessPanel({
   const [showOverride, setShowOverride] = useState(false);
   const [showBlocking, setShowBlocking] = useState(false);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
+  const [retryingFindingId, setRetryingFindingId] = useState<string | null>(
+    null,
+  );
 
   const isReady = gateStatus?.ready ?? true;
   const showOverrideControls = Boolean(
@@ -543,6 +546,32 @@ export function ReadinessPanel({
       setOverrideBusy(false);
     }
   }, [gateStatus, proposalId, overrideReason, onChanged]);
+
+  // The one permitted typed-evidence action. Both arguments come from the
+  // server projection: the browser never derives a finding id or picks which
+  // failed transition to cite, because the write path admits exactly the
+  // latest one and rejects anything else.
+  const handleRetryEvidence = useCallback(
+    async (findingId: string, failedTransitionId: string) => {
+      setRetryingFindingId(findingId);
+      try {
+        const res = await callMcpTool("proposal_refinement_retry_evidence", {
+          finding_id: findingId,
+          failed_transition_id: failedTransitionId,
+        });
+        if (res.error) throw new Error(res.error);
+        showToast.success("Evidence retry dispatched");
+        onChanged?.();
+      } catch (e) {
+        showToast.error("Failed to retry evidence", {
+          description: (e as Error).message,
+        });
+      } finally {
+        setRetryingFindingId(null);
+      }
+    },
+    [onChanged],
+  );
 
   const handleResolve = useCallback(
     async (id: string) => {
@@ -841,6 +870,32 @@ export function ReadinessPanel({
           typed={typedEvidence}
           display={evidenceDisplay.typed}
           blockedExplanations={gateStatus?.blocked_explanations ?? []}
+          action={
+            // Visibility is the classifier's, which reads only the server's
+            // projected authority. There is no local role check here and no
+            // resolve/withdraw sibling: a Judge disposition needs a rationale
+            // and a folding revision the browser cannot supply.
+            evidenceDisplay.typed.actions.retry &&
+            evidenceDisplay.typed.findingId &&
+            evidenceDisplay.typed.failedTransitionId ? (
+              <Button
+                size="sm"
+                variant="outline"
+                className="ml-auto h-6 text-xs"
+                disabled={retryingFindingId === evidenceDisplay.typed.findingId}
+                onClick={() =>
+                  void handleRetryEvidence(
+                    evidenceDisplay.typed.findingId!,
+                    evidenceDisplay.typed.failedTransitionId!,
+                  )
+                }
+              >
+                {retryingFindingId === evidenceDisplay.typed.findingId
+                  ? "Retrying..."
+                  : "Retry evidence"}
+              </Button>
+            ) : undefined
+          }
         />
       )}
 
