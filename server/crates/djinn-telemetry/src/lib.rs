@@ -8,6 +8,9 @@ use std::sync::OnceLock;
 use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
 
 pub mod memory_retrieval;
+
+/// Bounded model-turn admission telemetry with a closed label allow-list (75iz).
+pub mod model_turn_metrics;
 pub mod panic_capture;
 
 pub const PROMETHEUS_TEXT_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
@@ -1353,6 +1356,7 @@ fn format_build_error(error: BuildError) -> String {
 
 fn register_metrics() {
     memory_retrieval::register_metrics();
+    model_turn_metrics::register_metrics();
     metrics::describe_gauge!(
         CANONICAL_GRAPH_SLOT_PRESENT,
         "Whether the process-global canonical graph slot is populated: 1 populated, 0 empty."

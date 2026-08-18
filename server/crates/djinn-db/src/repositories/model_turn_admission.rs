@@ -1238,13 +1238,13 @@ impl ModelTurnAdmissionRepository {
         &self,
         boundary_at: &str,
         limit: i64,
-    ) -> Result<Vec<ModelTurnLeaseExpiryInput>> {
+    ) -> Result<Vec<(i64, ModelTurnLeaseExpiryInput)>> {
         self.db.ensure_initialized().await?;
         if boundary_at.trim().is_empty() {
             return invalid_phase_c();
         }
-        let rows: Vec<(String, i64, String, String, Option<String>)> = sqlx::query_as(
-            "SELECT lease_id::text, generation, request_id, lifecycle, heartbeat_at::text \
+        let rows: Vec<(i64, String, i64, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT pool_id, lease_id::text, generation, request_id, lifecycle, heartbeat_at::text \
              FROM model_turn_leases \
              WHERE lifecycle IN ('reserved', 'dispatching', 'active') \
                AND COALESCE(heartbeat_at, reserved_at) <= $1::timestamptz - interval '90 seconds' \
@@ -1257,20 +1257,122 @@ impl ModelTurnAdmissionRepository {
         .await?;
         rows.into_iter()
             .map(
-                |(lease_id, generation, request_id, lifecycle, heartbeat_at)| {
-                    Ok(ModelTurnLeaseExpiryInput {
-                        identity: ModelTurnLeaseIdentity {
-                            lease_id,
-                            generation,
-                            request_id,
+                |(pool_id, lease_id, generation, request_id, lifecycle, heartbeat_at)| {
+                    Ok((
+                        pool_id,
+                        ModelTurnLeaseExpiryInput {
+                            identity: ModelTurnLeaseIdentity {
+                                lease_id,
+                                generation,
+                                request_id,
+                            },
+                            observed_lifecycle: parse_lease_lifecycle(&lifecycle)?,
+                            observed_heartbeat_at: heartbeat_at,
+                            boundary_at: boundary_at.to_owned(),
                         },
-                        observed_lifecycle: parse_lease_lifecycle(&lifecycle)?,
-                        observed_heartbeat_at: heartbeat_at,
-                        boundary_at: boundary_at.to_owned(),
-                    })
+                    ))
                 },
             )
             .collect()
+    }
+
+    /// Resolve one pool by its opaque numeric id.
+    ///
+    /// Unlike [`Self::resolve_pool`] this needs no credential: telemetry and
+    /// the reaper already hold a pool id and must not acquire a credential
+    /// identity just to label a metric.
+    pub async fn pool_by_id(&self, pool_id: i64) -> Result<Option<ModelTurnPool>> {
+        self.db.ensure_initialized().await?;
+        let row: Option<ModelTurnPoolRow> = sqlx::query_as(
+            "SELECT id, credential_id, provider_id, model_id, phase, identity_state, \
+                    capability_state, learned_concurrency, in_flight \
+             FROM model_turn_pools WHERE id = $1",
+        )
+        .bind(pool_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        row.map(|row| {
+            Ok(ModelTurnPool {
+                id: row.id,
+                credential_id: row.credential_id,
+                provider_id: row.provider_id,
+                model_id: row.model_id,
+                phase: parse_phase(&row.phase)?,
+                identity_state: parse_identity(&row.identity_state)?,
+                capability_state: parse_capability(&row.capability_state)?,
+                learned_concurrency: row.learned_concurrency,
+                in_flight: row.in_flight,
+            })
+        })
+        .transpose()
+    }
+
+    /// The pool one lease belongs to, resolved from the lease id alone.
+    ///
+    /// The slot boundary holds a lease identity, not a pool, and telemetry must
+    /// not make it acquire a credential identity to label a series.
+    pub async fn pool_for_lease(&self, lease_id: &str) -> Result<Option<ModelTurnPool>> {
+        self.db.ensure_initialized().await?;
+        let pool_id: Option<i64> =
+            sqlx::query_scalar("SELECT pool_id FROM model_turn_leases WHERE lease_id = $1::uuid")
+                .bind(lease_id)
+                .fetch_optional(self.db.pool())
+                .await?;
+        match pool_id {
+            Some(pool_id) => self.pool_by_id(pool_id).await,
+            None => Ok(None),
+        }
+    }
+
+    /// Reservations the ledger still holds open for one pool.
+    ///
+    /// The pool row's `in_flight` counter and this count are written by the
+    /// same transactions, so a difference between them is a real accounting
+    /// divergence rather than a sampling artefact.
+    pub async fn open_reservation_count(&self, pool_id: i64) -> Result<i64> {
+        self.db.ensure_initialized().await?;
+        sqlx::query_scalar(
+            "SELECT count(*) FROM model_turn_reservations \
+             WHERE pool_id = $1 AND state IN ('reserved', 'dispatched')",
+        )
+        .bind(pool_id)
+        .fetch_one(self.db.pool())
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Output units this pool's observation ledger recorded inside
+    /// `[evaluated_at - window_seconds, evaluated_at)`.
+    ///
+    /// This is a *wall-window* total, and the caller divides it by the window
+    /// to get units per wall-second. It is deliberately **not** the controller's
+    /// rate formula, whose denominator is the union of active stream intervals:
+    /// `model_turn_observations` stores per-pool totals with no per-attempt
+    /// stream start/end, so that union cannot be reconstructed from what Phase
+    /// B stored. Reporting a wall-window rate as if it were the controller's
+    /// rate would be inventing the denominator.
+    pub async fn observed_output_units_in_window(
+        &self,
+        pool_id: i64,
+        evaluated_at: &str,
+        window_seconds: i64,
+    ) -> Result<i64> {
+        self.db.ensure_initialized().await?;
+        if pool_id <= 0 || evaluated_at.trim().is_empty() || window_seconds <= 0 {
+            return invalid_phase_c();
+        }
+        let total: Option<i64> = sqlx::query_scalar(
+            "SELECT sum(output_units)::bigint FROM model_turn_observations \
+             WHERE pool_id = $1 \
+               AND observed_at >= $2::timestamptz - make_interval(secs => $3::double precision) \
+               AND observed_at < $2::timestamptz",
+        )
+        .bind(pool_id)
+        .bind(evaluated_at)
+        .bind(window_seconds as f64)
+        .fetch_one(self.db.pool())
+        .await?;
+        Ok(total.unwrap_or(0))
     }
 
     /// Atomically move the named enforcing pools to `draining`.
@@ -2097,6 +2199,74 @@ impl ModelTurnAdmissionRepository {
         .bind(pool_id)
         .bind(capacity_units)
         .bind(available_units)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Set one pool's learned concurrency target directly.
+    ///
+    /// Production writes this from the controller; a fixture that needs more
+    /// than one turn in flight sets it here rather than acquiring SQL access.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn set_pool_learned_concurrency_for_test(
+        &self,
+        pool_id: i64,
+        target: i64,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("UPDATE model_turn_pools SET learned_concurrency = $2 WHERE id = $1")
+            .bind(pool_id)
+            .bind(target)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
+    /// Seed one binding of any bucket kind so a scoped fixture can exercise
+    /// every throttle class, not only the request bucket.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn seed_bucket_binding_for_test(
+        &self,
+        pool_id: i64,
+        bucket_kind: ModelTurnBucketKind,
+        capacity_units: i64,
+        available_units: i64,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "INSERT INTO model_turn_bucket_bindings \
+             (pool_id, bucket_kind, capacity_units, available_units) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (pool_id, bucket_kind) DO UPDATE SET \
+               capacity_units = EXCLUDED.capacity_units, available_units = EXCLUDED.available_units",
+        )
+        .bind(pool_id)
+        .bind(bucket_kind_name(bucket_kind))
+        .bind(capacity_units)
+        .bind(available_units)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Record one bounded usage observation so an aggregate-rate read has
+    /// something to divide. Production writes these from the provider chain.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn seed_output_observation_for_test(
+        &self,
+        pool_id: i64,
+        sequence: i64,
+        output_units: i64,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "INSERT INTO model_turn_observations (pool_id, sequence, kind, output_units) \
+             VALUES ($1, $2, 'usage', $3)",
+        )
+        .bind(pool_id)
+        .bind(sequence)
+        .bind(output_units)
         .execute(self.db.pool())
         .await?;
         Ok(())

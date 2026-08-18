@@ -146,7 +146,20 @@ async fn admission_attempt_fake_receipts_and_sequence_reach_outcome() {
         OpenAIResponsesTerminalReporterV1::default(),
     );
     let outcome = attempt.outcome().await;
-    assert_eq!(outcome.token_emission.first_token_monotonic_ms, Some(200));
+    // The attempt reads the injected clock once at its own start (task 75iz),
+    // so with this 100ms-per-read fake sequence the attempt begins at 100 and
+    // the first token frame carries the next reading. Time-to-first-token is
+    // therefore derivable from the attempt itself rather than from a consumer
+    // holding an `Instant`.
+    assert_eq!(
+        outcome.token_emission.attempt_started_monotonic_ms,
+        Some(100)
+    );
+    assert_eq!(outcome.token_emission.first_token_monotonic_ms, Some(300));
+    assert_eq!(
+        outcome.token_emission.time_to_first_token_seconds(),
+        Some(0.2)
+    );
     assert_eq!(outcome.authoritative_usage.unwrap().combined_units, 3);
     assert_eq!(
         outcome.observation.unwrap().discovery,

@@ -196,6 +196,38 @@ fn emit_every_public_metric() {
 
     let tick = Duration::from_millis(1);
 
+    // The ten model-turn admission series (task 75iz). Their whole label
+    // vocabulary is declared by `MODEL_TURN_SERIES`, and the driven emission
+    // here is what puts every name in front of the retired-relation predicate.
+    {
+        use super::model_turn_metrics::{
+            ModelTurnCatalogV1, ModelTurnExpiryOutcomeV1, ModelTurnRouteLabels,
+            ModelTurnThrottleBucketV1, record_aggregate_output_rate, record_expiry_outcome,
+            record_identity_eligibility, record_in_flight, record_pool_target,
+            record_protocol_coverage, record_reservation_divergence, record_stream_output_rate,
+            record_throttle, record_time_to_first_token,
+        };
+        struct SweepCatalog;
+        impl ModelTurnCatalogV1 for SweepCatalog {
+            fn resolves(&self, _provider_id: &str, _model_id: &str) -> bool {
+                true
+            }
+        }
+        let route =
+            ModelTurnRouteLabels::qualify(1, "sweep-provider", "sweep-model", &SweepCatalog)
+                .expect("the sweep catalog resolves its own route");
+        record_pool_target(&route, 1);
+        record_in_flight(&route, 1);
+        record_reservation_divergence(&route, 0);
+        record_aggregate_output_rate(&route, 1.0);
+        record_stream_output_rate(&route, 1.0);
+        record_time_to_first_token(&route, 1.0);
+        record_identity_eligibility(&route, true);
+        record_protocol_coverage(&route, true);
+        record_throttle(&route, ModelTurnThrottleBucketV1::Request);
+        record_expiry_outcome(&route, ModelTurnExpiryOutcomeV1::Refunded);
+    }
+
     taskrun_lifecycle::increment_job_started();
     taskrun_lifecycle::increment_worker_completion_submitted();
 
@@ -433,7 +465,7 @@ fn sweep_rendered_names() -> BTreeSet<String> {
 /// Every distinct metric name [`emit_every_public_metric`] currently produces.
 ///
 /// Pinned, not bounded — see the assertion that uses it.
-const EMITTED_METRIC_NAME_COUNT: usize = 128;
+const EMITTED_METRIC_NAME_COUNT: usize = 138;
 
 /// **The acceptance criterion.** No metric this crate can emit names a relation
 /// the Kueue cutover deleted — asserted on the names a live registry rendered.

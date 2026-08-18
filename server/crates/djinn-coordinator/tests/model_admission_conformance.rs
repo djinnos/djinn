@@ -1115,3 +1115,385 @@ async fn task_run_ids_for_task(db: &Database, task_id: &str) -> Vec<String> {
         .map(|run| run.id)
         .collect()
 }
+
+// ─── Phase D: bounded telemetry with a closed label allow-list (75iz) ──────
+
+/// The whole model-turn telemetry surface, driven through production and
+/// compared against the allow-list constant.
+///
+/// The claim being settled is a *closed shape*, not a sampled absence. The
+/// original acceptance wording ("no secrets or raw credential/account/project/
+/// user/request/lease IDs") is a universal negative over every emission the
+/// process will ever make, and a test run can only sample. So this scenario
+/// asserts set equality against
+/// [`djinn_telemetry::model_turn_metrics::expected_label_triples`], which is
+/// derived from `MODEL_TURN_SERIES` and nothing else; the redaction claim
+/// itself is pattern-checked against that constant in `djinn-telemetry`.
+///
+/// Every series is produced by the production path that owns it:
+///
+/// * pool target, in-flight, reservation divergence, aggregate output rate,
+///   identity eligibility and protocol coverage — the leader enforcement pass's
+///   own emission seam;
+/// * the four throttle classes — `ModelTurnAdmissionCoordinator::prepare`, the
+///   slot boundary, once per bucket kind;
+/// * per-stream output rate and time-to-first-token —
+///   `ModelTurnAdmissionCoordinator::reconcile`, from the attempt's injected
+///   clocks;
+/// * both expiry dispositions — the leader's persisted-timestamp lease reaper.
+///
+/// **The `enforce` mode here is an explicitly seeded fixture.** No production
+/// pool can legitimately reach `enforce` today: Phase B stored a capability
+/// *instant* rather than a coverage interval and no authoritative-usage column,
+/// so `qualify_aligned_phase_c_window_v1` reports `PartialCapabilityCoverage`/
+/// `MissingUsage` for every real window and the Phase-D guard denies the
+/// advance. Seeding the mode is how this scenario reaches the slot boundary
+/// without widening the heartbeat or defaulting the usage — either of which
+/// would forge the coverage the enforcement decision rests on.
+#[tokio::test]
+async fn phase_d_bounded_telemetry_matches_the_allow_list_exactly() {
+    use djinn_db::{ModelTurnAuthoritativeUsage, ModelTurnLeaseIdentity};
+    use djinn_provider::{
+        ProviderAbortCapabilityV1, ProviderAdmissionPolicyV1, ProviderAttemptAbortHandleV1,
+        ProviderAttemptAbortResultV1, ProviderAttemptCapabilitiesV1, ProviderAttemptPlanV1,
+        ProviderAttemptRouteCoverageV1, ProviderAttemptScopeV1, ProviderAttemptTerminalV1,
+        ProviderCredentialRecordScopeV1, ProviderHiddenRetryCapabilityV1, ProviderOutcomeV1,
+        ProviderOutputReservationSourceV1, ProviderTokenEmissionV1,
+    };
+    use djinn_slot::reply_loop::model_turn_admission::{
+        ModelTurnAdmissionCoordinator, ModelTurnAdmissionRequest, ModelTurnPreparation,
+    };
+    use djinn_telemetry::model_turn_metrics::{expected_label_triples, model_turn_label_triples};
+
+    let db = djinn_coordinator::test_helpers::create_test_db();
+    let repository = ModelTurnAdmissionRepository::new(db.clone());
+    let pool_id = seed_model_turn_admission_fixture(&db, "enforce", "supported", 2).await;
+    // The fixture pins the learned target at 1; this scenario keeps two turns
+    // in flight at once for the two expiry dispositions.
+    repository
+        .set_pool_learned_concurrency_for_test(pool_id, 4)
+        .await
+        .expect("raise the learned target");
+
+    // The active catalog must resolve the fixture route, or nothing is emitted
+    // at all — that is the point of the qualification, and it is asserted
+    // separately in `djinn-telemetry`.
+    let catalog = djinn_provider::catalog::CatalogService::new();
+    catalog.add_custom_provider(
+        djinn_core::models::Provider {
+            id: FIXTURE_PROVIDER_ID.into(),
+            name: "Conformance Provider".into(),
+            npm: String::new(),
+            env_vars: vec!["CONFORMANCE_API_KEY".into()],
+            base_url: "https://example.invalid/v1".into(),
+            docs_url: String::new(),
+            is_openai_compatible: true,
+        },
+        vec![djinn_core::models::Model {
+            id: FIXTURE_MODEL_ID.into(),
+            provider_id: FIXTURE_PROVIDER_ID.into(),
+            name: "Conformance Model".into(),
+            tool_call: false,
+            reasoning: false,
+            attachment: false,
+            context_window: 1,
+            output_limit: 1,
+            pricing: djinn_core::models::Pricing::default(),
+        }],
+    );
+
+    const BUCKETS: [ModelTurnBucketKind; 4] = [
+        ModelTurnBucketKind::Request,
+        ModelTurnBucketKind::Input,
+        ModelTurnBucketKind::Output,
+        ModelTurnBucketKind::Combined,
+    ];
+    // Every bucket kind exists and is exhausted, so each `prepare` defers on
+    // exactly the bucket it asked for.
+    for kind in BUCKETS {
+        repository
+            .seed_bucket_binding_for_test(pool_id, kind, 8, 0)
+            .await
+            .expect("seed exhausted binding");
+    }
+    // One durable usage observation, so the aggregate-rate gauge divides a real
+    // number rather than the zero it would also produce by doing nothing.
+    repository
+        .seed_output_observation_for_test(pool_id, 1, 600)
+        .await
+        .expect("seed observation");
+
+    let plan = |kind: ModelTurnBucketKind, units: i64| ProviderAttemptPlanV1 {
+        scope: ProviderAttemptScopeV1 {
+            credential: ProviderCredentialRecordScopeV1::from_credential_record_id(
+                FIXTURE_CREDENTIAL_ID,
+            ),
+            provider_id: FIXTURE_PROVIDER_ID.to_owned(),
+            model_id: FIXTURE_MODEL_ID.to_owned(),
+        },
+        coverage: ProviderAttemptRouteCoverageV1::Covered {
+            capabilities: ProviderAttemptCapabilitiesV1 {
+                hidden_retries: ProviderHiddenRetryCapabilityV1::Disabled,
+                abort: ProviderAbortCapabilityV1::Supported,
+            },
+            supported_bucket_bindings: BUCKETS.to_vec(),
+            policy: ProviderAdmissionPolicyV1::Proactive,
+        },
+        debits: vec![ModelTurnBucketDebit {
+            bucket_kind: kind,
+            units,
+        }],
+        output_reservation_source: ProviderOutputReservationSourceV1::ExplicitLimit,
+        abort: ProviderAttemptAbortHandleV1::new(),
+    };
+
+    let ((), rendered) = with_fixture_local_recorder(async || {
+        let coordinator =
+            ModelTurnAdmissionCoordinator::new(repository.clone()).with_catalog(catalog.clone());
+
+        // ── Four throttle classes, one per bucket kind ────────────────────
+        for (index, kind) in BUCKETS.into_iter().enumerate() {
+            let preparation = coordinator
+                .prepare(
+                    &plan(kind, 1),
+                    ModelTurnAdmissionRequest {
+                        credential_id: FIXTURE_CREDENTIAL_ID.to_owned(),
+                        request_id: format!("conformance-throttle-{index}"),
+                        owner_pod_uid: None,
+                        generation: 1,
+                    },
+                )
+                .await
+                .expect("prepare must not error");
+            assert!(
+                matches!(preparation, ModelTurnPreparation::Wait(_)),
+                "an exhausted {kind:?} bucket must defer, got {preparation:?}"
+            );
+        }
+
+        // ── One settled stream: TTFT and per-stream output rate ───────────
+        repository
+            .seed_bucket_binding_for_test(pool_id, ModelTurnBucketKind::Request, 8, 8)
+            .await
+            .expect("restore the request binding");
+        let ModelTurnPreparation::Permit(mut permit) = coordinator
+            .prepare(
+                &plan(ModelTurnBucketKind::Request, 1),
+                ModelTurnAdmissionRequest {
+                    credential_id: FIXTURE_CREDENTIAL_ID.to_owned(),
+                    request_id: "conformance-stream".to_owned(),
+                    owner_pod_uid: Some("pod-conformance-stream".to_owned()),
+                    generation: 1,
+                },
+            )
+            .await
+            .expect("prepare must not error")
+        else {
+            panic!("a pool with capacity must issue a send permit");
+        };
+        permit
+            .mark_active()
+            .await
+            .expect("hand off to the provider");
+        let identity = permit
+            .lease
+            .clone()
+            .expect("an enforced permit owns a lease");
+        coordinator
+            .reconcile(
+                identity,
+                &ProviderOutcomeV1 {
+                    terminal: ProviderAttemptTerminalV1::Completed,
+                    authoritative_usage: Some(ModelTurnAuthoritativeUsage {
+                        request_units: 1,
+                        input_units: 10,
+                        output_units: 40,
+                        combined_units: 50,
+                    }),
+                    observation: None,
+                    abort: ProviderAttemptAbortResultV1::NotRequested,
+                    token_emission: ProviderTokenEmissionV1 {
+                        attempt_started_monotonic_ms: Some(1_000),
+                        first_token_monotonic_ms: Some(1_250),
+                        last_token_monotonic_ms: Some(3_250),
+                    },
+                },
+            )
+            .await
+            .expect("reconcile must not error");
+        drop(permit);
+        coordinator.wait_for_cleanup().await;
+
+        // ── Both expiry dispositions, through the leader reaper ───────────
+        //
+        // Acquisition goes straight through the repository here, so the
+        // refunded case keeps the `reserved` lifecycle the disposition is
+        // defined by; the quarantined case is walked to `active` through the
+        // same production transitions the slot uses.
+        let mut identities: Vec<ModelTurnLeaseIdentity> = Vec::new();
+        for (request_id, activate) in [
+            ("conformance-expiry-refunded", false),
+            ("conformance-expiry-quarantined", true),
+        ] {
+            let outcome = repository
+                .acquire_turn(ModelTurnAcquireInput {
+                    pool_id,
+                    request_id: request_id.to_owned(),
+                    owner_pod_uid: None,
+                    generation: 1,
+                    debits: request_debit(1),
+                })
+                .await
+                .expect("acquire must not error");
+            let ModelTurnAcquireOutcome::Admitted { lease, .. } = outcome else {
+                panic!("the pool still has capacity, got {outcome:?}");
+            };
+            if activate {
+                repository
+                    .mark_dispatching(&lease.identity)
+                    .await
+                    .expect("dispatch");
+                repository
+                    .mark_active(&lease.identity)
+                    .await
+                    .expect("activate");
+            }
+            repository
+                .backdate_lease_for_test(&lease.identity, "1970-01-01T00:00:00Z", None)
+                .await
+                .expect("backdate the only clock the reaper reads");
+            identities.push(lease.identity);
+        }
+        assert_eq!(identities.len(), 2);
+        let reaped =
+            djinn_coordinator::model_turn_admission::controller::reap_stale_model_turn_leases_v1(
+                &repository,
+                "1970-01-01T00:10:00Z",
+                64,
+                Some(&catalog),
+            )
+            .await
+            .expect("reaper pass");
+        assert_eq!(
+            reaped.expired, 2,
+            "both stale leases must actually be expired, not merely observed"
+        );
+
+        // ── The six pool-scoped series, through the leader pass ───────────
+        let pool = repository
+            .pool_by_id(pool_id)
+            .await
+            .expect("read pool")
+            .expect("the fixture pool exists");
+        assert!(
+            djinn_coordinator::model_turn_admission::enforcement::emit_pool_series_v1(
+                &repository,
+                &catalog,
+                &pool,
+                "2024-01-01T00:01:00Z",
+            )
+            .await
+            .expect("pool telemetry"),
+            "a catalog-resolved pool must emit its series"
+        );
+    })
+    .await;
+
+    let triples = model_turn_label_triples(&rendered);
+    assert_eq!(
+        triples,
+        expected_label_triples(pool_id, FIXTURE_PROVIDER_ID, FIXTURE_MODEL_ID),
+        "the emitted (metric, label_key, label_value) set must equal the allow-list"
+    );
+}
+
+/// `enforce` has exactly one production route, and that route demands *current*
+/// coverage.
+///
+/// `ModelTurnAdmissionRepository::set_pool_mode_in_transaction` can express the
+/// `shadow → enforce` edge, and it gates that edge on the compatibility phase
+/// and the identity — but not on coverage, because it is handed no
+/// expected-path denominator to compare against. The compatibility phase is
+/// durable, so a pool that reached `d` while covered would still read `d` after
+/// coverage was lost. If some future caller reached for that function, an
+/// uncovered pool could enforce for the width of one controller window.
+///
+/// The leader pass closes that: `apply_enforcement_pass_in_transaction`
+/// re-observes coverage inside the transaction that mutates, and additionally
+/// requires the window to have qualified. This test pins the fact the argument
+/// rests on — that nothing outside `djinn-db`'s own tests asks
+/// `set_pool_mode_in_transaction` for `Enforce`.
+///
+/// A `grep` is the right instrument here precisely because the claim is about
+/// the *absence* of a caller: the search space is the source tree, and it is
+/// enumerated rather than sampled.
+#[test]
+fn enforce_has_no_production_caller_outside_the_guarded_leader_pass() {
+    use std::path::Path;
+
+    fn rust_sources(root: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name == "target") {
+                    continue;
+                }
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates directory");
+    let mut sources = Vec::new();
+    rust_sources(crates, &mut sources);
+    assert!(
+        sources.len() > 200,
+        "the source scan found only {} files; the walker is broken",
+        sources.len()
+    );
+    assert!(
+        sources
+            .iter()
+            .any(|path| path.ends_with("djinn-db/src/repositories/model_turn_admission.rs")),
+        "the source scan missed the admission repository; the walker is broken"
+    );
+
+    let mut offenders = Vec::new();
+    for path in &sources {
+        // `djinn-db`'s own tests exercise the edge deliberately; they are the
+        // reason it is gated at all.
+        if path.starts_with(crates.join("djinn-db")) {
+            continue;
+        }
+        // This file names both tokens only in order to search for them, so it
+        // would otherwise match itself. Excluded by exact path rather than by a
+        // blanket "skip tests" rule, which would also hide an inline
+        // `#[cfg(test)]` caller sitting inside a production module.
+        if path.ends_with("djinn-coordinator/tests/model_admission_conformance.rs") {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if source.contains("set_pool_mode_in_transaction")
+            && source.contains("ModelTurnAdmissionPhase::Enforce")
+        {
+            offenders.push(path.strip_prefix(crates).unwrap_or(path).to_owned());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "`enforce` must be reachable only through the guarded leader pass, which \
+         re-observes coverage inside the transaction that mutates. Found a \
+         caller pairing set_pool_mode_in_transaction with Enforce in \
+         {offenders:?}. If this is deliberate, it needs its own coverage \
+         re-observation first."
+    );
+}

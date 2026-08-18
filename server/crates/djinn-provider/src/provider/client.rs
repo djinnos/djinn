@@ -433,7 +433,12 @@ impl ApiClient {
         let url = url.to_owned();
         let auth = auth.clone();
         tokio::spawn(async move {
-            let mut emission = ProviderTokenEmissionV1::default();
+            let mut emission = ProviderTokenEmissionV1 {
+                // The attempt's own start, from the same injected clock every
+                // other emission instant comes from.
+                attempt_started_monotonic_ms: Some(context.receipt().monotonic_ms),
+                ..ProviderTokenEmissionV1::default()
+            };
             let mut observation = None;
             let mut authoritative_usage = None;
             let mut terminal = ProviderAttemptTerminalV1::Failed(ProviderAttemptLossV1::Protocol);
