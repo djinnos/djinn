@@ -963,6 +963,25 @@ pub struct RefinementRunAuditForTest {
 }
 
 /// Read a refinement run for tests.
+/// Total durable `outcome_attempts` recorded across every dispatch intent of
+/// one refinement run.
+///
+/// `load_refinement_stalled_handoffs` only surfaces intents whose role task is
+/// already closed, so it cannot witness "zero attempts were written" for a run
+/// whose role task is still open. This reads the column directly so a
+/// regression can assert the absence of the durable write rather than the
+/// absence of a log line.
+pub async fn refinement_outcome_attempts_for_test(db: &Database, run_id: &str) -> i64 {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(SUM(outcome_attempts), 0)::BIGINT          FROM refinement_dispatch_intents WHERE run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("failed to read refinement outcome attempts")
+}
+
 pub async fn refinement_run_audit_for_test(
     db: &Database,
     run_id: &str,
