@@ -408,6 +408,18 @@ pub struct CoordinatorActor {
     /// interval and no authoritative usage column, so no window can qualify
     /// until that storage lands. A pool therefore cannot reach `enforce`.
     pub(super) last_phase_c_window_trainable: bool,
+    /// One subscription controller per model-turn pool, carried across aligned
+    /// Phase-C windows by this leader.
+    ///
+    /// Restart-safe-to-lose in the same sense the baseline itself is: a
+    /// successor starts from an empty map and re-establishes each pool's
+    /// baseline from the windows it observes. What is *not* lost is the pool's
+    /// target, which lives in `model_turn_pools.learned_concurrency` and is
+    /// written only under this incarnation's durable fence.
+    pub(super) model_turn_subscription_controllers: std::collections::BTreeMap<
+        i64,
+        crate::model_turn_admission::subscription_learner::SubscriptionControllerStateV1,
+    >,
     /// Rolling-window throughput tracking: epic_id → Vec of merge event instants.
     // Restart-safe-to-lose: sliding window for throughput metrics, rebuilt on the next metrics tick.
     pub(super) throughput_events: HashMap<String, Vec<StdInstant>>,
@@ -885,6 +897,7 @@ impl CoordinatorActor {
             prune_tick_counter: 0,
             last_phase_c_window_start: None,
             last_phase_c_window_trainable: false,
+            model_turn_subscription_controllers: std::collections::BTreeMap::new(),
             throughput_events: HashMap::new(),
             pr_status_cache: HashMap::new(),
             pr_draft_first_seen: HashMap::new(),

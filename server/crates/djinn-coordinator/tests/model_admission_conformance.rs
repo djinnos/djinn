@@ -1407,6 +1407,132 @@ async fn phase_d_bounded_telemetry_matches_the_allow_list_exactly() {
     );
 }
 
+/// The subscription controller is reachable from the fenced leader cycle, and
+/// `model_turn_pools.learned_concurrency` has a production writer.
+///
+/// Both halves were missing until task `0qi9`. Adversarial verification of
+/// `96fy` established that outside its own module and tests,
+/// `ingest_qualified_window_v1` — which the learner's own doc comment calls
+/// "the sole production ingestion path" — had **no caller at all**, and that
+/// the only `UPDATE … SET learned_concurrency` in the tree was
+/// `set_pool_learned_concurrency_for_test`. The learner was unreachable and had
+/// no column to write to, which is why the usual "delete the one wiring line
+/// and watch a test go red" probe kept coming back clean: there was no line.
+///
+/// The behavioural proof that the wiring carries weight is in `scenario_09`,
+/// where a trainable window moves the persisted target and deleting the learner
+/// call from `run_completed_window_cycle_v1` reddens it. This test pins the
+/// structural facts that proof depends on. It reads only the **production
+/// half** of each file — the text before the first `#[cfg(test)]` attribute —
+/// and then only the body of the named function, so a call moved into a test
+/// module, or out of the leader cycle into some unreached helper, is red here
+/// even though the file still contains the string.
+#[test]
+fn the_subscription_learner_is_wired_to_the_fenced_leader_cycle() {
+    /// Everything before the first `#[cfg(test)]` in `source`.
+    ///
+    /// Each file under scan ends with `#[cfg(test)] #[path = …] mod tests;`, so
+    /// this is where its unit tests begin.
+    fn production_half(source: &str) -> &str {
+        source
+            .split_once("#[cfg(test)]")
+            .map_or(source, |(before, _)| before)
+    }
+
+    /// The body of the item introduced by `signature`, up to the first closing
+    /// brace in column zero.
+    fn body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let (_, rest) = source
+            .split_once(signature)
+            .unwrap_or_else(|| panic!("the source does not define `{signature}`"));
+        rest.split_once("\n}\n").map_or(rest, |(inside, _)| inside)
+    }
+
+    let controller =
+        read_sibling_crate_source("djinn-coordinator/src/model_turn_admission_controller.rs");
+    let learner = read_sibling_crate_source(
+        "djinn-coordinator/src/model_turn_admission_subscription_learner.rs",
+    );
+    let repository = read_sibling_crate_source("djinn-db/src/repositories/model_turn_admission.rs");
+    for (name, source) in [
+        ("controller", &controller),
+        ("learner", &learner),
+        ("repository", &repository),
+    ] {
+        assert!(
+            source.len() > 4_000 && production_half(source).len() > 1_000,
+            "the {name} source read is empty or truncated; the scan is broken"
+        );
+    }
+
+    // 1. The fenced leader cycle itself calls the learner's production entry
+    //    point — not the file, the function.
+    assert!(
+        body(
+            production_half(&controller),
+            "pub async fn run_completed_window_cycle_v1(",
+        )
+        .contains("learn_and_persist_window_target_v1("),
+        "the fenced leader cycle must call the subscription learner"
+    );
+    // And the leader tick calls the fenced cycle, so the chain reaches an actor
+    // the advisory-lock leader actually runs.
+    assert!(
+        body(
+            production_half(&controller),
+            "pub(crate) async fn run_completed_phase_c_window(",
+        )
+        .contains("run_completed_window_cycle_v1("),
+        "the leader tick must call the fenced cycle"
+    );
+
+    // 2. The learner reaches the window only through the exact-bound,
+    //    catalog-qualified seam: no raw controller-window query and no caller
+    //    verdict about whether the window is trainable.
+    let persist_path = body(
+        production_half(&learner),
+        "pub async fn learn_and_persist_window_target_v1(",
+    );
+    assert!(
+        persist_path.contains("ingest_qualified_window_v1("),
+        "the learner's persist path must ingest through the catalog-qualified \
+         seam"
+    );
+    assert!(
+        persist_path.contains("apply_learned_concurrency("),
+        "and it must be what drives the production writer"
+    );
+
+    // 3. The column has a production writer, fenced in the same statement as
+    //    the update.
+    let production_repository = production_half(&repository);
+    assert!(
+        production_repository.contains("pub async fn apply_learned_concurrency("),
+        "`model_turn_pools.learned_concurrency` must have a production writer"
+    );
+    let writer = body(
+        production_repository,
+        "pub async fn apply_learned_concurrency(",
+    );
+    assert!(
+        writer.contains("SET learned_concurrency = $2")
+            && writer.contains("FROM coordinator_incarnations c"),
+        "the production writer must apply the leadership fence in the same \
+         statement as the update, as `upsert_controller_window` does"
+    );
+    // 4. The test-only setter stays test-only. It is text in the production
+    //    half of the file, but it is not *compiled* into a production build,
+    //    and the attribute that makes that true is what is pinned here.
+    assert!(
+        production_repository.contains(
+            "#[cfg(any(test, feature = \"test-support\"))]\n    pub async fn \
+             set_pool_learned_concurrency_for_test("
+        ),
+        "`set_pool_learned_concurrency_for_test` must remain gated behind \
+         `test`/`test-support` and must not become the production path"
+    );
+}
+
 /// `enforce` has exactly one production route, and that route demands *current*
 /// coverage.
 ///
@@ -3983,6 +4109,14 @@ async fn scenario_09_every_compatibility_prerequisite_is_independently_load_bear
             PhaseCCompletedWindowV1, PhaseCWindowCountsV1, project_dispatch_topology_paths_v1,
             run_completed_window_cycle_v1, window_bounds_v1,
         };
+        use djinn_coordinator::model_turn_admission::subscription_learner::{
+            ControllerTransitionV1, SubscriptionControllerStateV1,
+        };
+
+        // The leader's per-pool controller state, carried across the windows
+        // below exactly as the coordinator actor carries it across ticks.
+        let mut controllers: std::collections::BTreeMap<i64, SubscriptionControllerStateV1> =
+            std::collections::BTreeMap::new();
 
         let pool_id = cfni_seed_pool(&db, "cfni-phase-c-diagnostic", "shadow").await;
         repository
@@ -4028,8 +4162,13 @@ async fn scenario_09_every_compatibility_prerequisite_is_independently_load_bear
                         completed_turns: 12,
                     },
                 )]),
+                // The production shape: the leader can reconstruct no stream
+                // intervals and no per-attempt usage from the durable ledgers,
+                // so it supplies none.
+                activity: std::collections::BTreeMap::new(),
             },
             CFNI_GENERATION,
+            &mut controllers,
         )
         .await
         .expect("the controller cycle must not error");
@@ -4060,6 +4199,30 @@ async fn scenario_09_every_compatibility_prerequisite_is_independently_load_bear
             !summary.diagnostics.is_empty(),
             "the persisted row must carry the diagnostic codes"
         );
+        // The learner ran, and it *refused*. This is the assertion that used to
+        // read `learned_concurrency == 3` and could not fail: before the
+        // learner had a caller and the column had a production writer, no
+        // window of any kind could move that number, so asserting it had not
+        // moved asserted nothing. What is checked now is the learner's own
+        // verdict for this pool — that it was consulted at all, and that the
+        // durable window it re-read was not one it would train on. An empty
+        // map (the learner was never called) and any other transition (it
+        // qualified a diagnostic window) both fail here.
+        assert_eq!(
+            outcome.learner_transitions.get(&pool_id),
+            Some(&ControllerTransitionV1::HeldUnqualified),
+            "the subscription controller must run for every persisted pool and \
+             must refuse a window the durable ledger calls untrainable; got \
+             {:?}",
+            outcome.learner_transitions
+        );
+        assert!(
+            outcome.learned_pools.is_empty() && outcome.learner_fenced_pools.is_empty(),
+            "a refused window commits no target at all; got learned={:?} \
+             fenced={:?}",
+            outcome.learned_pools,
+            outcome.learner_fenced_pools
+        );
         assert_eq!(
             repository
                 .pool_control_state_for_test(pool_id)
@@ -4068,7 +4231,7 @@ async fn scenario_09_every_compatibility_prerequisite_is_independently_load_bear
                 .expect("pool exists")
                 .3,
             3,
-            "an untrainable window may not move the learned target"
+            "and the persisted target stands where it was"
         );
         // And the same untrainable verdict denies the enforcement advance.
         let denied = djinn_coordinator::model_turn_admission::enforcement::run_enforcement_pass_v1(
@@ -4084,6 +4247,242 @@ async fn scenario_09_every_compatibility_prerequisite_is_independently_load_bear
         assert!(
             denied.enforced_pools.is_empty(),
             "an untrainable window may not enforce a pool"
+        );
+    }
+
+    // ── A trainable window DOES move the persisted target ─────────────────
+    //
+    // The positive control for the block above. Without it, "an untrainable
+    // window teaches nothing" is satisfied by a learner that is hard-wired to
+    // teach nothing, and the refusal proves only that the code is inert.
+    //
+    // **Disclosed seeding.** Production cannot reach this state today and this
+    // block does not pretend otherwise: `model_turn_capability_heartbeats`
+    // persists a heartbeat *instant* and not a coverage interval, so
+    // `capability_evidence_from_heartbeat` reconstructs the narrowest interval
+    // the row supports and every real window is `PartialCapabilityCoverage`.
+    // The `PhaseCCapabilityEvidenceV1` values below carry the window-covering
+    // interval that Phase B2 storage will persist, supplied here by hand. That
+    // is a fixture, stated at the line that writes it — the production leader
+    // supplies no such evidence, and widening the stored instant to manufacture
+    // it would forge the very coverage every decision here rests on.
+    //
+    // Everything downstream of that seed is production: the qualifier, the
+    // fenced window upsert, the exact-bound catalog-qualified learner read, the
+    // controller, and the fenced `learned_concurrency` writer.
+    {
+        use djinn_coordinator::model_turn_admission::controller::{
+            PhaseCCompletedWindowV1, PhaseCWindowCountsV1, project_dispatch_topology_paths_v1,
+            run_completed_window_cycle_v1, window_bounds_v1,
+        };
+        use djinn_coordinator::model_turn_admission::subscription_learner::{
+            ActiveStreamV1, ControllerTransitionV1, OutputTokenEmissionV1,
+            SubscriptionControllerStateV1, WindowActivityV1,
+        };
+        use djinn_coordinator::model_turn_admission::{
+            AlignedPhaseCWindowV1, PhaseCCapabilityEvidenceV1,
+        };
+        use djinn_db::{
+            ModelTurnControllerFence, ModelTurnLearnedConcurrencyInput,
+            ModelTurnLeaseMutationOutcome,
+        };
+
+        let pool_id = cfni_seed_pool(&db, "cfni-phase-c-trainable", "shadow").await;
+        let catalog = cfni_catalog();
+        let target_now = async |pool_id: i64| {
+            repository
+                .pool_control_state_for_test(pool_id)
+                .await
+                .expect("pool state")
+                .expect("pool exists")
+                .3
+        };
+        assert_eq!(
+            target_now(pool_id).await,
+            1,
+            "the seeded pool starts at the floor, so every move below is the \
+             controller's and not the fixture's"
+        );
+
+        let pools: Vec<djinn_db::ModelTurnPool> = repository
+            .list_observable_pools(64)
+            .await
+            .expect("read the dispatch topology")
+            .into_iter()
+            .filter(|pool| pool.id == pool_id)
+            .collect();
+        assert_eq!(pools.len(), 1, "the fixture pool must be observable");
+        let projection = project_dispatch_topology_paths_v1(&catalog, &[cfni_ready_slot()], &pools);
+        assert_eq!(projection.expected_paths.len(), 1);
+        let path = projection.expected_paths[0].clone();
+
+        // The seeded coverage interval — see the disclosure above.
+        let covered = |window: AlignedPhaseCWindowV1| PhaseCCapabilityEvidenceV1 {
+            path: path.clone(),
+            coverage_start_second: window.start_second(),
+            coverage_end_second: window.end_second(),
+            observed_at_second: window.start_second() + 30,
+            covered: true,
+        };
+        // One stream that produced `tokens` across the whole window: 60 seconds
+        // of active wall clock, so the aggregate rate is `tokens / 60`.
+        let stream = |window: AlignedPhaseCWindowV1, tokens: i64| WindowActivityV1 {
+            streams: vec![ActiveStreamV1 {
+                started_at_second: window.start_second(),
+                ended_at_second: window.end_second(),
+                emissions: vec![OutputTokenEmissionV1 {
+                    emitted_at_second: window.start_second() + 30,
+                    output_tokens: tokens,
+                }],
+            }],
+            terminals: Vec::new(),
+        };
+
+        let mut controllers: std::collections::BTreeMap<i64, SubscriptionControllerStateV1> =
+            std::collections::BTreeMap::new();
+        let cycle = async |window: AlignedPhaseCWindowV1,
+                           tokens: i64,
+                           fence: &ModelTurnControllerFence,
+                           controllers: &mut std::collections::BTreeMap<
+            i64,
+            SubscriptionControllerStateV1,
+        >| {
+            let (started_at, ended_at) = window_bounds_v1(window).expect("window bounds");
+            let evidence = [covered(window)];
+            run_completed_window_cycle_v1(
+                &repository,
+                &catalog,
+                fence,
+                &PhaseCCompletedWindowV1 {
+                    window,
+                    started_at,
+                    ended_at,
+                    projection: &projection,
+                    capability_evidence: &evidence,
+                    // No admitted attempts in the window, so the attempt-chain
+                    // half of the qualifier has nothing to reject and the only
+                    // seeded input is the coverage interval above.
+                    admitted_attempts: &[],
+                    counts: std::collections::BTreeMap::from([(
+                        pool_id,
+                        PhaseCWindowCountsV1 {
+                            admitted_turns: 12,
+                            completed_turns: 12,
+                        },
+                    )]),
+                    activity: std::collections::BTreeMap::from([(pool_id, stream(window, tokens))]),
+                },
+                CFNI_GENERATION,
+                controllers,
+            )
+            .await
+            .expect("the controller cycle must not error")
+        };
+
+        // Window 2 at 100 tokens/second. It qualifies and it is eligible, but a
+        // controller with no baseline has nothing to have grown against, so the
+        // first eligible window only establishes one.
+        let window_two = AlignedPhaseCWindowV1::new(120).expect("aligned window");
+        let first = cycle(window_two, 6_000, &cfni_fence(), &mut controllers).await;
+        assert!(
+            first.qualification.admitted,
+            "with complete coverage and no attempt evidence the window must \
+             qualify, or nothing below is a test of the learner; got {:?}",
+            first.qualification.diagnostics
+        );
+        assert_eq!(first.persisted_pools, vec![pool_id]);
+        assert_eq!(
+            first.learner_transitions.get(&pool_id),
+            Some(&ControllerTransitionV1::ProbeDidNotGrow),
+            "the first eligible window establishes the baseline"
+        );
+        assert!(first.learned_pools.is_empty());
+        assert_eq!(
+            target_now(pool_id).await,
+            1,
+            "and a window that moved no target commits none"
+        );
+
+        // Window 3 at 200 tokens/second, against a baseline of 100. The
+        // bootstrap lower bound clears the 5% growth threshold, the controller
+        // steps 1 -> 2, and *that* is what reaches the column.
+        let window_three = AlignedPhaseCWindowV1::new(180).expect("aligned window");
+        let grew = cycle(window_three, 12_000, &cfni_fence(), &mut controllers).await;
+        assert_eq!(
+            grew.learner_transitions.get(&pool_id),
+            Some(&ControllerTransitionV1::Grew),
+            "a window that doubles the observed rate must grow the target"
+        );
+        assert_eq!(
+            grew.learned_pools,
+            vec![(pool_id, 2)],
+            "the cycle must report the target it committed"
+        );
+        assert!(grew.learner_fenced_pools.is_empty());
+        assert_eq!(
+            target_now(pool_id).await,
+            2,
+            "the persisted learned target moved through the production path; \
+             this is the assertion that was impossible before the controller \
+             had a caller and the column had a writer"
+        );
+
+        // The fence, at the cycle. A leader that is no longer the live
+        // incarnation persists no window, so it never reaches the learner.
+        let stale = ModelTurnControllerFence {
+            incarnation_id: "01a01246-0000-7000-8000-0000000000ff".to_owned(),
+            live_since_at: "1970-01-01T00:00:00Z".to_owned(),
+        };
+        let window_four = AlignedPhaseCWindowV1::new(240).expect("aligned window");
+        let fenced = cycle(window_four, 60_000, &stale, &mut controllers).await;
+        assert!(fenced.fenced, "an unknown incarnation may not commit");
+        assert!(
+            fenced.learner_transitions.is_empty() && fenced.learned_pools.is_empty(),
+            "and a fenced cycle never reaches the learner at all"
+        );
+        assert_eq!(
+            target_now(pool_id).await,
+            2,
+            "so the target a superseded leader computed does not land"
+        );
+
+        // The fence, at the writer itself — the clause above only proves the
+        // window upsert is fenced. This one offers the learned-concurrency
+        // write directly, with a stale fence and then a live one, so the
+        // refusal is not simply "this writer never works".
+        assert_eq!(
+            repository
+                .apply_learned_concurrency(ModelTurnLearnedConcurrencyInput {
+                    pool_id,
+                    learned_concurrency: 9,
+                    controller_generation: CFNI_GENERATION,
+                    fence: stale,
+                })
+                .await
+                .expect("the fenced write must not error"),
+            ModelTurnLeaseMutationOutcome::Fenced,
+        );
+        assert_eq!(
+            target_now(pool_id).await,
+            2,
+            "a stale generation's write updates no row"
+        );
+        assert_eq!(
+            repository
+                .apply_learned_concurrency(ModelTurnLearnedConcurrencyInput {
+                    pool_id,
+                    learned_concurrency: 9,
+                    controller_generation: CFNI_GENERATION,
+                    fence: cfni_fence(),
+                })
+                .await
+                .expect("the live write must not error"),
+            ModelTurnLeaseMutationOutcome::Applied,
+        );
+        assert_eq!(
+            target_now(pool_id).await,
+            9,
+            "and the identical write under the live fence does land"
         );
     }
 
