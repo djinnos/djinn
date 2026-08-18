@@ -24,9 +24,13 @@ import type {
   ProposalDebateTrailRow,
   ProposalGateStatus,
   ProposalRefinementStatus,
+  TypedEvidenceGateStatus,
 } from "@/api/types";
 import { BlockMarkdown } from "./blocks/BlockShell";
-import { classifyRefinementEvidence } from "./refinementEvidenceStatus";
+import {
+  classifyRefinementEvidence,
+  type TypedEvidenceDisplay,
+} from "./refinementEvidenceStatus";
 
 /**
  * Human-readable label for a DoR check name.
@@ -177,6 +181,285 @@ function BlockingEntryCard({
   );
 }
 
+/** One labelled line of the typed finding detail. */
+function TypedDetailRow({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex gap-2 text-xs">
+      <span className="w-36 shrink-0 text-muted-foreground">{label}</span>
+      <span className="min-w-0 flex-1 break-words">{children}</span>
+    </div>
+  );
+}
+
+/**
+ * The claim is persisted as JSON text. Render its question when it parses as a
+ * structured claim, the raw text otherwise — never a swallowed parse error,
+ * because a blank claim is indistinguishable from "no demand" to a reviewer.
+ */
+function claimText(claim: string | undefined | null): string {
+  if (!claim) return "";
+  try {
+    const parsed: unknown = JSON.parse(claim);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const question = (parsed as Record<string, unknown>).question;
+      if (typeof question === "string" && question.length > 0) return question;
+    }
+  } catch {
+    // Not JSON: a legacy plain-string claim. Fall through to the raw text.
+  }
+  return claim;
+}
+
+/**
+ * Full detail for the proposal's typed evidence finding.
+ *
+ * Every value here is read from the server's projection. In particular the
+ * originating revision is rendered as the server's `demanded_revision_seq`
+ * with no comparison against the proposal head: a finding keeps blocking as
+ * the head advances past it, and staleness is the server's call, not the
+ * browser's.
+ */
+function TypedFindingCard({
+  typed,
+  display,
+  blockedExplanations,
+  action,
+}: {
+  typed: TypedEvidenceGateStatus;
+  display: TypedEvidenceDisplay;
+  blockedExplanations: string[];
+  action?: React.ReactNode;
+}) {
+  const attempts = typed.attempts ?? [];
+  const checks = typed.planned_checks ?? [];
+  const gaps = typed.gaps ?? [];
+  const usable = typed.usable_findings ?? [];
+  const disposition = typed.judge_disposition ?? null;
+  return (
+    <div
+      data-testid="typed-evidence-finding"
+      className={cn(
+        "space-y-2 rounded-md border p-2",
+        display.blocking
+          ? "border-destructive/40 bg-destructive/5"
+          : "border-border bg-background/60",
+      )}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <HugeiconsIcon
+          icon={display.blocking ? CancelCircleIcon : CheckmarkCircle02Icon}
+          size={14}
+          className={cn(
+            "shrink-0",
+            display.blocking ? "text-destructive" : "text-green-600",
+          )}
+          aria-hidden
+        />
+        <span className="text-xs font-medium">Typed evidence finding</span>
+        <Badge variant="outline" className="text-[10px]">
+          {display.badge}
+        </Badge>
+        {display.blocking && (
+          <Badge variant="destructive" className="text-[10px]">
+            Blocking
+          </Badge>
+        )}
+        {action}
+      </div>
+
+      <div className="space-y-1">
+        <TypedDetailRow label="Finding">
+          <span className="font-mono text-[10px]">{typed.finding_id}</span>
+        </TypedDetailRow>
+        <TypedDetailRow label="Claim">{claimText(typed.claim)}</TypedDetailRow>
+        <TypedDetailRow label="Lifecycle">{typed.lifecycle}</TypedDetailRow>
+        <TypedDetailRow label="Demanded against">
+          revision {typed.demanded_revision_seq}
+        </TypedDetailRow>
+        <TypedDetailRow label="Evidence outcome">
+          {typed.evidence_outcome ?? "no validated return yet"}
+        </TypedDetailRow>
+        {typed.folding_revision !== undefined &&
+          typed.folding_revision !== null && (
+            <TypedDetailRow label="Folding revision">
+              revision {typed.folding_revision}
+            </TypedDetailRow>
+          )}
+        {typed.failure_detail && (
+          <TypedDetailRow label="Failure detail">
+            {typed.failure_detail}
+          </TypedDetailRow>
+        )}
+        {typed.parity_mismatch_reason && (
+          <TypedDetailRow label="Parity">
+            {typed.parity_mismatch_reason}
+          </TypedDetailRow>
+        )}
+      </div>
+
+      {attempts.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            Attempts
+          </p>
+          <ul className="space-y-0.5">
+            {attempts.map((attempt) => (
+              <li
+                key={`${attempt.sequence}-${attempt.spike_task_id}`}
+                data-testid="typed-evidence-attempt"
+                className="text-xs"
+              >
+                <span className="font-medium">#{attempt.sequence}</span>{" "}
+                <span className="font-mono text-[10px]">
+                  {attempt.spike_task_id}
+                </span>
+                {attempt.outcome ? ` — ${attempt.outcome}` : ""}
+                {attempt.failure_detail ? ` — ${attempt.failure_detail}` : ""}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {checks.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            Planned checks
+          </p>
+          <ul className="space-y-0.5">
+            {checks.map((check) => (
+              <li
+                key={check.check_id}
+                data-testid="typed-evidence-check"
+                className="text-xs"
+              >
+                <span className="font-medium">{check.check_id}</span>{" "}
+                <span className="text-muted-foreground">
+                  method {check.method}
+                </span>
+                {" — "}
+                <span className="text-muted-foreground">
+                  {check.status ?? "not returned"}
+                </span>
+                {check.anchor_health && (
+                  <>
+                    {" — "}
+                    <span
+                      data-testid="typed-evidence-anchor-health"
+                      className={cn(
+                        check.anchor_health === "healthy"
+                          ? "text-green-600 dark:text-green-400"
+                          : "text-destructive",
+                      )}
+                    >
+                      anchor {check.anchor_health}
+                      {check.anchor_health === "unusable"
+                        ? ` (method ${check.method} is not server-compatible for this anchor)`
+                        : ""}
+                    </span>
+                  </>
+                )}
+                {check.anchor_locator && (
+                  <div className="font-mono text-[10px] text-muted-foreground">
+                    {check.anchor_locator}
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {usable.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            Usable findings
+          </p>
+          <ul className="space-y-0.5">
+            {usable.map((conclusion, i) => (
+              <li
+                key={`${i}-${conclusion}`}
+                data-testid="typed-evidence-usable-finding"
+                className="text-xs"
+              >
+                {conclusion}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {gaps.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            Failures and gaps
+          </p>
+          <ul className="space-y-0.5">
+            {gaps.map((gap, i) => (
+              <li
+                key={`${i}-${gap}`}
+                data-testid="typed-evidence-gap"
+                className="text-xs text-destructive"
+              >
+                {gap}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {disposition && (
+        <div className="space-y-1">
+          <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            Judge disposition
+          </p>
+          <div data-testid="typed-evidence-disposition" className="space-y-0.5">
+            <TypedDetailRow label="Decision">
+              {disposition.disposition} ({disposition.outcome})
+            </TypedDetailRow>
+            <TypedDetailRow label="Folded into">
+              revision {disposition.folding_revision}
+            </TypedDetailRow>
+            <TypedDetailRow label="Judge task">
+              <span className="font-mono text-[10px]">
+                {disposition.judge_task_id}
+              </span>
+            </TypedDetailRow>
+            <TypedDetailRow label="Rationale">
+              {disposition.rationale}
+            </TypedDetailRow>
+          </div>
+        </div>
+      )}
+
+      {blockedExplanations.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            Why the gate is blocked
+          </p>
+          <ul className="space-y-0.5">
+            {blockedExplanations.map((explanation, i) => (
+              <li
+                key={`${i}-${explanation}`}
+                data-testid="typed-evidence-blocked-explanation"
+                className="text-xs text-muted-foreground"
+              >
+                {explanation}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /**
  * Readiness gate for a proposal, rendered as a per-condition checklist.
  *
@@ -311,8 +594,14 @@ export function ReadinessPanel({
   const evidenceDisplay = classifyRefinementEvidence(
     refinement,
     gateStatus?.needs_evidence,
+    gateStatus?.typed_evidence,
   );
   const evidence = evidenceDisplay.evidence;
+  // Typed presentation renders only when the server published a finding.
+  // Absent section means legacy-only rendering, byte-identical to before.
+  const typedEvidence = gateStatus?.typed_evidence?.finding_id
+    ? gateStatus.typed_evidence
+    : null;
 
   return (
     <div className="space-y-3 rounded-md border p-3">
@@ -541,6 +830,18 @@ export function ReadinessPanel({
             </Button>
           </div>
         </div>
+      )}
+
+      {/* Typed evidence finding — the server's projection, rendered whole.
+          Nothing here is recomputed: the originating revision is provenance,
+          the anchor health is the server's dereference result, and the
+          blocked explanations are verbatim. */}
+      {typedEvidence && (
+        <TypedFindingCard
+          typed={typedEvidence}
+          display={evidenceDisplay.typed}
+          blockedExplanations={gateStatus?.blocked_explanations ?? []}
+        />
       )}
 
       {/* Needs-evidence spike parking note — renders distinct copy for

@@ -4,6 +4,7 @@ import type {
   ProposalDebateTrailRow,
   ProposalGateStatus,
   ProposalRefinementStatus,
+  TypedEvidenceGateStatus,
 } from "@/api/types";
 import { ReadinessPanel } from "./ReadinessPanel";
 import { callMcpTool } from "@/api/mcpClient";
@@ -756,5 +757,344 @@ describe("ReadinessPanel", () => {
     ).toBeInTheDocument();
     // No evidence row content
     expect(screen.getByText("none required")).toBeInTheDocument();
+  });
+});
+
+// ── Typed evidence finding detail (menk) ─────────────────────────────────────
+//
+// The panel renders the server's typed projection whole. Every assertion below
+// is on a value the server sent; nothing the panel derives locally is asserted,
+// because there is nothing it may derive locally.
+
+/** A complete typed section with sensible defaults. */
+function typedEvidence(
+  overrides: Partial<TypedEvidenceGateStatus> = {},
+): TypedEvidenceGateStatus {
+  return {
+    mode: "enforce",
+    blocking: true,
+    finding_id: "finding-abc",
+    claim: '{"question":"Can the launcher share a cgroup across pods?"}',
+    lifecycle: "demanded",
+    demanded_revision_seq: 2,
+    attempt_seq: 1,
+    attempts: [],
+    planned_checks: [],
+    gaps: [],
+    usable_findings: [],
+    retry_permitted: false,
+    ...overrides,
+  } as TypedEvidenceGateStatus;
+}
+
+const TYPED_LIFECYCLES = [
+  "demanded",
+  "spike_active",
+  "evidence_received",
+  "failed",
+  "resolved",
+  "withdrawn",
+] as const;
+
+describe("ReadinessPanel typed evidence finding", () => {
+  beforeEach(() => {
+    vi.mocked(callMcpTool).mockReset();
+  });
+
+  it("renders the finding for each of the six lifecycle states", () => {
+    for (const lifecycle of TYPED_LIFECYCLES) {
+      const blocking = !["resolved", "withdrawn"].includes(lifecycle);
+      const { unmount } = render(
+        <ReadinessPanel
+          gateStatus={gateStatus({
+            ready: !blocking,
+            typed_evidence: typedEvidence({ lifecycle, blocking }),
+          })}
+          refinement={refinement()}
+        />,
+      );
+      const card = screen.getByTestId("typed-evidence-finding");
+      // The lifecycle is rendered as the server's own token, not a re-labelled
+      // approximation, so a reader can match it against the durable state.
+      expect(card, lifecycle).toHaveTextContent(lifecycle);
+      expect(card).toHaveTextContent("finding-abc");
+      expect(card).toHaveTextContent(
+        "Can the launcher share a cgroup across pods?",
+      );
+      // Blocking is the server's flag, and only the four unresolved states
+      // carry it in this fixture.
+      expect(
+        card.textContent?.includes("Blocking"),
+        `${lifecycle} blocking badge`,
+      ).toBe(blocking);
+      unmount();
+    }
+    expect(callMcpTool).not.toHaveBeenCalled();
+  });
+
+  it("renders all three evidence outcomes, and says so when none has landed", () => {
+    for (const outcome of ["resolved", "partial", "unresolved"] as const) {
+      const { unmount } = render(
+        <ReadinessPanel
+          gateStatus={gateStatus({
+            ready: false,
+            typed_evidence: typedEvidence({
+              lifecycle: "evidence_received",
+              evidence_outcome: outcome,
+            }),
+          })}
+          refinement={refinement()}
+        />,
+      );
+      expect(screen.getByTestId("typed-evidence-finding")).toHaveTextContent(
+        outcome,
+      );
+      unmount();
+    }
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          ready: false,
+          typed_evidence: typedEvidence({ lifecycle: "demanded" }),
+        })}
+        refinement={refinement()}
+      />,
+    );
+    expect(screen.getByTestId("typed-evidence-finding")).toHaveTextContent(
+      "no validated return yet",
+    );
+    expect(callMcpTool).not.toHaveBeenCalled();
+  });
+
+  it("distinguishes a healthy anchor from an unusable, method-incompatible one", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          ready: false,
+          typed_evidence: typedEvidence({
+            lifecycle: "evidence_received",
+            evidence_outcome: "partial",
+            planned_checks: [
+              {
+                check_id: "cgroup-delegation",
+                method: "code",
+                status: "passed",
+                anchor_locator: "code://server/src/launcher.rs#L42",
+                anchor_health: "healthy",
+              },
+              {
+                check_id: "graph-reachability",
+                method: "graph",
+                status: "failed",
+                anchor_locator: "graph://generation/9f2",
+                anchor_health: "unusable",
+              },
+              {
+                check_id: "not-yet-run",
+                method: "command",
+                status: null,
+                anchor_locator: null,
+                anchor_health: null,
+              },
+            ],
+          }),
+        })}
+        refinement={refinement()}
+      />,
+    );
+    const checks = screen.getAllByTestId("typed-evidence-check");
+    expect(checks).toHaveLength(3);
+    expect(checks[0]).toHaveTextContent("method code");
+    expect(checks[0]).toHaveTextContent("anchor healthy");
+    // Immutable provenance is rendered, not summarized away.
+    expect(checks[0]).toHaveTextContent("code://server/src/launcher.rs#L42");
+    // The server derived `unusable`; the panel says which method was not
+    // server-compatible rather than leaving the reader to guess.
+    expect(checks[1]).toHaveTextContent("anchor unusable");
+    expect(checks[1]).toHaveTextContent(
+      "method graph is not server-compatible for this anchor",
+    );
+    expect(checks[1]).toHaveTextContent("graph://generation/9f2");
+    // A check with no return yet says so instead of rendering a blank cell.
+    expect(checks[2]).toHaveTextContent("not returned");
+    expect(
+      screen.getAllByTestId("typed-evidence-anchor-health"),
+    ).toHaveLength(2);
+    expect(callMcpTool).not.toHaveBeenCalled();
+  });
+
+  it("renders a finding with attempts, failures, gaps, usable findings and a Judge disposition", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          ready: false,
+          blocked_explanations: [
+            "Unresolved typed evidence finding finding-abc (lifecycle: failed; demanded against revision 2)",
+          ],
+          typed_evidence: typedEvidence({
+            lifecycle: "failed",
+            evidence_outcome: "unresolved",
+            failure_detail: "malformed_findings: conclusion 2 has no anchor",
+            folding_revision: 4,
+            attempts: [
+              {
+                sequence: 1,
+                spike_task_id: "spike-one",
+                outcome: "unresolved",
+                failure_detail: "anchor hydration failed",
+              },
+              { sequence: 2, spike_task_id: "spike-two" },
+            ],
+            usable_findings: [
+              "cgroup.procs is writable by the delegated subtree",
+            ],
+            gaps: [
+              "failure ANCHOR_UNUSABLE: graph anchor could not be dereferenced",
+              "gap MISSING_CHECK: no command check was returned",
+            ],
+            judge_disposition: {
+              disposition: "withdrawn",
+              outcome: "partial",
+              folding_revision: 5,
+              judge_task_id: "judge-task-1",
+              rationale: "The remaining uncertainty is not load-bearing.",
+            },
+          }),
+        })}
+        refinement={refinement()}
+      />,
+    );
+    const attempts = screen.getAllByTestId("typed-evidence-attempt");
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]).toHaveTextContent("spike-one");
+    expect(attempts[0]).toHaveTextContent("anchor hydration failed");
+    expect(attempts[1]).toHaveTextContent("spike-two");
+
+    const gaps = screen.getAllByTestId("typed-evidence-gap");
+    expect(gaps).toHaveLength(2);
+    expect(gaps[0]).toHaveTextContent("ANCHOR_UNUSABLE");
+    expect(gaps[1]).toHaveTextContent("MISSING_CHECK");
+
+    expect(screen.getByTestId("typed-evidence-usable-finding")).toHaveTextContent(
+      "cgroup.procs is writable by the delegated subtree",
+    );
+
+    const card = screen.getByTestId("typed-evidence-finding");
+    expect(card).toHaveTextContent(
+      "malformed_findings: conclusion 2 has no anchor",
+    );
+    expect(card).toHaveTextContent("revision 4");
+
+    const disposition = screen.getByTestId("typed-evidence-disposition");
+    expect(disposition).toHaveTextContent("withdrawn");
+    expect(disposition).toHaveTextContent("partial");
+    expect(disposition).toHaveTextContent("judge-task-1");
+    expect(disposition).toHaveTextContent(
+      "The remaining uncertainty is not load-bearing.",
+    );
+
+    // The server's explanation is rendered verbatim, not paraphrased.
+    expect(
+      screen.getByTestId("typed-evidence-blocked-explanation"),
+    ).toHaveTextContent(
+      "Unresolved typed evidence finding finding-abc (lifecycle: failed; demanded against revision 2)",
+    );
+    expect(callMcpTool).not.toHaveBeenCalled();
+  });
+
+  it("renders identical blocking diagnostics as the proposal head advances to N+1 and N+2", () => {
+    // The finding was demanded against revision 2 and keeps blocking as the
+    // head moves. If the panel recomputed staleness against the trail's latest
+    // revision it would change what it renders here; it must not.
+    const typed = typedEvidence({
+      lifecycle: "failed",
+      evidence_outcome: "unresolved",
+      failure_detail: "malformed_findings",
+      demanded_revision_seq: 2,
+      attempts: [{ sequence: 1, spike_task_id: "spike-one" }],
+      gaps: ["failure ANCHOR_UNUSABLE: graph anchor could not be dereferenced"],
+    });
+    const explanations = [
+      "Unresolved typed evidence finding finding-abc (lifecycle: failed; demanded against revision 2)",
+    ];
+    const rendered: string[] = [];
+    for (const headRevision of [2, 3, 4]) {
+      const { unmount } = render(
+        <ReadinessPanel
+          gateStatus={gateStatus({
+            ready: false,
+            blocked_explanations: explanations,
+            typed_evidence: typed,
+          })}
+          refinement={refinement()}
+          debateTrail={[
+            debateRow({
+              id: `verdict-${headRevision}`,
+              kind: "verdict",
+              blocking: false,
+              against_revision_seq: headRevision,
+              round: headRevision,
+            }),
+          ]}
+        />,
+      );
+      rendered.push(screen.getByTestId("typed-evidence-finding").innerHTML);
+      unmount();
+    }
+    expect(rendered[0]).toBe(rendered[1]);
+    expect(rendered[1]).toBe(rendered[2]);
+    // And it still says revision 2 at head 4 — provenance, not a filter.
+    expect(rendered[2]).toContain("revision 2");
+    expect(callMcpTool).not.toHaveBeenCalled();
+  });
+
+  it("renders no typed section at all when the server published none", () => {
+    const { container } = render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          ready: false,
+          needs_evidence: {
+            claim: "Legacy claim",
+            spike_task_id: "legacy-task",
+            spike_short_id: "lg-1",
+            spike_status: "in_progress",
+          },
+        })}
+        refinement={refinement({
+          evidence_lifecycle_state: "awaiting_evidence",
+        })}
+      />,
+    );
+    expect(screen.queryByTestId("typed-evidence-finding")).toBeNull();
+    // The legacy rendering is exactly what it was: the awaiting-evidence note.
+    expect(screen.getByText("Awaiting evidence: lg-1")).toBeInTheDocument();
+    expect(container.innerHTML).not.toContain("Typed evidence finding");
+    expect(callMcpTool).not.toHaveBeenCalled();
+  });
+
+  it("suppresses the typed section when the projection carries no finding id", () => {
+    // A parity-mismatch projection reports a mode and a reason but no finding.
+    // There is nothing to render, and rendering an empty card would read as a
+    // finding that exists.
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          ready: false,
+          typed_evidence: {
+            mode: "enforce",
+            blocking: true,
+            parity_mismatch_reason: "typed_evidence_parity_mismatch",
+            attempts: [],
+            planned_checks: [],
+            gaps: [],
+            usable_findings: [],
+            retry_permitted: false,
+          } as unknown as TypedEvidenceGateStatus,
+        })}
+        refinement={refinement()}
+      />,
+    );
+    expect(screen.queryByTestId("typed-evidence-finding")).toBeNull();
+    expect(callMcpTool).not.toHaveBeenCalled();
   });
 });
