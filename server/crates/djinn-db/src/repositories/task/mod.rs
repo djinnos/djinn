@@ -45,7 +45,7 @@ pub use adjudication_close::{
 };
 pub use delivery::{
     DeliveryFinalizeInput, DeliveryMappedHeadRetryInput, DeliveryPrepareInput, DeliveryReworkInput,
-    DeliveryTransitionResult, TaskIntegrationResult,
+    DeliveryTransitionResult, TaskIntegrationResult, TaskIntegrationStaleness,
 };
 pub use parent_disposition::{
     ChildDisposition, DispositionCounts, DispositionFinding, DispositionPlan, DispositionScope,

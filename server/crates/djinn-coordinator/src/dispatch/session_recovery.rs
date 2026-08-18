@@ -3383,6 +3383,19 @@ where
             RecoveryReleaseAdmission::Release
         }
         Ok(crate::direct_delivery::DirectDeliveryLiveness::Reconcile) => match reconcile().await {
+            // A terminal outcome that did not advance the generation is not a
+            // reconciliation. `Unintegrable` means the ledger will never accept
+            // this generation, and `IntegrationDeferred` means its selected
+            // parent did not finalize inside the engine's bounded wait; both
+            // still refuse the release, but calling either "reconciled" would
+            // hide a stuck generation behind a success label.
+            Ok(
+                outcome @ (crate::direct_delivery::DeliveryOutcome::Unintegrable { .. }
+                | crate::direct_delivery::DeliveryOutcome::IntegrationDeferred { .. }),
+            ) => {
+                tracing::error!(task_id = %task_id, seam, ?outcome, "CoordinatorActor: applying direct delivery could not be advanced; refusing recovery-release");
+                RecoveryReleaseAdmission::Refuse(RecoveryReleaseRefusal::ReconcileFailed)
+            }
             Ok(outcome) => {
                 tracing::info!(task_id = %task_id, seam, ?outcome, "CoordinatorActor: reconciled applying direct delivery instead of recovery-release");
                 RecoveryReleaseAdmission::Refuse(RecoveryReleaseRefusal::Reconciled)

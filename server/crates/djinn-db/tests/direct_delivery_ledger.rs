@@ -8,7 +8,7 @@ use djinn_core::models::{
 use djinn_db::{
     ChildDisposition, Database, DeliveryFinalizeInput, DeliveryMappedHeadRetryInput,
     DeliveryPrepareInput, DeliveryReworkInput, DeliveryTransitionResult, DispositionScope,
-    TaskIntegrationResult, TaskRepository,
+    TaskIntegrationResult, TaskIntegrationStaleness, TaskRepository,
 };
 use std::sync::{Arc, Mutex};
 
@@ -843,4 +843,137 @@ async fn concurrent_mapped_head_generation_cas_has_exactly_one_winner() {
         .unwrap(),
         1
     );
+}
+
+/// i5fn: `Stale` is two different facts, and the ledger must say which.
+///
+/// A generation whose selected parent has not yet advanced the durable attempt
+/// head converges the moment that predecessor commits; a generation whose task
+/// is not `approved` never converges, because `task_integrated` closes only
+/// `WHERE status='approved'`. Reporting both as one undifferentiated `Stale`
+/// is what let `DirectDeliveryEngine::integrate` retry the second forever.
+#[tokio::test]
+async fn integration_staleness_separates_the_unfinalized_head_from_permanent_refusals() {
+    let (db, repo) = fixture().await;
+
+    // A permanently stale generation: prepared, applying, exactly addressed,
+    // and refused only because the task is not `approved`.
+    repo.prepare_delivery(&prepare(1, "source-1", "candidate-1"))
+        .await
+        .unwrap();
+    begin_applying(&repo, id(1)).await;
+    let not_approved =
+        TaskIntegrated::new(id(1), "candidate-1", "candidate-1", "candidate-1").unwrap();
+    assert!(
+        matches!(
+            repo.task_integrated(&not_approved).await.unwrap(),
+            TaskIntegrationResult::Stale {
+                staleness: TaskIntegrationStaleness::TaskNotApproved,
+                ..
+            }
+        ),
+        "a non-approved task must be reported as permanently stale"
+    );
+
+    // No ledger row at this identity at all.
+    let missing = TaskIntegrated::new(id(7), "candidate-1", "candidate-1", "candidate-1").unwrap();
+    assert!(matches!(
+        repo.task_integrated(&missing).await.unwrap(),
+        TaskIntegrationResult::Stale {
+            staleness: TaskIntegrationStaleness::MissingGeneration,
+            ..
+        }
+    ));
+
+    // Exactly addressed and approved, but a different candidate.
+    approve(&db, "task").await;
+    let mismatch = TaskIntegrated::new(id(1), "candidate-x", "candidate-x", "candidate-x").unwrap();
+    assert!(matches!(
+        repo.task_integrated(&mismatch).await.unwrap(),
+        TaskIntegrationResult::Stale {
+            staleness: TaskIntegrationStaleness::CandidateIdentityMismatch,
+            ..
+        }
+    ));
+
+    // A successor whose selected parent is `task`'s candidate: transient until
+    // that predecessor's own integration advances the durable attempt head.
+    seed_task(&db, "successor").await;
+    approve(&db, "successor").await;
+    repo.prepare_delivery(&DeliveryPrepareInput {
+        identity: id_for("successor", 1),
+        transition_id: "prepare-successor-1".into(),
+        source_sha: "source-successor".into(),
+        patch_digest: "patch-successor".into(),
+        selected_parent_sha: "candidate-1".into(),
+        candidate_sha: "candidate-2".into(),
+    })
+    .await
+    .unwrap();
+    begin_applying(&repo, id_for("successor", 1)).await;
+    let successor = TaskIntegrated::new(
+        id_for("successor", 1),
+        "candidate-2",
+        "candidate-2",
+        "candidate-2",
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            repo.task_integrated(&successor).await.unwrap(),
+            TaskIntegrationResult::Stale {
+                staleness: TaskIntegrationStaleness::UnfinalizedAttemptHead,
+                ..
+            }
+        ),
+        "a lagging durable head is the one condition a retry can clear"
+    );
+    assert!(TaskIntegrationStaleness::UnfinalizedAttemptHead.is_transient());
+
+    // The predecessor commits, and the identical retry now converges — the
+    // transient classification is a fact about convergence, not a label.
+    let predecessor =
+        TaskIntegrated::new(id(1), "candidate-1", "candidate-1", "candidate-1").unwrap();
+    assert!(matches!(
+        repo.task_integrated(&predecessor).await.unwrap(),
+        TaskIntegrationResult::Integrated(_)
+    ));
+    assert!(matches!(
+        repo.task_integrated(&successor).await.unwrap(),
+        TaskIntegrationResult::Integrated(_)
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT branch_head_sha FROM proposal_build_attempts WHERE id = 'attempt'"
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
+        "candidate-2"
+    );
+
+    // A conflicted generation is no longer `applying`, and never will be again.
+    let (db, repo) = fixture().await;
+    make_conflict(&repo).await;
+    approve(&db, "task").await;
+    let conflicted =
+        TaskIntegrated::new(id(1), "candidate-1", "candidate-1", "candidate-1").unwrap();
+    assert!(matches!(
+        repo.task_integrated(&conflicted).await.unwrap(),
+        TaskIntegrationResult::Stale {
+            staleness: TaskIntegrationStaleness::GenerationNotApplying,
+            ..
+        }
+    ));
+    for permanent in [
+        TaskIntegrationStaleness::TaskNotApproved,
+        TaskIntegrationStaleness::MissingGeneration,
+        TaskIntegrationStaleness::GenerationNotApplying,
+        TaskIntegrationStaleness::CandidateIdentityMismatch,
+    ] {
+        assert!(
+            !permanent.is_transient(),
+            "{permanent:?} must never be retried"
+        );
+    }
 }

@@ -8,29 +8,30 @@
 //! sites are independently reachable in production, so a regression in either
 //! must fail on its own.
 //!
-//! # Known defect this coverage had to work around
+//! # The hang this coverage originally had to work around (fixed in `i5fn`)
 //!
-//! `DirectDeliveryEngine::integrate` retries `LedgerResult::Stale` in an
-//! **unbounded** loop, sleeping 1ms between attempts, on the documented
-//! assumption that staleness only ever means "the selected parent's transaction
-//! has not finalized yet" — a transient condition.
+//! `DirectDeliveryEngine::integrate` used to retry `LedgerResult::Stale` in an
+//! **unbounded** loop, sleeping 1ms between attempts, on the assumption that
+//! staleness only ever means "the selected parent's transaction has not
+//! finalized yet" — a transient condition.
 //!
 //! `TaskRepository::task_integrated` also returns `Stale` for a *permanent*
 //! condition: `task.status != "approved"` (it closes `WHERE status='approved'`).
-//! The two are conflated, so driving the engine for a task in any other status
-//! never terminates.
+//! The two were conflated, so driving the engine for a task in any other status
+//! never terminated — reachable from exactly these seams, because the zombie
+//! and orphan loops select `in_progress`, `in_task_review`, and
+//! `in_lead_intervention`, none of which is `approved`.
 //!
-//! That is reachable from exactly these seams — the zombie and orphan loops
-//! select tasks in `in_progress`, `in_task_review`, and `in_lead_intervention`,
-//! none of which are `approved`. An `Applying` generation on such a task would
-//! hang the coordinator's recovery loop rather than reconcile it.
+//! `i5fn` split that into `TaskIntegrationStaleness`, so the ledger reports
+//! which decline can converge, and bounded the remaining transient wait.
+//! [`both_recovery_seams_terminate_on_a_permanently_stale_generation`] is the
+//! regression: it drives both seams with the `in_progress` fixture that used to
+//! hang them.
 //!
-//! Fixing it means teaching the ledger contract to distinguish transient from
-//! permanent staleness, which is a contract change beyond this slice's mandate.
-//! It is reported separately. The engine-driving tests below therefore use an
-//! `approved` fixture (the only status the contract integrates from), while the
-//! admission-only tests keep `in_progress` so a refusal that regressed into a
-//! release stays visible.
+//! The other engine-driving tests below still use an `approved` fixture,
+//! because that is the only status the contract integrates *from* and they are
+//! about what a successful integration does; the admission-only tests keep
+//! `in_progress` so a refusal that regressed into a release stays visible.
 
 use super::*;
 use async_trait::async_trait;
@@ -43,8 +44,8 @@ use djinn_core::models::TaskDeliveryIdentity;
 
 use crate::direct_delivery::{
     AttemptRef, BoundaryOperation, Candidate, CandidateBuild, CandidateBuilder, DeliveryOutcome,
-    DeliverySource, DirectDeliveryEngine, LEGACY_DELIVERY_LABEL, RemoteUpdate,
-    RepositoryDeliveryLedger, boundary_operations_scope,
+    DeliverySource, DirectDeliveryEngine, INTEGRATION_RECONCILE_BUDGET, LEGACY_DELIVERY_LABEL,
+    PermanentStaleness, RemoteUpdate, RepositoryDeliveryLedger, boundary_operations_scope,
 };
 
 /// Which production release seam a case is exercising. Both are driven by every
@@ -183,8 +184,8 @@ struct RecoveryFixture {
 ///   delivery contract integrates from: `TaskRepository::task_integrated`
 ///   closes `WHERE status='approved'` and reports anything else as `Stale`.
 ///
-/// See the module-level note on `DirectDeliveryEngine::integrate` for why that
-/// distinction currently matters so much.
+/// See the module-level note on `DirectDeliveryEngine::integrate` for the hang
+/// that distinction used to cause, and for the regression that pins it shut.
 async fn recovery_fixture_with_status(status: &str) -> RecoveryFixture {
     let db = Database::open_in_memory().unwrap();
     let source_updates = Arc::new(Mutex::new(0usize));
@@ -752,5 +753,105 @@ async fn both_recovery_seams_fail_closed_and_preserve_legacy_release_by_persiste
                 "{seam:?}/{case:?}: admission must never perform the seam's release"
             );
         }
+    }
+}
+
+// ─── i5fn: a permanently stale generation must terminate, not spin ─────────
+
+/// The production hang this module previously had to work around.
+///
+/// Both recovery loops select `in_progress`, `in_task_review`, and
+/// `in_lead_intervention` — never `approved` — so every `Applying` generation
+/// they hand the engine is permanently stale at
+/// `TaskRepository::task_integrated`, which closes only `WHERE
+/// status='approved'`. Before i5fn that condition was reported as the same
+/// undifferentiated `Stale` as an unfinalized parent head, and
+/// `DirectDeliveryEngine::integrate` retried it in an unbounded 1 ms loop, so
+/// the coordinator's recovery pass never returned.
+///
+/// Terminating is not enough to pass here. The engine must terminate *because
+/// it recognised the condition*, so this asserts the typed outcome and that the
+/// seam returned in a fraction of the transient budget — a fix that merely
+/// capped the retry would spend the whole budget and land on the wrong variant.
+#[tokio::test]
+async fn both_recovery_seams_terminate_on_a_permanently_stale_generation() {
+    for seam in RecoverySeam::ALL {
+        // `in_progress` is exactly what the zombie and orphan loops select.
+        let fixture = recovery_fixture().await;
+        fixture.seed(Some("applying")).await;
+
+        let remote = Arc::new(Mutex::new(("fixture-base".to_owned(), 0usize)));
+        let engine = fixture.engine(remote.clone());
+        let observed_outcome = Arc::new(Mutex::new(None));
+        let recorded = observed_outcome.clone();
+
+        let started = std::time::Instant::now();
+        let admission = tokio::time::timeout(
+            INTEGRATION_RECONCILE_BUDGET * 3,
+            seam.admit(fixture.db.clone(), &fixture.tasks, &fixture.task_id, || {
+                let engine = &engine;
+                let task_id = fixture.task_id.clone();
+                let recorded = recorded.clone();
+                async move {
+                    let outcome = crate::dispatch::wave_dispatch::run_direct_completion(|| {
+                        engine.deliver(DeliverySource {
+                            task_id,
+                            delivery_generation: 1,
+                            transition_id: "fixture-prepare".into(),
+                            source_sha: "fixture-source".into(),
+                            normalized_patch: "fixture-patch".into(),
+                        })
+                    })
+                    .await;
+                    if let Ok(outcome) = &outcome {
+                        *recorded.lock().unwrap() = Some(outcome.clone());
+                    }
+                    outcome
+                }
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!("{seam:?}: a permanently stale generation hung the recovery seam")
+        });
+        let elapsed = started.elapsed();
+
+        // The engine names the condition rather than discovering it by running
+        // out of patience.
+        assert_eq!(
+            observed_outcome.lock().unwrap().clone(),
+            Some(DeliveryOutcome::Unintegrable {
+                candidate_sha: "fixture-candidate".to_owned(),
+                reason: PermanentStaleness::TaskNotApproved,
+            }),
+            "{seam:?}: the engine must report why this generation can never integrate"
+        );
+        assert!(
+            elapsed < INTEGRATION_RECONCILE_BUDGET,
+            "{seam:?}: a permanent condition must not consume the transient wait budget (took {elapsed:?})"
+        );
+        assert_eq!(
+            format!("{admission:?}"),
+            "Refuse(ReconcileFailed)".to_owned(),
+            "{seam:?}: an unintegrable generation is not a reconciliation"
+        );
+
+        // The seam still refuses the release, and nothing guessed the task's
+        // next state on its behalf.
+        assert_eq!(
+            fixture.status().await,
+            "in_progress",
+            "{seam:?}: the recovery seam must not release a task it refused"
+        );
+        let generations = djinn_db::test_support::direct_delivery_generations_for_test(
+            &fixture.db,
+            &fixture.task_id,
+        )
+        .await;
+        assert_eq!(generations.len(), 1);
+        assert_eq!(
+            generations[0].state, "applying",
+            "{seam:?}: an unintegrable generation stays exactly as persisted"
+        );
     }
 }

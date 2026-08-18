@@ -106,11 +106,55 @@ pub enum DeliveryTransitionResult {
     Stale { current: Option<TaskDelivery> },
 }
 
+/// Why `task_integrated` declined to integrate a generation.
+///
+/// Staleness is not one condition. A generation whose selected parent has not
+/// yet finalized the durable attempt head **will** integrate once that
+/// transaction commits, so retrying is the correct response. A generation whose
+/// task is no longer `approved`, whose ledger row is gone, or whose candidate
+/// identity does not match can never integrate, however many times it is
+/// retried — `task_integrated` closes only `WHERE status='approved'` and
+/// applies only from `state='applying'`.
+///
+/// Collapsing the two into one undifferentiated `Stale` is what made
+/// `DirectDeliveryEngine::integrate` spin forever on a task the recovery loops
+/// routinely hand it: they select `in_progress`, `in_task_review`, and
+/// `in_lead_intervention`, never `approved`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskIntegrationStaleness {
+    /// Transient: the attempt's durable head is not yet this generation's
+    /// selected parent, because that predecessor's transaction is still in
+    /// flight. Retrying converges once it commits.
+    UnfinalizedAttemptHead,
+    /// Permanent: the task is not `approved`, so no integration can close it.
+    TaskNotApproved,
+    /// Permanent: no ledger row exists at this exact delivery identity.
+    MissingGeneration,
+    /// Permanent: the generation is no longer `applying` — it was superseded,
+    /// conflicted, or already finalized under a different identity.
+    GenerationNotApplying,
+    /// Permanent: the persisted candidate, the observed applied candidate, and
+    /// the merge commit do not agree on one immutable candidate SHA.
+    CandidateIdentityMismatch,
+}
+
+impl TaskIntegrationStaleness {
+    /// Whether retrying this exact integration can ever succeed.
+    ///
+    /// Deliberately expressed as a positive list of one: a new staleness
+    /// condition is permanent until someone proves it converges.
+    pub const fn is_transient(self) -> bool {
+        matches!(self, Self::UnfinalizedAttemptHead)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum TaskIntegrationResult {
     Integrated(Task),
     Replayed(Task),
     Stale {
+        staleness: TaskIntegrationStaleness,
         delivery: Option<TaskDelivery>,
         task_status: Option<String>,
     },
@@ -442,18 +486,30 @@ impl TaskRepository {
         let Some(delivery) = delivery else {
             tx.commit().await?;
             return Ok(TaskIntegrationResult::Stale {
+                staleness: TaskIntegrationStaleness::MissingGeneration,
                 delivery: None,
                 task_status: Some(task.status),
             });
         };
-        if task.status != "approved"
-            || delivery.state != TaskDeliveryState::Applying
-            || delivery.candidate_sha != input.candidate_sha
+        // Every branch below is decided under the attempt/task row locks taken
+        // above, so none of them can change while this transaction runs: they
+        // are permanent for this generation, not a race to retry.
+        let unintegrable = if task.status != "approved" {
+            Some(TaskIntegrationStaleness::TaskNotApproved)
+        } else if delivery.state != TaskDeliveryState::Applying {
+            Some(TaskIntegrationStaleness::GenerationNotApplying)
+        } else if delivery.candidate_sha != input.candidate_sha
             || input.candidate_sha != input.observed_applied_candidate_sha
             || input.candidate_sha != input.merge_commit_sha
         {
+            Some(TaskIntegrationStaleness::CandidateIdentityMismatch)
+        } else {
+            None
+        };
+        if let Some(staleness) = unintegrable {
             tx.commit().await?;
             return Ok(TaskIntegrationResult::Stale {
+                staleness,
                 delivery: Some(delivery),
                 task_status: Some(task.status),
             });
@@ -465,21 +521,31 @@ impl TaskRepository {
             .execute(&mut *tx)
             .await?;
         if head_update.rows_affected() != 1 {
+            // The only genuinely transient condition: this generation's
+            // selected parent has not yet committed its own head advance.
             return Ok(TaskIntegrationResult::Stale {
+                staleness: TaskIntegrationStaleness::UnfinalizedAttemptHead,
                 delivery: Some(delivery),
                 task_status: Some(task.status),
             });
         }
         let delivery_update = sqlx::query("UPDATE task_deliveries SET state='applied', applied_at=now(), finalization_transition_id=COALESCE(finalization_transition_id, 'task_integrated') WHERE build_attempt_id=$1 AND task_id=$2 AND delivery_generation=$3 AND state='applying'").bind(&input.identity.build_attempt_id).bind(&input.identity.task_id).bind(input.identity.delivery_generation).execute(&mut *tx).await?;
         if delivery_update.rows_affected() != 1 {
+            // Unreachable while the locks above are held — the row was read as
+            // `applying` in this same transaction — and permanent if it ever is
+            // reached, because a retry re-reads the same locked row.
             return Ok(TaskIntegrationResult::Stale {
+                staleness: TaskIntegrationStaleness::GenerationNotApplying,
                 delivery: Some(delivery),
                 task_status: Some(task.status),
             });
         }
         let close_update = sqlx::query("UPDATE tasks SET status='closed', merge_commit_sha=$1, close_reason='completed', closed_at=to_char(now() at time zone 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), updated_at=to_char(now() at time zone 'utc','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id=$2 AND status='approved'").bind(&input.merge_commit_sha).bind(&input.identity.task_id).execute(&mut *tx).await?;
         if close_update.rows_affected() != 1 {
+            // Same reasoning as the ledger update above: the task row was read
+            // as `approved` under its own lock in this transaction.
             return Ok(TaskIntegrationResult::Stale {
+                staleness: TaskIntegrationStaleness::TaskNotApproved,
                 delivery: Some(delivery),
                 task_status: Some(task.status),
             });
