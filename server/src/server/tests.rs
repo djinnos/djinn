@@ -22,6 +22,8 @@ mod router;
 mod startup_reconnectability;
 #[path = "tests/startup_refinement_outcome.rs"]
 mod startup_refinement_outcome;
+#[path = "tests/state_sampler_stage_a_binding.rs"]
+mod state_sampler_stage_a_binding;
 #[path = "tests/tool_schemas.rs"]
 mod tool_schemas;
 #[path = "tests/usage_analytics.rs"]
