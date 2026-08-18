@@ -9,10 +9,27 @@
     "insufficient_in_session_research",
     "expected_findings"
   ],
-  "typed_demand_required": ["load_bearing_category"],
-  "legacy_demand_response_fields": ["proposal_id", "accepted", "result", "error"],
-  "legacy_demand_result_fields": ["claim", "spike_task_id", "against_revision_seq", "round"],
-  "typed_demand_result_fields": ["finding_id", "attempt_id", "lifecycle", "replayed"],
+  "typed_demand_required": [
+    "load_bearing_category"
+  ],
+  "legacy_demand_response_fields": [
+    "proposal_id",
+    "accepted",
+    "result",
+    "error"
+  ],
+  "legacy_demand_result_fields": [
+    "claim",
+    "spike_task_id",
+    "against_revision_seq",
+    "round"
+  ],
+  "typed_demand_result_fields": [
+    "finding_id",
+    "attempt_id",
+    "lifecycle",
+    "replayed"
+  ],
   "typed_retry_response_fields": [
     "accepted",
     "finding_id",
@@ -36,6 +53,35 @@
     "error",
     "conflict_code"
   ],
+  "evidence_tool_input_properties": {
+    "proposal_refinement_demand_evidence": [
+      "against_revision_seq",
+      "expected_findings",
+      "insufficient_in_session_research",
+      "load_bearing_category",
+      "proposal_id",
+      "question",
+      "round",
+      "spec_unknown_anchor",
+      "target_subsystem"
+    ],
+    "proposal_refinement_retry_evidence": [
+      "failed_transition_id",
+      "finding_id"
+    ],
+    "proposal_refinement_resolve_evidence": [
+      "finding_id",
+      "folding_revision",
+      "rationale",
+      "validation_result_id"
+    ],
+    "proposal_refinement_withdraw_evidence": [
+      "finding_id",
+      "folding_revision",
+      "rationale",
+      "withdrawal_is_non_load_bearing"
+    ]
+  },
   "demand_example": {
     "proposal_id": "proposal-1",
     "round": 1,

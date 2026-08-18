@@ -7,6 +7,8 @@ use djinn_db::{
 };
 use sha2::{Digest, Sha256};
 
+mod scenario_ledger;
+
 fn canonical_json_bytes(value: &serde_json::Value) -> Vec<u8> {
     fn normalize(value: &serde_json::Value) -> serde_json::Value {
         match value {
@@ -74,9 +76,10 @@ async fn typed_evidence_retry_v1() {
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/typed_evidence_retry_v1.json")).unwrap();
     assert_eq!(fixture["version"], "typed_evidence_retry_v1");
-    // Ledger of the scenarios the fixture declares. Each is pushed at the exact
-    // assertion that proves it, and the two sets are compared at the end, so a
-    // renamed, added or dropped scenario in the fixture reddens this test.
+    // Ledger of the scenarios the fixture declares. Each is recorded *by* the
+    // assertion that proves it -- see `tests/scenario_ledger/mod.rs` -- and the two sets are
+    // compared at the end, so a renamed, added or dropped scenario in the
+    // fixture reddens this test, and so does deleting an assertion.
     let declared_scenarios: Vec<String> = fixture["scenarios"]
         .as_array()
         .expect("fixture declares the retry scenario set")
@@ -88,7 +91,7 @@ async fn typed_evidence_retry_v1() {
                 .to_owned()
         })
         .collect();
-    let mut proven_scenarios: Vec<&'static str> = Vec::new();
+    let mut proven = scenario_ledger::ProvenScenarios::new();
     let db = Database::open_in_memory().unwrap();
     db.ensure_initialized().await.unwrap();
     let project = uuid::Uuid::now_v7().to_string();
@@ -181,13 +184,11 @@ async fn typed_evidence_retry_v1() {
         actor_task_id: Some(old_task.clone()),
     };
     let mut tx = db.pool().begin().await.unwrap();
-    assert!(
-        TypedEvidenceRepository::allocate_retry_in_transaction(&mut tx, input())
-            .await
-            .is_err(),
-        "an attempt whose spike task is still open occupies the retry slot"
+    proven.refuses(
+        "occupied_slot",
+        TypedEvidenceRepository::allocate_retry_in_transaction(&mut tx, input()).await,
+        "an attempt whose spike task is still open occupies the retry slot",
     );
-    proven_scenarios.push("occupied_slot");
     sqlx::query("UPDATE tasks SET status='closed' WHERE id=$1")
         .bind(&old_task)
         .execute(&mut *tx)
@@ -202,34 +203,39 @@ async fn typed_evidence_retry_v1() {
     );
     let mut stale_input = input();
     stale_input.failed_transition_id = uuid::Uuid::now_v7().to_string();
-    assert!(
-        TypedEvidenceRepository::allocate_retry_in_transaction(&mut tx, stale_input)
-            .await
-            .is_err(),
-        "a retry keyed to a failed transition that is not the latest is refused"
+    let stale = TypedEvidenceRepository::allocate_retry_in_transaction(&mut tx, stale_input).await;
+    let attempts_after_stale = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM typed_evidence_attempts WHERE finding_id=$1",
+    )
+    .bind(&finding)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    proven.observes(
+        "stale_failure",
+        (stale.is_err(), attempts_after_stale),
+        (true, 1),
+        "a retry keyed to a failed transition that is not the latest is refused, and \
+         leaves no attempt row behind",
     );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM typed_evidence_attempts WHERE finding_id=$1"
-        )
-        .bind(&finding)
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap(),
-        1
-    );
-    proven_scenarios.push("stale_failure");
     let allocation = TypedEvidenceRepository::allocate_retry_in_transaction(&mut tx, input())
         .await
         .unwrap();
-    assert_eq!(allocation.sequence, 2);
-    assert_eq!(allocation.planned_checks.len(), 1);
-    proven_scenarios.push("failed_attempt_1_to_attempt_2");
+    proven.observes(
+        "failed_attempt_1_to_attempt_2",
+        (allocation.sequence, allocation.planned_checks.len()),
+        (2, 1),
+        "the failed attempt allocates attempt 2 carrying its one planned check",
+    );
     let duplicate = TypedEvidenceRepository::allocate_retry_in_transaction(&mut tx, input())
         .await
         .unwrap();
-    assert_eq!(duplicate.attempt_id, retry_attempt);
-    proven_scenarios.push("duplicate_retry");
+    proven.observes(
+        "duplicate_retry",
+        duplicate.attempt_id.clone(),
+        retry_attempt.clone(),
+        "a repeated allocation returns the same reserved attempt rather than a second one",
+    );
     tx.commit().await.unwrap();
     let repo = TypedEvidenceRepository::new(db.clone());
     let reserved = repo
@@ -257,25 +263,29 @@ async fn typed_evidence_retry_v1() {
         .unwrap(),
         4
     );
-    assert!(
-        repo.append_retry_dispatch_error(TypedEvidenceRetryDispatchErrorInput {
+    let stale_dispatch_error = repo
+        .append_retry_dispatch_error(TypedEvidenceRetryDispatchErrorInput {
             finding_id: finding.clone(),
             attempt_id: old_attempt.clone(),
             spike_task_id: old_task.clone(),
-            error: "old".into()
+            error: "old".into(),
         })
-        .await
-        .is_err()
+        .await;
+    let live_dispatch_error = repo
+        .append_retry_dispatch_error(TypedEvidenceRetryDispatchErrorInput {
+            finding_id: finding.clone(),
+            attempt_id: retry_attempt.clone(),
+            spike_task_id: retry_task.clone(),
+            error: "dispatch failed".into(),
+        })
+        .await;
+    proven.observes(
+        "dispatch_error_redrive_identity",
+        (stale_dispatch_error.is_err(), live_dispatch_error.is_ok()),
+        (true, true),
+        "a dispatch error records against the reserved retry attempt and is refused \
+         against the superseded one",
     );
-    repo.append_retry_dispatch_error(TypedEvidenceRetryDispatchErrorInput {
-        finding_id: finding.clone(),
-        attempt_id: retry_attempt.clone(),
-        spike_task_id: retry_task.clone(),
-        error: "dispatch failed".into(),
-    })
-    .await
-    .unwrap();
-    proven_scenarios.push("dispatch_error_redrive_identity");
     let mut tx = db.pool().begin().await.unwrap();
     assert!(
         TypedEvidenceRepository::dispatch_retry_success_in_transaction(
@@ -317,9 +327,13 @@ async fn typed_evidence_retry_v1() {
             .await
             .unwrap();
     let replay = repo.submit_return_v1(&old_payload_bytes).await.unwrap();
-    assert!(replay.replayed);
-    assert_eq!(replay.lifecycle.as_str(), "spike_active");
-    proven_scenarios.push("old_attempt_terminal_replay");
+    proven.observes(
+        "old_attempt_terminal_replay",
+        (replay.replayed, replay.lifecycle.as_str().to_owned()),
+        (true, "spike_active".to_owned()),
+        "resubmitting the old attempt's payload replays rather than re-validating, and \
+         leaves the finding on the live attempt's lifecycle",
+    );
     let mut malformed_old_payload = old_payload.clone();
     malformed_old_payload["version"] = serde_json::json!("malformed");
     assert!(
@@ -352,40 +366,25 @@ async fn typed_evidence_retry_v1() {
     );
 
     let payload = serde_json::json!({"version":"TribunalEvidenceReturnV1","finding_id":finding,"spike_task_id":retry_task,"attempt_id":retry_attempt,"conclusion":"done","checks":[{"check_id":"retry-check","method":"code","status":"passed","anchors":[]} ]});
-    assert_eq!(
+    proven.observes(
+        "eventual_evidence_received",
         repo.submit_return_v1(&serde_json::to_vec(&payload).unwrap())
             .await
             .unwrap()
             .lifecycle
-            .as_str(),
-        "evidence_received"
+            .as_str()
+            .to_owned(),
+        "evidence_received".to_owned(),
+        "the retry attempt's own return carries the finding to evidence_received",
     );
-    proven_scenarios.push("eventual_evidence_received");
-    assert_eq!(
+    proven.observes(
+        "immutable_history",
         failed_attempt_snapshot(&db, &finding, &old_attempt).await,
-        failed_snapshot
+        failed_snapshot.clone(),
+        "every row belonging to the failed attempt is unchanged after the retry succeeded",
     );
-    proven_scenarios.push("immutable_history");
 
-    let mut proven: Vec<String> = proven_scenarios
-        .iter()
-        .map(|scenario| (*scenario).to_owned())
-        .collect();
-    proven.sort();
-    proven.dedup();
-    let mut declared = declared_scenarios.clone();
-    declared.sort();
-    declared.dedup();
-    assert_eq!(
-        declared.len(),
-        declared_scenarios.len(),
-        "the fixture must not declare a scenario twice",
-    );
-    assert_eq!(
-        proven, declared,
-        "every scenario the fixture declares must be proven by this body, and every scenario \
-         proven here must be declared by the fixture",
-    );
+    scenario_ledger::assert_ledger_reconciles(proven.into_sorted(), &declared_scenarios);
 }
 
 #[tokio::test]

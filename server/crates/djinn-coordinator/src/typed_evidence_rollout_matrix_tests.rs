@@ -1080,7 +1080,8 @@ async fn typed_evidence_rollout_matrix() {
     let typed_origin = deployment(&db).await;
     let rollback = deployment(&db).await;
     let mut legacy_claim = Value::Null;
-    let mut executed: Vec<String> = Vec::new();
+    // What each phase's executor actually did, keyed by phase.
+    let mut executed_programs: Vec<(String, Vec<String>)> = Vec::new();
 
     for row in &fixture.phases {
         let mut log = Executed::default();
@@ -1128,11 +1129,31 @@ async fn typed_evidence_rollout_matrix() {
             "phase {} exercised different reader eras than it declares",
             row.phase
         );
-        executed.push(row.phase.clone());
+        executed_programs.push((row.phase.clone(), log.ops.clone()));
     }
 
-    assert_eq!(
-        executed, REQUIRED_PHASES,
-        "every deployment phase must have been executed, not merely declared"
-    );
+    // There was an `assert_eq!(executed, REQUIRED_PHASES)` here, commented as
+    // proving the phases were "executed, not merely declared". It proved
+    // nothing: `fixture.phases` is asserted equal to `REQUIRED_PHASES` above,
+    // the loop has no `break` or `continue`, and the push was unconditional, so
+    // the two sides were the same list by construction.
+    //
+    // What is NOT implied is that the six phases ran six DIFFERENT programs. A
+    // fixture row wired to the wrong executor, or two rows sharing one, is real
+    // drift — and it is exactly the shape of "declared but not executed" the old
+    // line claimed to catch. The per-phase `log.ops == row.program` assertion
+    // above pins each program to its declaration; this pins the declarations to
+    // each other.
+    let mut distinct: std::collections::BTreeSet<&Vec<String>> = std::collections::BTreeSet::new();
+    for (phase, ops) in &executed_programs {
+        assert!(
+            !ops.is_empty(),
+            "phase {phase} recorded no operations at all"
+        );
+        assert!(
+            distinct.insert(ops),
+            "phase {phase} executed the same program as an earlier phase, so one of              the two is not being exercised: {ops:?}"
+        );
+    }
+    assert_eq!(distinct.len(), REQUIRED_PHASES.len());
 }

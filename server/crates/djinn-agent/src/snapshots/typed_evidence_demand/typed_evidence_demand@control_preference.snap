@@ -4,7 +4,7 @@ expression: render(case)
 ---
 # Typed evidence
 
-Finding `01a01188-0000-7000-8000-0000000d0018` is `demanded`, demanded against revision 2.
+Finding `01a01188-0000-7000-8000-0000000d0001` is `demanded`, demanded against revision 2.
 Claim under demand: Should the retry budget be expressed in attempts or in seconds?
 
 ## Demand thresholds

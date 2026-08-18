@@ -1,9 +1,93 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 import type {
   ProposalRefinementStatusOutputSchema,
   ProposalShowOutputSchema,
 } from "@/api/generated/mcp-tools.gen";
 import type { NeedsEvidenceStatus, ProposalGateStatus } from "@/api/types";
+import { TYPED_EVIDENCE_LIFECYCLES } from "@/components/proposals/refinementEvidenceStatus";
+
+// ── Why this file reads its own generated source ───────────────────────────
+//
+// Everything that matters here is type-level, and adversarial verification of
+// proposal `667e` observed the consequence: all seven runtime `it()` bodies
+// compared a local literal to itself. `expect(states).toContain("evidence_failed")`
+// on an array the same test had just written proves nothing about the server,
+// the generated file, or the browser. Delete the one `files:` entry in
+// `tsconfig.json` and 289 lines went inert with zero test failures.
+//
+// So the runtime half now reads the generated artifact as TEXT and asserts the
+// unions it declares. That check survives losing the typecheck entirely: a
+// regeneration that drops `evidence_failed` fails these tests whether or not
+// anything ever runs `tsc`.
+
+// vitest's `root` is `ui/`, so repo-relative paths resolve from the cwd.
+// `import.meta.url` is not a `file:` URL under the jsdom environment.
+const UI_ROOT = process.cwd();
+const THIS_FILE = "src/api/generated/evidenceLifecycleTypes.test.ts";
+
+const GENERATED_SOURCE = readFileSync(
+  path.join(UI_ROOT, "src/api/generated/mcp-tools.gen.ts"),
+  "utf8",
+);
+
+/** Read one of the repo's JSONC tsconfigs. */
+function readTsconfig(name: string): {
+  files?: string[];
+  include?: string[];
+  exclude?: string[];
+} {
+  const text = readFileSync(path.join(UI_ROOT, name), "utf8");
+  return JSON.parse(text.replace(/^\s*\/\/.*$/gm, ""));
+}
+
+/**
+ * The members of every `export type <name> = ("a" | "b")` declaration in the
+ * generated file.
+ *
+ * The generator emits one copy per tool namespace. All copies must agree, or
+ * the browser's view of a union depends on which namespace it imported from.
+ */
+function generatedUnion(name: string): string[] {
+  const declarations = [
+    ...GENERATED_SOURCE.matchAll(
+      new RegExp(`export type ${name} =\\s*\\(([^)]*)\\)`, "g"),
+    ),
+  ].map((match) =>
+    [...match[1].matchAll(/"([^"]+)"/g)].map((member) => member[1]).sort(),
+  );
+  expect(
+    declarations.length,
+    `${name} must be declared in the generated file`,
+  ).toBeGreaterThan(0);
+  for (const declaration of declarations) {
+    expect(declaration, `every copy of ${name} must agree`).toEqual(
+      declarations[0],
+    );
+  }
+  return declarations[0];
+}
+
+/** The members of an inline field union such as `evidence_lifecycle_state:`. */
+function generatedFieldUnion(field: string): string[] {
+  const declarations = [
+    ...GENERATED_SOURCE.matchAll(new RegExp(`\\n  ${field}: \\(([^)]*)\\)`, "g")),
+  ].map((match) =>
+    [...match[1].matchAll(/"([^"]+)"/g)].map((member) => member[1]).sort(),
+  );
+  expect(
+    declarations.length,
+    `${field} must be declared in the generated file`,
+  ).toBeGreaterThan(0);
+  for (const declaration of declarations) {
+    expect(declaration, `every copy of ${field} must agree`).toEqual(
+      declarations[0],
+    );
+  }
+  return declarations[0];
+}
 
 // ── Evidence lifecycle generated-type regression (hoh3 / tlon) ─────────────
 //
@@ -19,8 +103,19 @@ type GenEvidenceLifecyclePhase =
   ProposalRefinementStatusOutputSchema.EvidenceLifecyclePhase;
 type GenStatusModel =
   ProposalRefinementStatusOutputSchema.ProposalRefinementStatusModel;
+// Still exercised, but through the generated SOURCE rather than through a
+// value this test writes and then reads back. See the header.
 type GenNeedsEvidenceStatus =
   ProposalRefinementStatusOutputSchema.NeedsEvidenceStatus;
+const _needsEvidenceStatusIsGenerated: GenNeedsEvidenceStatus = {
+  claim: "X is load-bearing",
+  spike_task_id: "uuid",
+  spike_short_id: "ab12",
+  spike_status: "open",
+  evidence_phase: "evidence_failed",
+  failure_reason: "spike_force_closed",
+};
+void _needsEvidenceStatusIsGenerated;
 
 describe("generated evidence lifecycle types", () => {
   // ── Type-level assertions ──────────────────────────────────────────────
@@ -71,44 +166,46 @@ describe("generated evidence lifecycle types", () => {
 
   // ── Runtime smoke checks ───────────────────────────────────────────────
 
-  it("EvidenceLifecyclePhase includes awaiting_evidence, evidence_received, evidence_failed", () => {
-    const phases: GenEvidenceLifecyclePhase[] = [
+  it("the generated EvidenceLifecyclePhase union is exactly the three phases", () => {
+    expect(generatedUnion("EvidenceLifecyclePhase")).toEqual([
       "awaiting_evidence",
-      "evidence_received",
       "evidence_failed",
-    ];
-    expect(phases).toContain("awaiting_evidence");
-    expect(phases).toContain("evidence_failed");
-    expect(phases).toContain("evidence_received");
+      "evidence_received",
+    ]);
   });
 
-  it("status model carries evidence_lifecycle_state with six discriminators", () => {
-    const states: GenStatusModel["evidence_lifecycle_state"][] = [
+  it("the generated evidence_lifecycle_state field is exactly the six discriminators", () => {
+    expect(generatedFieldUnion("evidence_lifecycle_state")).toEqual([
       "active",
       "awaiting_evidence",
-      "evidence_received",
       "evidence_failed",
+      "evidence_received",
       "paused_or_frozen",
       "terminal",
-    ];
-    expect(states).toHaveLength(6);
-    expect(states).toContain("awaiting_evidence");
-    expect(states).toContain("evidence_failed");
+    ]);
   });
 
-  it("NeedsEvidenceStatus generated surface includes claim, spike id, phase, and failure_reason", () => {
-    const ne: GenNeedsEvidenceStatus = {
-      claim: "X is load-bearing",
-      spike_task_id: "uuid",
-      spike_short_id: "ab12",
-      spike_status: "open",
-      evidence_phase: "evidence_failed",
-      failure_reason: "spike_force_closed",
-    };
-    expect(ne.claim).toBe("X is load-bearing");
-    expect(ne.spike_short_id).toBe("ab12");
-    expect(ne.evidence_phase).toBe("evidence_failed");
-    expect(ne.failure_reason).toBe("spike_force_closed");
+  it("the generated NeedsEvidenceStatus declares the legacy compatibility fields", () => {
+    // Read out of the generated source, so a regeneration that drops a field
+    // fails here even with no typecheck in the pipeline at all.
+    const declaration = /export interface NeedsEvidenceStatus \{([\s\S]*?)\n {2}\}/.exec(
+      GENERATED_SOURCE,
+    );
+    expect(declaration, "NeedsEvidenceStatus must exist in the generated file")
+      .not.toBeNull();
+    const fields = [
+      ...declaration![1].matchAll(/^ {2}([a-z_]+)\??:/gm),
+    ].map((match) => match[1]);
+    for (const field of [
+      "claim",
+      "evidence_phase",
+      "failure_reason",
+      "spike_short_id",
+      "spike_status",
+      "spike_task_id",
+    ]) {
+      expect(fields, `generated NeedsEvidenceStatus.${field}`).toContain(field);
+    }
   });
 });
 
@@ -193,49 +290,52 @@ describe("typed evidence lifecycle generated types", () => {
   };
   void _legacyFields;
 
-  it("typed lifecycle union carries all six durable states", () => {
-    // Each literal is checked against the generated union by annotation, so a
-    // renamed or removed state fails the typecheck rather than this assertion.
-    const states: GenTypedLifecycle[] = [
-      "demanded",
-      "spike_active",
-      "evidence_received",
-      "failed",
+  it("the browser's pinned lifecycle list is exactly the generated union", () => {
+    // The left side is the runtime constant the classifier is driven over; the
+    // right side is read out of the generated file. Neither is written in this
+    // test, so a state added to one and not the other reddens here.
+    expect([...TYPED_EVIDENCE_LIFECYCLES].sort()).toEqual(
+      generatedUnion("TypedEvidenceLifecycleModel"),
+    );
+    expect(TYPED_EVIDENCE_LIFECYCLES).toHaveLength(6);
+  });
+
+  it("the generated typed outcome union is exactly the three outcomes", () => {
+    expect(generatedUnion("TypedEvidenceOutcomeModel")).toEqual([
+      "partial",
       "resolved",
-      "withdrawn",
-    ];
-    expect(new Set(states).size).toBe(6);
-    for (const state of [
-      "demanded",
-      "spike_active",
-      "evidence_received",
-      "failed",
-      "resolved",
-      "withdrawn",
-    ]) {
-      expect(states).toContain(state);
-    }
+      "unresolved",
+    ]);
   });
 
   it("typed lifecycle is wider than the legacy three-phase vocabulary", () => {
-    // `resolved` and `withdrawn` are terminal states the legacy phase enum has
-    // no representation for. Conflating the two vocabularies is the drift this
-    // guard exists to catch.
-    const legacy: GenEvidenceLifecyclePhase[] = [
-      "awaiting_evidence",
+    // `resolved`, `withdrawn`, `demanded`, `spike_active` and `failed` are
+    // states the legacy phase enum has no representation for. Conflating the
+    // two vocabularies is the drift this guard exists to catch — and both
+    // sides now come out of the generated file rather than out of this test.
+    const legacy = generatedUnion("EvidenceLifecyclePhase");
+    const typed = generatedUnion("TypedEvidenceLifecycleModel");
+    expect(typed.filter((state) => legacy.includes(state))).toEqual([
       "evidence_received",
-      "evidence_failed",
-    ];
-    const typedOnly: GenTypedLifecycle[] = [
-      "demanded",
-      "spike_active",
-      "failed",
-      "resolved",
-      "withdrawn",
-    ];
-    for (const state of typedOnly) {
-      expect(legacy as string[]).not.toContain(state);
-    }
+    ]);
+  });
+
+  it("is compiled by a tsconfig CI runs, because its real assertions are compile-time", () => {
+    // The type-level guards above produce no runtime failure of any kind. If
+    // nothing in CI compiles this file they are decoration, which is exactly
+    // what `pnpm tsc --noEmit` excluding every `*.test.ts` used to mean.
+    const root = readTsconfig("tsconfig.json");
+    const gate = readTsconfig("tsconfig.test-gate.json");
+    const inRootFiles = (root.files ?? []).includes(THIS_FILE);
+    const inGate =
+      (gate.include ?? []).some((pattern) =>
+        THIS_FILE.startsWith(`${pattern}/`),
+      ) && !(gate.exclude ?? []).includes(THIS_FILE);
+    expect(
+      inRootFiles || inGate,
+      "this file must stay in tsconfig.json's `files` (gated by `pnpm tsc --noEmit`) " +
+        "or inside tsconfig.test-gate.json (gated by `pnpm test:typecheck:gate`)",
+    ).toBe(true);
   });
 
   it("gate status carries the typed section with lifecycle, outcome and action authority", () => {

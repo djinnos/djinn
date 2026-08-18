@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, userEvent, waitFor } from "@/test/test-utils";
 import type {
@@ -34,15 +35,140 @@ vi.mock("@/lib/toast", () => ({
  * "issues zero calls with typed presentation hidden" proves the sweep really
  * does fire the mutation when the control is present.
  */
-async function clickEveryRenderedControl(): Promise<number> {
-  const controls = Array.from(
-    document.body.querySelectorAll<HTMLButtonElement>("button:not([disabled])"),
+const CONTROL_SELECTOR = [
+  "button",
+  '[role="button"]',
+  "a[href]",
+  '[role="link"]',
+  '[role="menuitem"]',
+  '[role="switch"]',
+  '[role="tab"]',
+  'input[type="button"]',
+  'input[type="submit"]',
+  "summary",
+].join(",");
+
+/** Whether a control would accept a real user's click. */
+function isInteractable(element: Element): boolean {
+  return (
+    !element.hasAttribute("disabled") &&
+    element.getAttribute("aria-disabled") !== "true"
   );
-  for (const control of controls) {
-    await userEvent.click(control);
-  }
-  return controls.length;
 }
+
+async function clickEveryRenderedControl(): Promise<number> {
+  const clicked = new Set<Element>();
+  // Re-query between rounds rather than snapshotting once. A two-step control
+  // — click, confirm dialog, confirm — only renders its second button after
+  // the first is pressed, so a list taken before the first click could never
+  // reach the button that actually issues the mutation. The bound stops a
+  // control that re-renders itself forever.
+  for (let round = 0; round < 6; round += 1) {
+    const pending = Array.from(
+      document.body.querySelectorAll(CONTROL_SELECTOR),
+    ).filter((element) => !clicked.has(element) && isInteractable(element));
+    if (pending.length === 0) break;
+    for (const control of pending) {
+      clicked.add(control);
+      // A click earlier in this round may have unmounted it.
+      if (!control.isConnected) continue;
+      await userEvent.click(control);
+    }
+  }
+  return clicked.size;
+}
+
+/**
+ * The accessible names of every control rendered inside the typed-evidence
+ * finding, sorted.
+ *
+ * This is what replaced `FORBIDDEN_ACTION_LABELS`, a blocklist of six labels
+ * ("Resolve evidence", "Withdraw demand", …) that no component in `ui/src` has
+ * ever rendered. A blocklist can only catch a name someone thought to write
+ * down in advance; asserting the whole set catches any control at all,
+ * whatever it is called and whichever element it is rendered as.
+ */
+function typedEvidenceControlNames(): string[] {
+  const finding = screen.queryByTestId("typed-evidence-finding");
+  if (finding === null) return [];
+  return Array.from(finding.querySelectorAll(CONTROL_SELECTOR))
+    .filter(isInteractable)
+    .map(
+      (element) =>
+        (element.textContent ?? "").trim() ||
+        element.getAttribute("aria-label") ||
+        "<control with no accessible name>",
+    )
+    .sort();
+}
+
+// The sweep's own tests.
+//
+// `clickEveryRenderedControl` is what makes every
+// `expect(callMcpTool).not.toHaveBeenCalled()` below falsifiable, so it needs
+// tests of its own: a sweep that quietly stops reaching controls turns a whole
+// file of zero-call assertions into decoration without a single test going red.
+//
+// Both cases here are defects adversarial verification found in the first
+// version: it matched only `button:not([disabled])`, and it snapshotted the
+// control list once, before the first click.
+
+describe("clickEveryRenderedControl", () => {
+  it("reaches a role=button div and an anchor, not only <button>", async () => {
+    const fired: string[] = [];
+    render(
+      <div>
+        <button onClick={() => fired.push("button")}>Real button</button>
+        <div role="button" tabIndex={0} onClick={() => fired.push("role")}>
+          Div with a button role
+        </div>
+        <a href="#somewhere" onClick={() => fired.push("anchor")}>
+          Anchor
+        </a>
+        <button disabled onClick={() => fired.push("disabled")}>
+          Disabled
+        </button>
+        <div
+          aria-disabled="true"
+          role="button"
+          onClick={() => fired.push("aria")}
+        >
+          Aria-disabled
+        </div>
+      </div>,
+    );
+
+    const clicked = await clickEveryRenderedControl();
+
+    expect(fired.sort()).toEqual(["anchor", "button", "role"]);
+    expect(clicked).toBe(3);
+  });
+
+  it("reaches the second step of a two-step control", async () => {
+    // The control that matters is the one that only exists AFTER the first
+    // click. A sweep that takes its list up front can never press it, so a
+    // destructive two-step affordance would pass every zero-call assertion in
+    // this file.
+    const fired: string[] = [];
+    function TwoStep() {
+      const [open, setOpen] = useState(false);
+      return (
+        <div>
+          <button onClick={() => setOpen(true)}>Open</button>
+          {open && (
+            <button onClick={() => fired.push("confirmed")}>Confirm</button>
+          )}
+        </div>
+      );
+    }
+    render(<TwoStep />);
+
+    const clicked = await clickEveryRenderedControl();
+
+    expect(fired).toEqual(["confirmed"]);
+    expect(clicked).toBe(2);
+  });
+});
 
 function gateStatus(
   overrides: Partial<ProposalGateStatus> = {},
@@ -806,6 +932,14 @@ function typedEvidence(
     gaps: [],
     usable_findings: [],
     retry_permitted: false,
+    // A finding that already has a failed attempt behind it is the ordinary
+    // case, and it is the one that makes the zero-call assertions in this file
+    // mean something: with a failed transition present, `retry_permitted` is
+    // the ONLY thing standing between each panel and a rendered, clickable
+    // mutation. Default it to absent and most of these panels are two guards
+    // away from a control, so the sweep finds nothing to click no matter what
+    // the component does.
+    failed_transition_id: "transition-9",
     ...overrides,
   } as TypedEvidenceGateStatus;
 }
@@ -888,6 +1022,9 @@ describe("ReadinessPanel typed evidence finding", () => {
     expect(screen.getByTestId("typed-evidence-finding")).toHaveTextContent(
       "no validated return yet",
     );
+    // This fourth panel used to be asserted about without ever being swept, so
+    // the zero-call assertion below held trivially for it.
+    await clickEveryRenderedControl();
     expect(callMcpTool).not.toHaveBeenCalled();
   });
 
@@ -1143,15 +1280,6 @@ describe("ReadinessPanel typed evidence finding", () => {
 // argument would be a button that always fails.
 
 const RETRY_LABEL = "Retry evidence";
-/** Labels no typed render path may ever produce. */
-const FORBIDDEN_ACTION_LABELS = [
-  /^Resolve evidence$/i,
-  /^Resolve finding$/i,
-  /^Withdraw$/i,
-  /^Withdraw evidence$/i,
-  /^Withdraw demand$/i,
-  /^Dispose$/i,
-];
 
 describe("ReadinessPanel typed evidence retry action", () => {
   beforeEach(() => {
@@ -1179,10 +1307,7 @@ describe("ReadinessPanel typed evidence retry action", () => {
         />,
       );
       expect(screen.getByTestId("typed-evidence-finding")).toBeInTheDocument();
-      expect(
-        screen.queryByRole("button", { name: RETRY_LABEL }),
-        lifecycle,
-      ).toBeNull();
+      expect(typedEvidenceControlNames(), lifecycle).toEqual([]);
       await clickEveryRenderedControl();
       unmount();
     }
@@ -1205,7 +1330,7 @@ describe("ReadinessPanel typed evidence retry action", () => {
       />,
     );
     expect(screen.getByTestId("typed-evidence-finding")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: RETRY_LABEL })).toBeNull();
+    expect(typedEvidenceControlNames()).toEqual([]);
     await clickEveryRenderedControl();
     expect(callMcpTool).not.toHaveBeenCalled();
   });
@@ -1219,12 +1344,13 @@ describe("ReadinessPanel typed evidence retry action", () => {
           typed_evidence: typedEvidence({
             lifecycle: "failed",
             retry_permitted: true,
+            failed_transition_id: undefined,
           }),
         })}
         refinement={refinement()}
       />,
     );
-    expect(screen.queryByRole("button", { name: RETRY_LABEL })).toBeNull();
+    expect(typedEvidenceControlNames()).toEqual([]);
     await clickEveryRenderedControl();
     expect(callMcpTool).not.toHaveBeenCalled();
   });
@@ -1292,13 +1418,17 @@ describe("ReadinessPanel typed evidence retry action", () => {
     expect(onChanged).not.toHaveBeenCalled();
   });
 
-  it("renders no resolve or withdraw control anywhere in the matrix", async () => {
-    // Every cell of the matrix is swept with real clicks, so the tool names
-    // collected below are the complete set of mutations the typed section can
-    // issue. The authorized retry is the only permitted one; a resolve or
-    // withdraw control would surface here as an extra tool name even if its
-    // button carried a label `FORBIDDEN_ACTION_LABELS` does not match.
-    const expectedRetryCells: string[] = [];
+  it("renders no control but the authorized retry anywhere in the matrix", async () => {
+    // Every cell of the matrix is asserted twice over: its rendered control set
+    // must be exactly what that cell is entitled to, and every cell is then
+    // swept with real clicks so the tool names collected at the end are the
+    // complete set of mutations the typed section can issue.
+    //
+    // Both assertions used to be weaker. The control check was a blocklist of
+    // six labels no component has ever rendered, and beside it
+    // `expect(expectedRetryCells).toEqual(["failed/true/true"])` restated the
+    // test's own `if` over its own loop variables — it never touched the DOM
+    // and survived every mutation an adversarial round threw at it.
     for (const lifecycle of TYPED_LIFECYCLES) {
       for (const permitted of [false, true]) {
         for (const hasTransition of [false, true]) {
@@ -1310,9 +1440,9 @@ describe("ReadinessPanel typed evidence retry action", () => {
                 typed_evidence: typedEvidence({
                   lifecycle,
                   retry_permitted: permitted,
-                  ...(hasTransition
-                    ? { failed_transition_id: "transition-1" }
-                    : {}),
+                  failed_transition_id: hasTransition
+                    ? "transition-1"
+                    : undefined,
                   judge_disposition: {
                     disposition: "resolved",
                     outcome: "resolved",
@@ -1326,20 +1456,19 @@ describe("ReadinessPanel typed evidence retry action", () => {
             />,
           );
           const label = `${lifecycle}/${permitted}/${hasTransition}`;
-          for (const forbidden of FORBIDDEN_ACTION_LABELS) {
-            expect(
-              screen.queryByRole("button", { name: forbidden }),
-              `${label} ${forbidden}`,
-            ).toBeNull();
-          }
+          // Read out of the DOM, not out of the loop variables: exactly one
+          // cell may render exactly one control, and every other cell must
+          // render none at all.
+          expect(typedEvidenceControlNames(), label).toEqual(
+            lifecycle === "failed" && permitted && hasTransition
+              ? [RETRY_LABEL]
+              : [],
+          );
           // The Judge disposition is rendered as a recorded server fact, and
           // it still comes with no control to change it.
           expect(
             screen.getByTestId("typed-evidence-disposition"),
           ).toHaveTextContent("Folded into revision 5.");
-          if (lifecycle === "failed" && permitted && hasTransition) {
-            expectedRetryCells.push(label);
-          }
           await clickEveryRenderedControl();
           unmount();
         }
@@ -1348,7 +1477,6 @@ describe("ReadinessPanel typed evidence retry action", () => {
     // One cell — failed + permitted + a named failed transition — legitimately
     // renders the retry control, and the sweep fires it. Every other cell must
     // contribute nothing at all.
-    expect(expectedRetryCells).toEqual(["failed/true/true"]);
     expect(
       vi.mocked(callMcpTool).mock.calls.map(([tool]) => tool),
     ).toEqual(["proposal_refinement_retry_evidence"]);

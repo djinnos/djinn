@@ -8,6 +8,16 @@
 //! The rollout stage is pinned per-`McpState` rather than read from the
 //! process environment, so three modes can be exercised in one test binary
 //! without one test's stage leaking into another's.
+//!
+//! ## Why every test here is named `typed_evidence_gate_matrix_*`
+//!
+//! Proposal `667e` AC5's command is
+//! `cargo test -p djinn-control-plane typed_evidence_gate_matrix`. These seven
+//! tests used to match none of the eleven AC filters — including the sole
+//! consumer of `fixtures/typed_evidence_gate_off_baseline.json`, the `Off`-mode
+//! rollback proof the phase-5 rollback boundary rests on. A test outside every
+//! AC command is not part of the contract, whatever its file claims. The prefix
+//! puts them inside it. Keep it on anything added here.
 
 use djinn_control_plane::server::DjinnMcpServer;
 use djinn_control_plane::state::stubs::test_mcp_state;
@@ -386,7 +396,8 @@ impl Fixture {
 /// AC1 — every one of the five transitions refuses under `Enforce`, and each
 /// refusal names all four typed diagnostics.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn enforce_blocks_all_five_transitions_with_the_four_typed_diagnostics() {
+async fn typed_evidence_gate_matrix_enforce_blocks_all_five_transitions_with_the_four_typed_diagnostics()
+ {
     let mut fixture = Fixture::blocked().await;
     fixture.resolve_finding_id().await;
     let finding_id = fixture.typed_finding_id();
@@ -422,7 +433,7 @@ async fn enforce_blocks_all_five_transitions_with_the_four_typed_diagnostics() {
 /// AC1 control — the same five transitions are admitted once the typed finding
 /// is gone, so the refusals above are the gate's and not a precondition's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn enforce_admits_every_transition_when_no_typed_finding_exists() {
+async fn typed_evidence_gate_matrix_enforce_admits_every_transition_when_no_typed_finding_exists() {
     let fixture = Fixture::unblocked().await;
     let server = fixture.server(TypedEvidenceGateMode::Enforce);
     for transition in TRANSITIONS {
@@ -444,7 +455,7 @@ async fn enforce_admits_every_transition_when_no_typed_finding_exists() {
 /// is never regenerated: if `Off` ever starts adding, dropping, or reordering a
 /// failure, this goes red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn off_mode_is_byte_identical_to_the_pre_change_gate() {
+async fn typed_evidence_gate_matrix_off_mode_is_byte_identical_to_the_pre_change_gate() {
     let baseline: Value = serde_json::from_str(include_str!(
         "fixtures/typed_evidence_gate_off_baseline.json"
     ))
@@ -508,7 +519,7 @@ async fn off_mode_is_byte_identical_to_the_pre_change_gate() {
 /// AC3 — a typed/legacy parity mismatch fails every transition closed, in all
 /// three modes, with the same reason code.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn parity_mismatch_fails_closed_in_every_mode() {
+async fn typed_evidence_gate_matrix_parity_mismatch_fails_closed_in_every_mode() {
     for mode in [
         TypedEvidenceGateMode::Off,
         TypedEvidenceGateMode::Shadow,
@@ -543,7 +554,8 @@ async fn parity_mismatch_fails_closed_in_every_mode() {
 /// AC4 — `proposal_show` carries the typed section for a blocked proposal,
 /// omits it when there is no finding, and leaves the legacy fields alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn proposal_show_reports_the_typed_section_without_disturbing_legacy_fields() {
+async fn typed_evidence_gate_matrix_proposal_show_reports_the_typed_section_without_disturbing_legacy_fields()
+ {
     let mut fixture = Fixture::blocked().await;
     fixture.resolve_finding_id().await;
     let finding_id = fixture.typed_finding_id();
@@ -614,7 +626,7 @@ async fn proposal_show_reports_the_typed_section_without_disturbing_legacy_field
 /// AC4 companion — the legacy `needs_evidence` fields still populate from the
 /// legacy columns, unchanged by the typed section.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_needs_evidence_fields_are_unchanged() {
+async fn typed_evidence_gate_matrix_legacy_needs_evidence_fields_are_unchanged() {
     let fixture = Fixture::unblocked().await;
     fixture.raise_typed_demand().await;
     let status = fixture
@@ -647,7 +659,7 @@ async fn legacy_needs_evidence_fields_are_unchanged() {
 /// The rollout stage is carried by the state, so two servers over the same
 /// database disagree about blocking without touching the process environment.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_rollout_stage_is_per_state_not_per_process() {
+async fn typed_evidence_gate_matrix_the_rollout_stage_is_per_state_not_per_process() {
     let fixture = Fixture::blocked().await;
     assert!(
         fixture

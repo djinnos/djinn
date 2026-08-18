@@ -120,9 +120,18 @@ mod tests {
         },
     ];
 
+    /// One finding id for every case.
+    ///
+    /// It used to be derived from `case.name.len()`, which made two cases with
+    /// byte-identical guidance still render differently — and so made the
+    /// "every case renders a distinct document" assertion pass on an incidental
+    /// synthetic id rather than on the guidance. The id is not part of the
+    /// contract these snapshots pin; the guidance is.
+    const FIXTURE_FINDING_ID: &str = "01a01188-0000-7000-8000-0000000d0001";
+
     fn context(case: &DemandCase) -> TypedEvidenceRoleContextV1 {
         let mut record = TypedEvidenceRoleContextV1::new(
-            format!("01a01188-0000-7000-8000-0000000d{:04}", case.name.len()),
+            FIXTURE_FINDING_ID.to_owned(),
             TypedEvidenceContextLifecycle::Demanded,
             case.claim,
             2,
@@ -147,18 +156,37 @@ mod tests {
     }
 
     /// AC1 — one committed snapshot per case: four load-bearing, two controls.
+    ///
+    /// The case count is checked against the **committed snapshot files**, not
+    /// against `CASES.len()`. `CASES` is a `[DemandCase; 6]`, so its length is a
+    /// type-level constant the compiler folds — `assert_eq!(CASES.len(), 6)`
+    /// could never fail, and neither could counting `load_bearing` over literals
+    /// in the same array. What can fail, and what actually matters, is drift
+    /// between the cases and the snapshots on disk: `insta` fails a case whose
+    /// snapshot is missing, but an ORPHANED snapshot left behind by a deleted
+    /// case is invisible to it.
     #[test]
     fn typed_evidence_demand_guidance_snapshots() {
+        let snapshot_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/snapshots/typed_evidence_demand");
+        let mut committed: Vec<String> = std::fs::read_dir(&snapshot_dir)
+            .unwrap_or_else(|err| panic!("read {}: {err}", snapshot_dir.display()))
+            .map(|entry| entry.expect("dir entry").file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".snap"))
+            .collect();
+        committed.sort();
+        let mut expected: Vec<String> = CASES
+            .iter()
+            .map(|case| format!("typed_evidence_demand@{}.snap", case.name))
+            .collect();
+        expected.sort();
         assert_eq!(
-            CASES.len(),
-            6,
-            "four load-bearing categories and two controls"
+            committed, expected,
+            "every case must have exactly one committed snapshot and no snapshot \
+             may outlive its case; delete an orphan rather than leaving it here"
         );
-        assert_eq!(
-            CASES.iter().filter(|case| case.load_bearing).count(),
-            4,
-            "exactly four load-bearing categories"
-        );
+
         for case in &CASES {
             insta::with_settings!({
                 snapshot_path => "snapshots/typed_evidence_demand",
@@ -222,19 +250,21 @@ mod tests {
                 );
             }
         }
-        // The four load-bearing categories are distinct, so no snapshot is a
-        // copy of another.
-        let categories: std::collections::BTreeSet<&str> = CASES
-            .iter()
-            .filter(|case| case.load_bearing)
-            .map(|case| case.category)
-            .collect();
+        // No snapshot is a copy of another.
+        //
+        // This used to compare a `BTreeSet` of `case.category` against the same
+        // four string literals written 180 lines away in this file — two
+        // literals compared to each other, which cannot fail. The property that
+        // was meant is about the *rendered guidance*: six cases must produce six
+        // different documents. Pointing two cases at one threshold, or dropping
+        // the category from the template so every render reads alike, reddens
+        // here.
+        let rendered: std::collections::BTreeSet<String> = CASES.iter().map(render).collect();
         assert_eq!(
-            categories,
-            ["compatibility", "feasibility", "rollout", "safety"]
-                .into_iter()
-                .collect(),
-            "the four named load-bearing categories must each be covered once"
+            rendered.len(),
+            CASES.len(),
+            "every demand case must render a distinct document; two identical \
+             renders mean a case is a copy of another and its snapshot proves nothing"
         );
     }
 

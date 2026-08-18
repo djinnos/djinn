@@ -1,5 +1,5 @@
 {
-  "description": "Typed-evidence action matrix. Every row is lifecycle x evidence outcome x server-projected retry capability x whether the server named a failed transition. The lifecycle axis is the complete pinned vocabulary from refinementEvidenceStatus.ts; a row carrying any other value makes classifyTypedEvidence throw rather than fall through to a default.",
+  "//": "Typed-evidence action matrix. Every row is lifecycle x evidence outcome x server-projected retry capability x whether the server named a failed transition. The lifecycle axis is the complete pinned vocabulary from refinementEvidenceStatus.ts; a row carrying any other value makes classifyTypedEvidence throw rather than fall through to a default.",
   "lifecycles": [
     "demanded",
     "spike_active",
