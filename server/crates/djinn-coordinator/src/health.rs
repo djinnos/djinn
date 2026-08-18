@@ -51,15 +51,17 @@ const ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS: i64 = 5 * 60;
 // `provider_actions_drained_at` stamp; see `CiIncarnationLiveness`.
 
 /// Startup-only AGE gate for the orphaned-pending-attempt reaper, decoupled from
-/// the owner-lease liveness threshold above. At cold start any pre-boot `pending`
-/// attempt with no live (`starting`/`running`) `task_run` and no `running`
-/// session is definitionally orphaned: single-leader (advisory lock) means the
-/// previous incarnation is gone, startup task-run reaping
-/// ([`STARTUP_TASK_RUN_THRESHOLD_SECS`], which runs BEFORE this at boot) has
-/// already terminalized its runs, and nothing can ever advance the attempt.
-/// Mirrors the 10s task-run startup convention so a deploy that stranded a
-/// seconds-old dispatch self-heals at boot instead of surviving the 5-minute
-/// periodic age gate and wedging the respawn guard for ~15 min.
+/// the owner-lease liveness threshold above. It selects *candidates* only, and
+/// on the configured path it authorizes nothing: the immutable pre-mutation
+/// census decides whether a candidate may be classified at all
+/// (see [`startup_attempt_classification_authorized`]). Single-leader (advisory
+/// lock) means the previous incarnation is gone, so a pre-boot `pending` attempt
+/// cannot be advanced by a live dispatcher; what it *can* still have is a live
+/// worker Job, and only the census can see that.
+///
+/// A tight 10s window mirrors the task-run startup convention so a deploy that
+/// stranded a seconds-old dispatch self-heals at boot instead of surviving the
+/// 5-minute periodic age gate and wedging the respawn guard for ~15 min.
 ///
 /// CRITICAL: only the AGE gate tightens. The owner-lease liveness check keeps
 /// [`ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS`] — a just-dead owner that renewed
@@ -3121,14 +3123,23 @@ fn startup_task_run_mutation_authorized(run: &crate::startup_census::CensusTaskR
 }
 
 /// Stage C may classify an attempt only when the immutable reduction proves
-/// every relevant pre-mutation task run was destructively gone. A missing
-/// projection is unknown, including a configured but unavailable census.
+/// the task cannot have anything executing behind it: either every relevant
+/// pre-mutation task run was destructively gone, or the task owns no
+/// non-terminal run at all (`NotApplicable`) — the classic orphan shape the
+/// pre-census reaper was written for. Admission is not a verdict; the
+/// unchanged age/owner classifier below still decides the outcome.
+///
+/// A missing projection stays unauthorized: an unresolved census — including a
+/// configured but unavailable one — is not absence proof.
 fn startup_attempt_classification_authorized(
     projection: Option<crate::startup_census::TaskCensusProjection>,
 ) -> bool {
     matches!(
         projection,
-        Some(crate::startup_census::TaskCensusProjection::DestructivelyGone)
+        Some(
+            crate::startup_census::TaskCensusProjection::DestructivelyGone
+                | crate::startup_census::TaskCensusProjection::NotApplicable
+        )
     )
 }
 
@@ -3379,9 +3390,10 @@ async fn reap_orphaned_pending_attempts_core(
                     | Some(TaskCensusProjection::CreationTransit) => {
                         tracing::info!(stage = "startup_stage_c", reason = "preserved", task_id = %orphan.task_id, attempt_id = %orphan.id, "startup pending-attempt reaper preserved census-live task");
                     }
-                    Some(TaskCensusProjection::DestructivelyGone) => {
-                        unreachable!("authorized above")
-                    }
+                    Some(
+                        TaskCensusProjection::DestructivelyGone
+                        | TaskCensusProjection::NotApplicable,
+                    ) => unreachable!("authorized above"),
                 }
                 continue;
             }
@@ -4767,6 +4779,11 @@ mod startup_census_reaper_gate_tests {
         }
         assert!(startup_attempt_classification_authorized(Some(
             TaskCensusProjection::DestructivelyGone,
+        )));
+        // "the task owns no non-terminal run" is a positive ledger verdict, so
+        // it is admitted to the unchanged classifier; `None` above is not.
+        assert!(startup_attempt_classification_authorized(Some(
+            TaskCensusProjection::NotApplicable,
         )));
     }
 }

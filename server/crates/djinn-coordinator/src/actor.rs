@@ -1316,11 +1316,13 @@ impl CoordinatorActor {
         .await;
         poll_stack::boxed(|| self.rehydrate_durable_dispatch_state()).await;
 
-        // Reconcile refinements whose in-memory loop was lost across this
-        // restart: their durable `refinement_start` rows still report `active`
-        // but no loop drives them. Stop them cleanly so they don't linger as
-        // zombies. Runs before the loop starts, so `active_refinements` is
-        // empty and there is no race with a freshly-started refinement.
+        // Rebuild the run-keyed projection from durable refinement runs lost
+        // across this restart. This is not a blanket stop: each run is observed
+        // in an exact `(run_id, generation)` snapshot and the shared liveness
+        // evaluator is the only authority — live runs are rehydrated read-only,
+        // and only a stale run is terminalized, under its own CAS fence. Runs
+        // before the loop starts, so `active_refinements` is empty and there is
+        // no race with a freshly-started refinement.
         poll_stack::boxed(|| self.recover_interrupted_refinements()).await;
 
         // Recover any linked evidence spikes that reached a terminal task

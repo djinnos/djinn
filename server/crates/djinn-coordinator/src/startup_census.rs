@@ -89,6 +89,12 @@ pub enum TaskCensusProjection {
     CreationTransit,
     Unknown,
     DestructivelyGone,
+    /// The task owns no non-terminal durable run at all, so no Job can exist
+    /// for it and nothing can advance a linked attempt.  This is a positive
+    /// verdict read off the startup ledger, deliberately distinct from the
+    /// absent/unknown case: "there is nothing here" is evidence, "we could not
+    /// tell" is not.
+    NotApplicable,
 }
 
 /// The inventory result remains explicit even when there are no durable runs.
@@ -168,8 +174,22 @@ impl StartupCensus {
     pub fn runs(&self) -> &[CensusTaskRun] {
         &self.runs
     }
+    /// The immutable per-task reduction, or `None` when no verdict can be
+    /// justified from this census.
+    ///
+    /// A task the reduction never saw owns no `starting`/`running` ledger row,
+    /// because [`Self::acquire`] read every one of them before any startup
+    /// mutation.  That is [`TaskCensusProjection::NotApplicable`], not missing
+    /// evidence — but only an authoritative cluster snapshot turns it into a
+    /// startup verdict.  A configured inventory whose LIST failed proves
+    /// nothing at all, so it keeps returning `None` and every stage keeps
+    /// failing closed on it.
     pub fn task_projection(&self, task_id: &str) -> Option<TaskCensusProjection> {
-        self.task_projections.get(task_id).copied()
+        if let Some(projection) = self.task_projections.get(task_id) {
+            return Some(*projection);
+        }
+        matches!(self.availability, InventoryAvailability::Available)
+            .then_some(TaskCensusProjection::NotApplicable)
     }
 }
 
@@ -207,6 +227,9 @@ async fn witness_for_run(
     }
 }
 
+/// Reduce the census runs to one verdict per task.  Tasks absent from the
+/// result own no non-terminal run; [`StartupCensus::task_projection`] turns
+/// that absence into [`TaskCensusProjection::NotApplicable`].
 fn project_tasks(runs: &[CensusTaskRun]) -> HashMap<String, TaskCensusProjection> {
     let mut projections = HashMap::new();
     for run in runs {
@@ -237,6 +260,9 @@ fn combine_projection(
         (Live, _) | (_, Live) => Live,
         (Unknown, _) | (_, Unknown) => Unknown,
         (CreationTransit, _) | (_, CreationTransit) => CreationTransit,
+        // `project_tasks` never emits `NotApplicable` for a run, so it is the
+        // identity element of the reduction rather than a fifth precedence tier.
+        (NotApplicable, other) | (other, NotApplicable) => other,
         (DestructivelyGone, DestructivelyGone) => DestructivelyGone,
     }
 }

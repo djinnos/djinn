@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::events::EventBus;
 use crate::server::AppState;
 use djinn_coordinator::startup_census::{
-    GoneProvenance, InventoryAvailability, StartupCensus, TaskRunWitness,
+    GoneProvenance, InventoryAvailability, StartupCensus, TaskCensusProjection, TaskRunWitness,
 };
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::test_support::{
@@ -119,8 +119,25 @@ impl WorkloadInventory for CountingInventory {
     }
 }
 
-/// The configured Stage A identity table is exact: only disconnected,
-/// non-terminal starting/running rows with positive Gone evidence transition.
+/// The configured Stage A identity table is exact, row for row, against the
+/// proposal's design matrix:
+///
+/// | identity | verdict |
+/// |---|---|
+/// | valid non-terminal run + non-terminal Job (`Live`) | preserve |
+/// | valid + failed LIST/GET (`Unknown`) | preserve, deferral telemetry |
+/// | valid `starting` + authoritative absence | preserve (creation transit) |
+/// | valid `running` + authoritative absence | **interrupt** |
+/// | valid + present terminal Job | **interrupt** |
+/// | `task_run_id IS NULL` | **interrupt** |
+/// | blank non-null identity | preserve, report malformed identity |
+/// | non-null identity missing from the ledger | preserve, report missing ledger |
+/// | ledger row terminal | **interrupt** |
+/// | ledger status unrecognized | preserve, report unrecognized status |
+///
+/// Six of the fourteen seeded sessions transition. The two that used to be
+/// inverted — NULL identity and terminal ledger row — are what made chat
+/// sessions survive every restart on a configured cluster.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn startup_stage_a_identity_matrix() {
     let db = create_test_db();
@@ -314,9 +331,20 @@ async fn startup_stage_a_identity_matrix() {
         .rpc_registry()
         .register_connected_for_test(connected_gone)
         .await;
-    state
-        .interrupt_stale_sessions_on_startup_with_census(&census)
-        .await;
+    let traces = TraceBuffer::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(traces.clone())
+        .finish();
+    async {
+        tracing::callsite::rebuild_interest_cache();
+        state
+            .interrupt_stale_sessions_on_startup_with_census(&census)
+            .await;
+    }
+    .with_subscriber(subscriber)
+    .await;
     let repo = SessionRepository::new(db.clone(), events);
     assert_eq!(
         repo.list_for_task_run(live)
@@ -329,10 +357,28 @@ async fn startup_stage_a_identity_matrix() {
         ["running"],
         "the Live census witness preserves its durable linked session"
     );
-    for id in [
-        absent_running_session,
-        terminal_starting_session,
-        terminal_running_session,
+    for (label, id) in [
+        (
+            "running run + authoritative absence",
+            absent_running_session,
+        ),
+        (
+            "starting run + present terminal Job",
+            terminal_starting_session,
+        ),
+        (
+            "running run + present terminal Job",
+            terminal_running_session,
+        ),
+        // A session that cannot own a task-run Job at all — every chat session
+        // has this shape. Nothing in the cluster can ever be evidence for it,
+        // so the ledger shape itself is the authority and it retains legacy
+        // startup handling.
+        ("task_run_id IS NULL", null_session),
+        // A durable terminal ledger row proves there is no non-terminal
+        // executor-bearing run behind the session.
+        ("terminal ledger row (completed)", completed_session),
+        ("terminal ledger row (failed)", failed_session),
     ] {
         assert_eq!(
             repo.get(&id)
@@ -340,25 +386,34 @@ async fn startup_stage_a_identity_matrix() {
                 .expect("read interrupted session")
                 .expect("session exists")
                 .status,
-            "interrupted"
+            "interrupted",
+            "design-matrix row `{label}` must interrupt"
         );
     }
-    for id in [
-        connected_session,
+    for (label, id) in [
+        (
+            "connected worker + authoritative absence",
+            connected_session,
+        ),
         // A durable `starting` row whose Job is authoritatively absent may
         // simply not have been CREATEd yet, so Stage A carries the census's
         // durable run state and fences it exactly as Stage B and Stage C do.
-        absent_starting_session,
+        (
+            "starting run + authoritative absence",
+            absent_starting_session,
+        ),
         // The registry intentionally has no connection for this identity; the
         // Live census witness—not connection absence—preserves it.
-        disconnected_live_session,
-        unknown_session,
-        null_session,
-        blank_session,
-        missing_session,
-        completed_session,
-        failed_session,
-        future_session,
+        (
+            "disconnected worker + Live witness",
+            disconnected_live_session,
+        ),
+        ("uncertain GET (Unknown witness)", unknown_session),
+        // Malformed data is not absence proof. This is the case that must NOT
+        // be collapsed into the NULL row above, which interrupts.
+        ("blank non-null identity", blank_session),
+        ("identity missing from the ledger", missing_session),
+        ("unrecognized ledger status", future_session),
     ] {
         assert_eq!(
             repo.get(&id)
@@ -366,7 +421,8 @@ async fn startup_stage_a_identity_matrix() {
                 .expect("read preserved session")
                 .expect("session exists")
                 .status,
-            "running"
+            "running",
+            "design-matrix row `{label}` must preserve"
         );
     }
     assert_eq!(
@@ -374,9 +430,27 @@ async fn startup_stage_a_identity_matrix() {
             .await
             .expect("list remaining sessions")
             .len(),
-        11,
-        "exactly three of fourteen matrix sessions transition; eleven fail closed"
+        8,
+        "exactly six of fourteen matrix sessions transition; eight fail closed"
     );
+    // Each preserved-but-not-live shape reports its own reason. `missing` and
+    // `blank` are deliberately separate from `unknown`: one is a claim about
+    // the cluster, the others are claims about the row.
+    let logs = traces.contents();
+    for reason in [
+        "unknown",
+        "malformed_identity",
+        "missing_ledger",
+        "unrecognized_status",
+    ] {
+        assert!(
+            logs.lines().any(|line| {
+                line.contains("stage=\"startup_stage_a\"")
+                    && line.contains(&format!("reason=\"{reason}\""))
+            }),
+            "Stage A must report a structured reason={reason} deferral:\n{logs}"
+        );
+    }
     for (run_id, expected_status) in [
         (live, "running"),
         (absent_starting, "starting"),
@@ -418,6 +492,94 @@ async fn startup_stage_a_identity_matrix() {
             .len(),
         12,
         "Stage A must not terminalize linked attempts"
+    );
+}
+
+/// A chat session carries `task_run_id: None`. It cannot own a task-run Job,
+/// so no cluster evidence about it can ever exist — which is precisely why the
+/// configured Stage A path must interrupt it from the ledger shape alone
+/// rather than wait for evidence that cannot arrive.
+///
+/// The paired live worker session in the same database and the same census is
+/// what makes this non-vacuous: if Stage A had simply gone back to blanket
+/// interruption, that row would move too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_interrupts_chat_sessions_on_a_configured_cluster() {
+    let db = create_test_db();
+    let events = test_events();
+    let live_run = "chat-control-live-run";
+    let _project_id = seed_running_session_with_task_run(&db, &events, live_run).await;
+    let sessions = SessionRepository::new(db.clone(), events.clone());
+    // The production chat entry point, not a hand-rolled row: a global chat
+    // session is projectless, task-less and `task_run_id IS NULL`.
+    let chat_session = sessions
+        .upsert_chat_session(&uuid::Uuid::now_v7().to_string(), "openai/gpt-5.5")
+        .await
+        .expect("create chat session")
+        .id;
+    assert_eq!(
+        sessions
+            .get(&chat_session)
+            .await
+            .expect("read seeded chat session")
+            .expect("seeded chat session exists")
+            .task_run_id,
+        None,
+        "a chat session cannot own a task-run identity"
+    );
+
+    let census = StartupCensus::acquire(
+        db.clone(),
+        Some(Arc::new(MatrixInventory {
+            listed: vec![job(live_run, false)],
+            presence: HashMap::new(),
+        })),
+    )
+    .await
+    .expect("acquire configured startup census");
+    assert_eq!(census.availability(), InventoryAvailability::Available);
+    assert!(
+        census
+            .runs()
+            .iter()
+            .any(|run| run.task_run_id == live_run && run.witness == TaskRunWitness::Live)
+    );
+
+    AppState::new(db.clone(), tokio_util::sync::CancellationToken::new())
+        .interrupt_stale_sessions_on_startup_with_census(&census)
+        .await;
+
+    assert_eq!(
+        sessions
+            .get(&chat_session)
+            .await
+            .expect("read chat session")
+            .expect("chat session exists")
+            .status,
+        "interrupted",
+        "a running chat session must not survive a configured-cluster startup"
+    );
+    assert_eq!(
+        sessions
+            .list_for_task_run(live_run)
+            .await
+            .expect("list live worker session")
+            .iter()
+            .map(|session| session.status.as_str())
+            .collect::<Vec<_>>(),
+        ["running"],
+        "the live worker session in the same census is untouched, so this is \
+         not a return to blanket interruption"
+    );
+    assert_eq!(
+        TaskRunRepository::new(db.clone())
+            .get(live_run)
+            .await
+            .expect("read live task run")
+            .expect("live task run exists")
+            .status,
+        "running",
+        "Stage A mutates no task-run ledger row"
     );
 }
 
@@ -569,6 +731,59 @@ impl FullStartupFixture {
                 .expect("restore secondary starting state");
         }
         session_id
+    }
+
+    /// Seed a second task in the same project that owns **no** durable
+    /// task-run at all, with one aged pending attempt. This is the classic
+    /// orphan `list_orphaned_pending` was written for, and the shape the
+    /// census reduces to `NotApplicable`.
+    async fn add_task_without_run(&self, label: &str) -> (String, String) {
+        let primary = TaskRunRepository::new(self.db.clone())
+            .get(&self.run_id)
+            .await
+            .expect("read primary fixture run")
+            .expect("primary fixture run exists");
+        let task_id = TaskRepository::new(self.db.clone(), self.events.clone())
+            .create_fixture_in_project(
+                &primary.project_id,
+                None,
+                label,
+                "",
+                "",
+                "task",
+                0,
+                "",
+                Some("open"),
+                None,
+            )
+            .await
+            .expect("create runless orphan task")
+            .id;
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        TaskAttemptRepository::new(self.db.clone())
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &attempt_id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: &format!("runless-{label}"),
+                session_id: None,
+                attempt_seq: None,
+                dispatch_owner_incarnation_id: None,
+                dispatch_group_id: None,
+            })
+            .await
+            .expect("create runless orphan attempt");
+        backdate_task_attempt_created_at(&self.db, &attempt_id, "1 minute").await;
+        (task_id, attempt_id)
+    }
+
+    async fn attempt_outcome(&self, attempt_id: &str) -> String {
+        TaskAttemptRepository::new(self.db.clone())
+            .get(attempt_id)
+            .await
+            .expect("read fixture attempt")
+            .expect("fixture attempt exists")
+            .outcome
     }
 
     async fn session_status(&self, session_id: &str) -> String {
@@ -867,29 +1082,211 @@ async fn startup_stage_c_task_projection() {
             "projection case {name}"
         );
     }
-}
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn startup_reaper_preserves_live_pods() {
-    let run_id = "startup-live-pod";
+    // ── Fifth matrix row: `NotApplicable` ───────────────────────
+    //
+    // A task with **no** non-terminal durable run cannot own a task-run Job,
+    // so nothing can advance its pending attempt. The four rows above all
+    // require the fixture's own run, so this row seeds the absence directly:
+    // one census, one authoritative LIST, two tasks — the fixture task whose
+    // Job is present and non-terminal (`Live`, preserved) and a sibling task
+    // with no run at all (`NotApplicable`, reaped). The contrast inside a
+    // single census is what proves the admission is evidence-driven and not a
+    // blanket startup reap.
+    let live_run = "projection-notapplicable-live";
     let fixture = FullStartupFixture::seeded(
-        run_id,
-        CountingInventory::listed(vec![job(run_id, false)], HashMap::new()),
+        live_run,
+        CountingInventory::listed(vec![job(live_run, false)], HashMap::new()),
     )
     .await;
+    let (runless_task, runless_attempt) = fixture.add_task_without_run("runless-orphan").await;
+    let live_task = TaskRunRepository::new(fixture.db.clone())
+        .get(live_run)
+        .await
+        .expect("read live projection task")
+        .expect("live projection task exists")
+        .task_id;
 
-    let census = fixture.run(false).await;
-
-    assert!(
-        census
-            .runs()
-            .iter()
-            .any(|run| run.task_run_id == run_id && run.witness == TaskRunWitness::Live)
+    let census = StartupCensus::acquire(fixture.db.clone(), Some(fixture.inventory.clone()))
+        .await
+        .expect("acquire one production census");
+    assert_eq!(
+        census.task_projection(&runless_task),
+        Some(TaskCensusProjection::NotApplicable),
+        "a task with no non-terminal durable run reduces to NotApplicable"
+    );
+    assert_eq!(
+        census.task_projection(&live_task),
+        Some(TaskCensusProjection::Live),
+        "the sibling task in the same census is unaffected"
+    );
+    AppState::new(
+        fixture.db.clone(),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .interrupt_stale_sessions_on_startup_with_census(&census)
+    .await;
+    djinn_coordinator::complete_startup_reaper_phase(
+        &fixture.db,
+        "projection-notapplicable-incarnation",
+        Some(&census),
+    )
+    .await;
+    assert_eq!(
+        fixture.attempt_outcome(&runless_attempt).await,
+        "interrupted",
+        "Stage C must reap a pending attempt whose task owns no non-terminal run"
     );
     assert_eq!(
         fixture.durable_statuses().await,
-        ("running".into(), "running".into(), "pending".into())
+        ("running".into(), "running".into(), "pending".into()),
+        "the live sibling task keeps all three of its durable rows"
     );
+
+    // ── Control: the same shape, unresolved evidence ──────────────────
+    //
+    // Identical durable rows, configured inventory whose LIST failed. The
+    // reduction yields no verdict at all, so the attempt is deferred with
+    // `reason="unknown"` and no row is written. `NotApplicable` therefore
+    // widens nothing about the unresolved case.
+    let traces = TraceBuffer::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(traces.clone())
+        .finish();
+    let unresolved_fixture = FullStartupFixture::seeded(
+        "projection-notapplicable-unresolved",
+        CountingInventory::unavailable(),
+    )
+    .await;
+    let (unresolved_task, unresolved_attempt) = unresolved_fixture
+        .add_task_without_run("runless-unresolved")
+        .await;
+    async {
+        tracing::callsite::rebuild_interest_cache();
+        let unresolved_census = StartupCensus::acquire(
+            unresolved_fixture.db.clone(),
+            Some(unresolved_fixture.inventory.clone()),
+        )
+        .await
+        .expect("acquire unavailable census");
+        assert_eq!(
+            unresolved_census.availability(),
+            InventoryAvailability::Unavailable
+        );
+        assert_eq!(
+            unresolved_census.task_projection(&unresolved_task),
+            None,
+            "an unavailable LIST proves nothing, so absence is not NotApplicable"
+        );
+        djinn_coordinator::complete_startup_reaper_phase(
+            &unresolved_fixture.db,
+            "projection-unresolved-incarnation",
+            Some(&unresolved_census),
+        )
+        .await;
+    }
+    .with_subscriber(subscriber)
+    .await;
+    assert_eq!(
+        unresolved_fixture
+            .attempt_outcome(&unresolved_attempt)
+            .await,
+        "pending",
+        "an unresolved projection must still defer and write no row"
+    );
+    assert!(
+        traces.contents().lines().any(|line| {
+            line.contains("stage=\"startup_stage_c\"")
+                && line.contains("reason=\"unknown\"")
+                && line.contains(&unresolved_task)
+        }),
+        "the unresolved runless task must defer with reason=unknown:\n{}",
+        traces.contents()
+    );
+}
+
+/// Three non-terminal task-run Jobs, and exactly zero session, task-run and
+/// task-attempt transitions across census -> Stage A -> Stage B -> Stage C.
+///
+/// The attempt is aged past `STARTUP_ORPHANED_PENDING_ATTEMPT_AGE_THRESHOLD_SECS`
+/// on purpose. With `run(false)` the pending row is ~0s old, so Stage C's
+/// candidate query never returns it and the zero-transition claim holds for a
+/// reason that has nothing to do with the census: the previous version of this
+/// test stayed green even with the entire Stage C gate deleted. The point here
+/// is that Stage C *runs* and preserves, not that Stage C is skipped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reaper_preserves_live_pods() {
+    let run_id = "startup-live-pod";
+    let second_run = "startup-live-pod-second";
+    let third_run = "startup-live-pod-third";
+    let fixture = FullStartupFixture::seeded(
+        run_id,
+        CountingInventory::listed(
+            vec![
+                job(run_id, false),
+                job(second_run, false),
+                job(third_run, false),
+            ],
+            HashMap::new(),
+        ),
+    )
+    .await;
+    let second_session = fixture.add_task_run(second_run, "running").await;
+    let third_session = fixture.add_task_run(third_run, "running").await;
+
+    let census = fixture.run(true).await;
+
+    for live in [run_id, second_run, third_run] {
+        assert!(
+            census
+                .runs()
+                .iter()
+                .any(|run| run.task_run_id == live && run.witness == TaskRunWitness::Live),
+            "all three Jobs must be witnessed live: {live}"
+        );
+    }
+    let task_id = TaskRunRepository::new(fixture.db.clone())
+        .get(run_id)
+        .await
+        .expect("read live-pod task")
+        .expect("live-pod task exists")
+        .task_id;
+    assert_eq!(
+        census.task_projection(&task_id),
+        Some(TaskCensusProjection::Live),
+        "Stage C must reach a Live verdict rather than skip the task"
+    );
+    assert_eq!(
+        fixture.durable_statuses().await,
+        ("running".into(), "running".into(), "pending".into()),
+        "zero session, task-run and task-attempt transitions"
+    );
+    // ...and the attempt was a genuine Stage C candidate while that happened.
+    // Its age is compared against the same cutoff Stage C's candidate query
+    // uses, so the zero-transition claim above cannot be satisfied by the age
+    // gate silently excluding the row.
+    let cutoff = (time::OffsetDateTime::now_utc() - time::Duration::seconds(10))
+        .format(&time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+        ))
+        .expect("format Stage C age cutoff");
+    let created_at = TaskAttemptRepository::new(fixture.db.clone())
+        .get(&fixture.attempt_id)
+        .await
+        .expect("read live-pod attempt")
+        .expect("live-pod attempt exists")
+        .created_at;
+    assert!(
+        created_at.as_str() < cutoff.as_str(),
+        "the pending attempt must be older than Stage C's age gate to be a \
+         candidate at all: created_at={created_at} cutoff={cutoff}"
+    );
+    for (session, run) in [(second_session, second_run), (third_session, third_run)] {
+        assert_eq!(fixture.session_status(&session).await, "running");
+        assert_eq!(fixture.task_run_status(run).await, "running");
+    }
     assert_eq!(fixture.inventory.list_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.inventory.presence_calls.load(Ordering::SeqCst), 0);
 }
