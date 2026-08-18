@@ -2755,8 +2755,16 @@ jobs:
       # all of `src`, a NEW test file is covered the day it is written.
       - name: Type check tests
         run: pnpm test:typecheck:gate
+      # `pnpm test` alone used to exit 0 with 23 real failures, so this step
+      # could not fail on a broken UI test and every UI regression merged
+      # green. `pnpm test:ci` runs the same suite through
+      # `ui/scripts/vitest-ci.mjs`, which fails on any failure that is not in
+      # `ui/test-known-failures.json` AND on a truncated run — a worker that
+      # dies mid-suite makes vitest itself exit 0 with no summary, which is how
+      # the defect hid. The ledger currently allows 23 pre-existing failures in
+      # 9 files; every other test in those files is still gated.
       - name: Tests
-        run: pnpm test
+        run: pnpm test:ci
       - name: Production build
         run: pnpm build
   nextest-flake-report:

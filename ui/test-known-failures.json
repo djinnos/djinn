@@ -1,0 +1,73 @@
+{
+  "//": [
+    "Known-red UI tests, measured on origin/main.",
+    "",
+    "Why this file exists: `pnpm test` used to exit 0 while 23 tests failed, so the",
+    "CI test step could not fail on a broken UI test (task 73h8). The exit code is",
+    "fixed, but the 23 failures below are genuinely red on main and were not",
+    "introduced by that fix. Rather than exclude their nine files wholesale -- which",
+    "would also stop gating the 98 tests in them that pass -- `scripts/vitest-ci.mjs`",
+    "runs the WHOLE suite and fails only on failures that are not listed here.",
+    "",
+    "Consequences:",
+    "  * A new failure anywhere in the suite, including inside these nine files,",
+    "    turns the UI Frontend job red.",
+    "  * Fixing a listed test prints a loud reminder to delete its line here. That is",
+    "    a warning and not a failure on purpose, so a timing-sensitive test that",
+    "    happens to pass on a fast runner cannot turn the gate red on its own.",
+    "  * A truncated or crashed run -- no JSON report, or a test file that never",
+    "    reported -- is a hard failure. That is the exact shape of the 73h8 defect.",
+    "",
+    "This list is a debt ledger. It must only ever shrink."
+  ],
+  "measuredAt": "2026-08-18",
+  "measuredOnCommit": "2b827e5c8",
+  "measuredWith": "pnpm --dir ui test  (vitest 4.1.2, --pool=vmThreads, node 22)",
+  "totalTests": 1596,
+  "totalTestFiles": 136,
+  "totalKnownFailures": 23,
+  "knownFailureFiles": 9,
+  "knownFailures": {
+    "src/api/readiness.test.ts": [
+      "readiness browser client reuses one action key across an explicit retry"
+    ],
+    "src/components/memory/MemoryGraphCanvas.perf.test.ts": [
+      "MemoryGraphCanvas parse/build performance keeps 500 lifecycle ghosts within the in-process model budget"
+    ],
+    "src/components/memory/MemoryGraphCanvas.test.tsx": [
+      "lifecycle ghost semantics does not restart a completed recent fade across hover or rerender state",
+      "lifecycle ghost semantics uses bounded one-shot fade timing and reduced motion opacity"
+    ],
+    "src/components/onboarding/FirstRunOnboarding.test.tsx": [
+      "FirstRunOnboarding resumes at focused role setup and finishes immediately after it saves"
+    ],
+    "src/components/proposals/ProposalHistory.test.tsx": [
+      "ProposalHistory renders legacy errors, unknown codes, and skipped-tier detail verbatim"
+    ],
+    "src/components/proposals/ProposalRefinement.test.tsx": [
+      "ProposalRefinement calls proposal_refinement_demand_round with feedback as reason",
+      "ProposalRefinement calls proposal_refinement_resolve with accept on Accept click",
+      "ProposalRefinement does not call onChanged when demand round fails",
+      "ProposalRefinement does not call onChanged when start refinement fails",
+      "ProposalRefinement limits the owner selector to author and sign-off participants",
+      "ProposalRefinement renders the durable owner returned by refreshed refinement status",
+      "ProposalRefinement sends the participant selected in the owner selector"
+    ],
+    "src/pages/CodeGraphPage.test.tsx": [
+      "CodeGraphPage (galaxy) fetches the snapshot and renders the galaxy HUD once a project is selected",
+      "CodeGraphPage (galaxy) hides tests via the hide-tests toggle without refetching",
+      "CodeGraphPage (galaxy) omits the workspace picker for single-workspace projects",
+      "CodeGraphPage (galaxy) opens the hotspot panel from the HUD toggle and selects a row",
+      "CodeGraphPage (galaxy) renders the project picker inside the galaxy HUD (chrome selector is suppressed on /code-graph)",
+      "CodeGraphPage (galaxy) renders the workspace picker only when multiple workspaces exist",
+      "CodeGraphPage (galaxy) surfaces the snapshot-unavailable message when the fetch fails"
+    ],
+    "src/pages/ProposalsPage.test.tsx": [
+      "ProposalsPage shows amber latest-head integrity diagnostics for warnings",
+      "ProposalsPage shows destructive legacy errors and gives them precedence over warnings"
+    ],
+    "src/pages/TaskSessionPage.test.tsx": [
+      "TaskSessionPage renders the task sidebar and session thread"
+    ]
+  }
+}

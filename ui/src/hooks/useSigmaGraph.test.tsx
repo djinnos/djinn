@@ -24,7 +24,7 @@
 
 import { act, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createRef } from "react";
+import { useRef } from "react";
 import Graph from "graphology";
 import { PRECOMPUTED_LAYOUT_ATTRIBUTE } from "@/lib/codeGraphAdapter";
 
@@ -134,7 +134,15 @@ function mountHarness(
 ): { current: UseSigmaGraphResult | null } {
   const ref: { current: UseSigmaGraphResult | null } = { current: null };
   function CapturingHarness() {
-    const containerRef = createRef<HTMLDivElement>();
+    // MUST be `useRef`, not `createRef`. `createRef()` allocates a NEW ref
+    // object on every render, and `useSigmaGraph`'s mount effect lists
+    // `containerRef` in its dependency array — so a `createRef` harness makes
+    // the effect re-run after every commit, and the effect's own
+    // `setReady`/`setHandle` calls schedule the next commit. That is an
+    // unbounded mount/teardown loop: it pushed a fresh MockSigma into
+    // `sigmaInstances` forever until the vitest worker died with
+    // ERR_WORKER_OUT_OF_MEMORY, which is what made the whole suite exit 0.
+    const containerRef = useRef<HTMLDivElement>(null);
     // eslint-disable-next-line react-hooks/immutability -- test harness intentionally captures the hook result into an outer holder for assertions.
     ref.current = useSigmaGraph(containerRef, graph);
     return <div data-testid="harness-root" ref={containerRef} />;
