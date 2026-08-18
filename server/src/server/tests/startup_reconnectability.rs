@@ -2266,19 +2266,23 @@ async fn become_leader_drives_the_startup_census_through_every_stage() {
     // `become_leader` moves the census into coordinator startup, which
     // completes Stages B and C inside its own boot phase, so wait for the
     // durable effect rather than for a log line.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
-    loop {
-        let (_, run_status, attempt_outcome) = leader_startup_statuses(&db, &events, &gone).await;
-        if run_status == "interrupted" && attempt_outcome == "interrupted" {
-            break;
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        loop {
+            let (_, run_status, attempt_outcome) =
+                leader_startup_statuses(&db, &events, &gone).await;
+            if run_status == "interrupted" && attempt_outcome == "interrupted" {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "coordinator startup never completed Stage B/C for the census-gone identity \
-             (run={run_status}, attempt={attempt_outcome})"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    })
+    .await;
+    assert!(
+        settled.is_ok(),
+        "coordinator startup never completed Stage B/C for the census-gone identity; \
+         last observed (session, run, attempt) = {:?}",
+        leader_startup_statuses(&db, &events, &gone).await
+    );
 
     assert_eq!(
         leader_startup_statuses(&db, &events, &gone).await,
