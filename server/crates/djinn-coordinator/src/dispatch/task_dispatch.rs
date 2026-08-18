@@ -2287,12 +2287,19 @@ impl CoordinatorActor {
                         task.ci_status.as_str(),
                         task.merge_conflict_metadata.as_deref(),
                     );
-                    match super::respawn_guard::run_respawn_guard(
+                    // The guard shares production's direct-delivery reconciler.
+                    // Ready dispatch normally settles an Applying generation
+                    // before reaching here, but this guard also runs for
+                    // re-entered and non-ready dispatch paths, and there it must
+                    // consume Applying through the same engine rather than
+                    // defer forever on a generation nothing is advancing.
+                    match super::respawn_guard::run_respawn_guard_with_reconciler(
                         &actor.db,
                         &task.id,
                         role,
                         task.pr_url.as_deref(),
                         pr_rework_signal,
+                        || actor.reconcile_direct_delivery_task(&task),
                     )
                     .await
                     {
