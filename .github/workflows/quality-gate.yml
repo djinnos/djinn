@@ -2747,6 +2747,14 @@ jobs:
         run: pnpm usage:types:check
       - name: Type check
         run: pnpm tsc --noEmit
+      # `pnpm tsc --noEmit` above excludes every `*.test.ts(x)`, so a
+      # type-level assertion in a test file — a generated-type drift guard whose
+      # only failure mode is a compile error — used to prove nothing. This gates
+      # the test tree minus the 21 files that carry 81 pre-existing errors; the
+      # excluded list lives in `ui/tsconfig.test-gate.json`. Because it includes
+      # all of `src`, a NEW test file is covered the day it is written.
+      - name: Type check tests
+        run: pnpm test:typecheck:gate
       - name: Tests
         run: pnpm test
       - name: Production build

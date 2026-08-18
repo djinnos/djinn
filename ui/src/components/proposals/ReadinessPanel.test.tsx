@@ -915,11 +915,16 @@ describe("ReadinessPanel typed evidence finding", () => {
                 anchor_health: "unusable",
               },
               {
+                // A check with nothing returned yet omits these three fields
+                // on the wire: the server marks them
+                // `skip_serializing_if = "Option::is_none"`
+                // (`proposal_ops.rs`, `TypedEvidencePlannedCheckModel`), so
+                // `null` is a value this projection can never carry.
                 check_id: "not-yet-run",
                 method: "command",
-                status: null,
-                anchor_locator: null,
-                anchor_health: null,
+                status: undefined,
+                anchor_locator: undefined,
+                anchor_health: undefined,
               },
             ],
           }),
