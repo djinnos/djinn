@@ -765,3 +765,27 @@ pub fn lane_under_user_cap(
 ) -> bool {
     crate::dispatch::lane_under_user_cap(running_by_user_lane, creator, lane, cap)
 }
+
+// ── Ready-dispatch seam for the out-of-crate conformance target ───────────
+
+/// Drive one production ready-dispatch pass.
+///
+/// Forwards to `CoordinatorActor::dispatch_ready_tasks` with no logic of its
+/// own — the same call `CoordinatorActor::run` makes on every tick. Awaiting it
+/// gives the caller a happens-before edge on a *finished* pass, so an assertion
+/// afterwards observes the pass's durable effects rather than a race.
+pub async fn run_dispatch_ready_tasks(
+    actor: &mut crate::actor::CoordinatorActor,
+    project_filter: Option<&str>,
+) {
+    actor.dispatch_ready_tasks(project_filter).await;
+}
+
+/// The number of dispatches the actor has performed since it was built.
+///
+/// This is the actor's own counter, incremented on the dispatch path — not a
+/// count the caller supplied.
+#[must_use]
+pub fn dispatched_count(actor: &crate::actor::CoordinatorActor) -> u64 {
+    actor.dispatched
+}
