@@ -247,3 +247,42 @@ fn startup_audit_stage_a_qualifiers_hold() {
         "`NonTerminal` must interrupt when the census proved that exact run gone"
     );
 }
+
+/// The row also claims each preserved-but-not-live shape reports its *own*
+/// deferral reason, so the set it names must be the set the Stage A loop can
+/// actually emit. `startup_stage_a_identity_matrix` proves those reasons reach
+/// the trace output; this proves the document names the same ones, and that a
+/// reason collapsed in the code cannot keep a distinction in the document.
+#[test]
+fn startup_audit_stage_a_deferral_reasons_match_the_code() {
+    const REASON_MATCH: &str = "let reason = match identity {";
+    let start = STATE_MODULE
+        .find(REASON_MATCH)
+        .expect("Stage A resolves a per-identity deferral reason");
+    let body = &STATE_MODULE[start + REASON_MATCH.len()..];
+    let end = body
+        .find("};")
+        .expect("the Stage A deferral-reason match is closed");
+
+    let mut emitted = HashSet::new();
+    let mut rest = &body[..end];
+    while let Some((_, tail)) = rest.split_once("Some(\"") {
+        let (reason, remainder) = tail
+            .split_once('"')
+            .expect("a reason literal in the Stage A match is closed");
+        emitted.insert(reason.to_owned());
+        rest = remainder;
+    }
+    assert!(
+        !emitted.is_empty(),
+        "the Stage A deferral-reason match names no reason at all"
+    );
+
+    let cell = audit_row(STAGE_A_SAMPLER_ID)[ABSENCE_PROOF_COLUMN];
+    assert_eq!(
+        documented_variant_set(cell, "stage_a_deferral_reasons"),
+        emitted,
+        "the Stage A audit row's deferral reasons do not match the reasons the \
+         Stage A loop emits"
+    );
+}
