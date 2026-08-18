@@ -40,6 +40,8 @@ pub(crate) mod ci_routing;
 pub(crate) mod pr;
 #[cfg(test)]
 mod pr_close;
+#[cfg(test)]
+mod pr_direct_delivery_tests;
 pub(crate) mod stage;
 
 /// Non-PR reusable live-mover API surface for post-run and orphan-task checks

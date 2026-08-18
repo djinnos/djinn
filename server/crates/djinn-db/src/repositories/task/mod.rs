@@ -21,11 +21,13 @@ mod board_health_stalled_epics;
 mod ci;
 mod delivery;
 mod generation;
+mod legacy_delivery;
 mod parent_disposition;
 mod queries;
 mod reads;
 mod status;
 mod writes;
+pub use legacy_delivery::LEGACY_DELIVERY_LABEL;
 pub use writes::EffectiveCreatorProvenance;
 pub(crate) use writes::{
     ReadinessAreaAnalysisTask, ReadinessIdentificationTask,

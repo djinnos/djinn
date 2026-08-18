@@ -438,8 +438,8 @@ pub use repositories::{
         CreateTaskInProjectParams, CreateTaskParams, DeliveryFinalizeInput,
         DeliveryMappedHeadRetryInput, DeliveryPrepareInput, DeliveryReworkInput,
         DeliveryTransitionResult, DispositionCounts, DispositionFinding, DispositionPlan,
-        DispositionScope, EffectiveCreatorProvenance, ListQuery, ListResult, ReadyQuery,
-        TaskIntegrationResult, TaskIntegrationStaleness, UpdateTaskParams,
+        DispositionScope, EffectiveCreatorProvenance, LEGACY_DELIVERY_LABEL, ListQuery, ListResult,
+        ReadyQuery, TaskIntegrationResult, TaskIntegrationStaleness, UpdateTaskParams,
         evaluate_board_health_mismatch_candidate,
     },
     task_arbitration::{

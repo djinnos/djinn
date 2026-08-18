@@ -203,6 +203,11 @@ enum ContractCase {
     /// forge effect — and a poller that can only *select* rows with a PR URL
     /// must still refuse this one at its eligibility gate rather than never
     /// having seen it.
+    ///
+    /// It is reachable: before this row's gate landed, the pod-worker PR-open
+    /// body in `djinn-agent` created a real PR and wrote `pr_url` for any task,
+    /// direct or not. So this is a production shape, not a hypothetical, and
+    /// every consumer's answer for it is a correctness requirement.
     DirectWithStrayPrIdentity,
     /// Epoch active, but the epic's proposal has no build-attempt owner.
     UnresolvedOwner,
@@ -1381,24 +1386,29 @@ SecondStrikeRetry/UnknownContract/0 => Refuse(FailedClosed) | pr_effects=[] | ap
 /// and this path sets none. That is the fail-closed property: closing a direct
 /// task through the legacy path cannot release anything.
 ///
-/// # Observed divergence — reported, not bent
+/// # `DirectWithStrayPrIdentity` — the divergence, now closed
 ///
-/// `DirectWithStrayPrIdentity` releases its dependent. `emit_unblocked_tasks`,
-/// `board_health`'s direct section, and the `merged` classification all use
-/// `pr_url IS NULL` as their legacy discriminator, while the coordinator's
-/// `admit_direct_delivery` uses the explicit legacy **label**. A canonically
-/// direct-owned task that somehow carries a PR URL is therefore direct to the
-/// coordinator and legacy to the ledger SQL. Production never mints that row —
-/// task-PR adoption is refused for direct identities, so `pr_url` stays null —
-/// but the two discriminators are not the same predicate, and this row is
-/// pinned so the difference is visible rather than latent.
+/// This row used to read `releases=1`. `emit_unblocked_tasks` discriminated on
+/// `pr_url IS NULL` while the coordinator's `admit_direct_delivery`
+/// discriminated on the explicit legacy **label**, so a canonically
+/// direct-owned task carrying a PR URL was direct to the coordinator and legacy
+/// to the ledger SQL. That was defended as unreachable — until the pod-worker
+/// PR-open body in `djinn-agent` turned out to have no eligibility gate at all
+/// and to mint exactly this row. Taking a `PrMerge` on it then released the
+/// dependents with **no applied ledger generation**: dependents unblocked on
+/// work nothing ever integrated.
+///
+/// Both halves are fixed, and this row is the behavioural proof of the SQL
+/// half: the ledger side now routes on the same explicit label, so a stray
+/// `pr_url` buys back nothing and the dependent stays blocked. Reverting
+/// `emit_unblocked_tasks` to `bt.pr_url IS NULL` puts `releases=1` back.
 const EXPECTED_BLOCKER_RELEASE: &str = r#"
 BlockerRelease/SupportedDisabled/0 => closed:releases=1 | pr_effects=[] | appends=0 | changed=true
 BlockerRelease/ActiveExplicitLegacy/0 => closed:releases=1 | pr_effects=[] | appends=0 | changed=true
 BlockerRelease/ActiveResolvedDirect/0 => closed:releases=0 | pr_effects=[] | appends=0 | changed=true
 BlockerRelease/DirectApplying/0 => closed:releases=0 | pr_effects=[] | appends=0 | changed=true
 BlockerRelease/DirectConflict/0 => closed:releases=0 | pr_effects=[] | appends=0 | changed=true
-BlockerRelease/DirectWithStrayPrIdentity/0 => closed:releases=1 | pr_effects=[] | appends=0 | changed=true
+BlockerRelease/DirectWithStrayPrIdentity/0 => closed:releases=0 | pr_effects=[] | appends=0 | changed=true
 BlockerRelease/UnresolvedOwner/0 => closed:releases=1 | pr_effects=[] | appends=0 | changed=true
 BlockerRelease/MissingContract/0 => closed:releases=1 | pr_effects=[] | appends=0 | changed=true
 BlockerRelease/UnknownContract/0 => closed:releases=1 | pr_effects=[] | appends=0 | changed=true
@@ -1417,16 +1427,21 @@ ParentDisposition/UnresolvedOwner/0 => Park | pr_effects=[] | appends=0 | change
 ParentDisposition/MissingContract/0 => Park | pr_effects=[] | appends=0 | changed=false
 ParentDisposition/UnknownContract/0 => Park | pr_effects=[] | appends=0 | changed=false
 "#;
-/// The additive direct-delivery section admits a task only under an active
-/// epoch, a canonical owner, an active attempt, and a null PR identity —
+/// The additive direct-delivery section admits a task under an active epoch, a
+/// canonical owner, an active attempt, and no explicit legacy label —
 /// `integrated` only for the exact applied candidate the task closed with.
+///
+/// `DirectWithStrayPrIdentity` used to read `absent`, because the section
+/// discriminated on `t.pr_url IS NULL`: a stray PR URL hid a direct-owned task
+/// from the one board section that reports its ledger state. It now reports the
+/// `applying` generation the fixture actually persisted.
 const EXPECTED_BOARD_HEALTH: &str = r#"
 BoardHealth/SupportedDisabled/0 => absent | pr_effects=[] | appends=0 | changed=false
 BoardHealth/ActiveExplicitLegacy/0 => absent | pr_effects=[] | appends=0 | changed=false
 BoardHealth/ActiveResolvedDirect/0 => classified=integrated | pr_effects=[] | appends=0 | changed=false
 BoardHealth/DirectApplying/0 => classified=applying | pr_effects=[] | appends=0 | changed=false
 BoardHealth/DirectConflict/0 => classified=conflict | pr_effects=[] | appends=0 | changed=false
-BoardHealth/DirectWithStrayPrIdentity/0 => absent | pr_effects=[] | appends=0 | changed=false
+BoardHealth/DirectWithStrayPrIdentity/0 => classified=applying | pr_effects=[] | appends=0 | changed=false
 BoardHealth/UnresolvedOwner/0 => absent | pr_effects=[] | appends=0 | changed=false
 BoardHealth/MissingContract/0 => absent | pr_effects=[] | appends=0 | changed=false
 BoardHealth/UnknownContract/0 => absent | pr_effects=[] | appends=0 | changed=false

@@ -25,13 +25,27 @@ use djinn_git::{
 use djinn_provider::github_api::{ExpectedOldShaRefUpdateResult, GitHubApiClient};
 use djinn_workspace::MirrorManager;
 
-pub const LEGACY_DELIVERY_LABEL: &str = "direct-delivery-legacy";
+/// The sole legacy discriminator, re-exported from `djinn-db` rather than
+/// redeclared. The ledger-side SQL (`emit_unblocked_tasks`, the board-health
+/// direct section, the `merged` classification) routes on this same label, so
+/// one definition keeps the coordinator and the SQL from drifting apart.
+pub use djinn_db::LEGACY_DELIVERY_LABEL;
 
 /// Effect boundaries reached by the epoch-aware delivery routing path.
-/// The recorder is test-only and calls to it sit beside real production effects.
-#[cfg(test)]
+///
+/// The recorder is always compiled, not `#[cfg(test)]`. The pod-worker
+/// task-PR-open body lives in `djinn-agent`, which depends on this crate — so
+/// `djinn-coordinator` can never depend on it back, and a `cfg(test)` recorder
+/// would be a hard no-op for exactly the path that had no gate at all. Keeping
+/// it compiled costs one uncontended mutex probe per boundary (PR opens and
+/// poller ticks, not a hot loop) and is what makes an agent-originated task-PR
+/// forge effect observable by the consumer cutover matrix's operation set.
+///
+/// Recording is still inert until a test installs a
+/// [`boundary_operations_scope`]: with no scope, `observe_boundary_operation`
+/// reads `None` and returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BoundaryOperation {
+pub enum BoundaryOperation {
     CapabilityProbe,
     ResolveTaskActiveAttempt,
     NoProposalOwnerPark,
@@ -56,7 +70,6 @@ pub(crate) enum BoundaryOperation {
     AttemptPrCreateOrAdoptRequest,
 }
 
-#[cfg(test)]
 static BOUNDARY_OPERATIONS: std::sync::Mutex<
     Option<(std::thread::ThreadId, Vec<BoundaryOperation>)>,
 > = std::sync::Mutex::new(None);
@@ -66,106 +79,112 @@ static BOUNDARY_OPERATIONS: std::sync::Mutex<
 // with the buffer so another concurrently running test cannot add effects to
 // this scope. Tokio's default test runtime is current-thread, so effects from
 // the test's production calls retain that owner identity across awaits.
-#[cfg(test)]
 static BOUNDARY_OPERATIONS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-#[cfg(test)]
-pub(crate) struct BoundaryOperationsScope {
+/// Poison-tolerant access to the shared observation buffer.
+///
+/// The recorder now compiles into production builds, where `unwrap` on a
+/// poisoned lock is denied — and rightly so: a panicking test must never be
+/// able to abort a production PR-open. Recovering the inner value is correct
+/// here because the buffer is a plain `Vec` with no invariant a panic could
+/// have broken mid-write.
+fn boundary_operations()
+-> std::sync::MutexGuard<'static, Option<(std::thread::ThreadId, Vec<BoundaryOperation>)>> {
+    BOUNDARY_OPERATIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+pub struct BoundaryOperationsScope {
     owner: std::thread::ThreadId,
     _guard: tokio::sync::MutexGuard<'static, ()>,
 }
 
-#[cfg(test)]
 impl BoundaryOperationsScope {
-    /// Marks a point in this scope's ordered production-effect stream.
-    pub(crate) fn checkpoint(&self) -> usize {
+    /// This scope's ordered production-effect stream so far.
+    fn observed(&self) -> Vec<BoundaryOperation> {
         assert_eq!(
             std::thread::current().id(),
             self.owner,
             "boundary recorder used outside its owner thread"
         );
-        let operations = BOUNDARY_OPERATIONS.lock().unwrap();
-        let (owner, operations) = operations.as_ref().unwrap();
-        assert_eq!(
-            *owner, self.owner,
-            "boundary recorder used outside its owner thread"
+        let buffer = boundary_operations();
+        let observed = buffer
+            .as_ref()
+            .filter(|(owner, _)| *owner == self.owner)
+            .map(|(_, operations)| operations.clone());
+        assert!(
+            observed.is_some(),
+            "boundary recorder used outside its owner scope"
         );
-        operations.len()
+        observed.unwrap_or_default()
+    }
+
+    /// Marks a point in this scope's ordered production-effect stream.
+    pub fn checkpoint(&self) -> usize {
+        self.observed().len()
     }
 
     /// Returns effects observed after `checkpoint` without consuming them.
-    pub(crate) fn operations_since(&self, checkpoint: usize) -> Vec<BoundaryOperation> {
-        assert_eq!(
-            std::thread::current().id(),
-            self.owner,
-            "boundary recorder used outside its owner thread"
-        );
-        let operations = BOUNDARY_OPERATIONS.lock().unwrap();
-        let (owner, operations) = operations.as_ref().unwrap();
-        assert_eq!(
-            *owner, self.owner,
-            "boundary recorder used outside its owner thread"
-        );
-        operations[checkpoint..].to_vec()
+    pub fn operations_since(&self, checkpoint: usize) -> Vec<BoundaryOperation> {
+        self.observed()[checkpoint..].to_vec()
     }
 }
 
-#[cfg(test)]
 impl Drop for BoundaryOperationsScope {
     fn drop(&mut self) {
         // A panic or early return cannot leak observations into a later scope.
-        *BOUNDARY_OPERATIONS.lock().unwrap() = None;
+        *boundary_operations() = None;
     }
 }
 
-#[cfg(test)]
-pub(crate) async fn boundary_operations_scope() -> BoundaryOperationsScope {
+/// Install a process-wide observation scope for the calling test thread.
+///
+/// Exported beyond this crate so `djinn-agent`'s pod-worker PR-open regression
+/// observes the same boundary stream the coordinator matrix does.
+pub async fn boundary_operations_scope() -> BoundaryOperationsScope {
     let guard = BOUNDARY_OPERATIONS_TEST_LOCK.lock().await;
     let owner = std::thread::current().id();
-    *BOUNDARY_OPERATIONS.lock().unwrap() = Some((owner, Vec::new()));
+    *boundary_operations() = Some((owner, Vec::new()));
     BoundaryOperationsScope {
         owner,
         _guard: guard,
     }
 }
 
-/// A no-op outside tests, preserving production behavior and the disabled epoch.
-pub(crate) fn observe_boundary_operation(operation: &'static str) {
-    #[cfg(test)]
+/// Record one production effect boundary.
+///
+/// Inert unless a [`boundary_operations_scope`] is installed on the calling
+/// thread, so production behavior and the disabled epoch are preserved.
+pub fn observe_boundary_operation(operation: &'static str) {
+    let operation = match operation {
+        "capability_probe" => BoundaryOperation::CapabilityProbe,
+        "resolve_task_active_attempt" => BoundaryOperation::ResolveTaskActiveAttempt,
+        "no_proposal_owner_park" => BoundaryOperation::NoProposalOwnerPark,
+        "direct_append" => BoundaryOperation::DirectAppend,
+        "simple_close" => BoundaryOperation::SimpleClose,
+        "supervisor_pr_open" => BoundaryOperation::SupervisorPrOpen,
+        "task_pr_lookup" => BoundaryOperation::TaskPrLookup,
+        "task_pr_adopt" => BoundaryOperation::TaskPrAdopt,
+        "task_pr_status_poll" => BoundaryOperation::TaskPrStatusPoll,
+        "task_pr_review_poll" => BoundaryOperation::TaskPrReviewPoll,
+        "task_pr_merged_poll" => BoundaryOperation::TaskPrMergedPoll,
+        "task_pr_inline_cleanup" => BoundaryOperation::TaskPrInlineCleanup,
+        "task_pr_stale_cleanup" => BoundaryOperation::TaskPrStaleCleanup,
+        "task_pr_create" => BoundaryOperation::TaskPrCreate,
+        "task_pr_merge" => BoundaryOperation::TaskPrMerge,
+        "task_pr_auto_merge" => BoundaryOperation::TaskPrAutoMerge,
+        "task_pr_approval" => BoundaryOperation::TaskPrApproval,
+        "task_pr_signoff" => BoundaryOperation::TaskPrSignoff,
+        "task_pr_custom_enqueue" => BoundaryOperation::TaskPrCustomEnqueue,
+        "attempt_pr_create_or_adopt_request" => BoundaryOperation::AttemptPrCreateOrAdoptRequest,
+        _ => return,
+    };
+    if let Some((scope_owner, operations)) = boundary_operations().as_mut()
+        && *scope_owner == std::thread::current().id()
     {
-        let operation = match operation {
-            "capability_probe" => BoundaryOperation::CapabilityProbe,
-            "resolve_task_active_attempt" => BoundaryOperation::ResolveTaskActiveAttempt,
-            "no_proposal_owner_park" => BoundaryOperation::NoProposalOwnerPark,
-            "direct_append" => BoundaryOperation::DirectAppend,
-            "simple_close" => BoundaryOperation::SimpleClose,
-            "supervisor_pr_open" => BoundaryOperation::SupervisorPrOpen,
-            "task_pr_lookup" => BoundaryOperation::TaskPrLookup,
-            "task_pr_adopt" => BoundaryOperation::TaskPrAdopt,
-            "task_pr_status_poll" => BoundaryOperation::TaskPrStatusPoll,
-            "task_pr_review_poll" => BoundaryOperation::TaskPrReviewPoll,
-            "task_pr_merged_poll" => BoundaryOperation::TaskPrMergedPoll,
-            "task_pr_inline_cleanup" => BoundaryOperation::TaskPrInlineCleanup,
-            "task_pr_stale_cleanup" => BoundaryOperation::TaskPrStaleCleanup,
-            "task_pr_create" => BoundaryOperation::TaskPrCreate,
-            "task_pr_merge" => BoundaryOperation::TaskPrMerge,
-            "task_pr_auto_merge" => BoundaryOperation::TaskPrAutoMerge,
-            "task_pr_approval" => BoundaryOperation::TaskPrApproval,
-            "task_pr_signoff" => BoundaryOperation::TaskPrSignoff,
-            "task_pr_custom_enqueue" => BoundaryOperation::TaskPrCustomEnqueue,
-            "attempt_pr_create_or_adopt_request" => {
-                BoundaryOperation::AttemptPrCreateOrAdoptRequest
-            }
-            _ => return,
-        };
-        if let Some((scope_owner, operations)) = BOUNDARY_OPERATIONS.lock().unwrap().as_mut()
-            && *scope_owner == std::thread::current().id()
-        {
-            operations.push(operation);
-        }
+        operations.push(operation);
     }
-    #[cfg(not(test))]
-    let _ = operation;
 }
 
 /// The only epoch-aware routing decision used by ready admission and completion.

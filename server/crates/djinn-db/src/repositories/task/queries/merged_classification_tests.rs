@@ -293,6 +293,7 @@ async fn active_direct_merged_and_board_health_require_exact_applied_evidence() 
         "unknown",
         "legacy",
         "stale-applied",
+        "stray-pr",
     ] {
         let task = repo
             .create_fixture_in_project(
@@ -312,8 +313,19 @@ async fn active_direct_merged_and_board_health_require_exact_applied_evidence() 
         sqlx::query("UPDATE tasks SET status = 'closed', close_reason = 'completed', merge_commit_sha = $1, closed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $2").bind(format!("{name}-sha")).bind(&task.id).execute(db.pool()).await.unwrap();
         ids.push(task.id);
     }
+    // `ids[4]` is legacy because it carries the explicit legacy LABEL. Its PR
+    // URL is deliberately identical to `ids[6]`'s: the PR URL is not what makes
+    // it legacy, and `ids[6]` — same URL, no label — must stay direct.
+    sqlx::query(
+        "UPDATE tasks SET pr_url = 'https://github.com/owner/repo/pull/1', \
+         labels = '[\"direct-delivery-legacy\"]'::jsonb WHERE id = $1",
+    )
+    .bind(&ids[4])
+    .execute(db.pool())
+    .await
+    .unwrap();
     sqlx::query("UPDATE tasks SET pr_url = 'https://github.com/owner/repo/pull/1' WHERE id = $1")
-        .bind(&ids[4])
+        .bind(&ids[6])
         .execute(db.pool())
         .await
         .unwrap();
@@ -362,6 +374,12 @@ async fn active_direct_merged_and_board_health_require_exact_applied_evidence() 
             "stale-applied-sha",
             ", applied_at) VALUES ('direct-attempt', $1, 1, $2, $3, 'base', 'source', 'patch', 'parent', 'prepare-1', now())",
         ),
+        (
+            &ids[6],
+            "applying",
+            "stray-pr-sha",
+            ") VALUES ('direct-attempt', $1, 1, $2, $3, 'base', 'source', 'patch', 'parent', 'prepare-1')",
+        ),
     ] {
         let head = "INSERT INTO task_deliveries (build_attempt_id, task_id, delivery_generation, state, candidate_sha, base_sha, source_sha, patch_digest, selected_parent_sha, prepare_transition_id";
         sqlx::query(&format!("{head}{tail}"))
@@ -387,7 +405,7 @@ async fn active_direct_merged_and_board_health_require_exact_applied_evidence() 
     assert!(merged_ids.contains(&ids[0].as_str()));
     assert!(
         merged_ids.contains(&ids[4].as_str()),
-        "explicit legacy PR stays legacy"
+        "the explicit legacy LABEL keeps a task on the legacy classification"
     );
     for id in [&ids[1], &ids[2], &ids[3], &ids[5]] {
         assert!(
@@ -395,13 +413,19 @@ async fn active_direct_merged_and_board_health_require_exact_applied_evidence() 
             "nonterminal or unknown direct evidence must fail closed"
         );
     }
+    assert!(
+        !merged_ids.contains(&ids[6].as_str()),
+        "a stray PR URL must not buy a direct-owned task back onto the legacy \
+         classification: it has only a mid-flight generation, so it fails closed"
+    );
 
     let health = repo.board_health(24).await.unwrap();
     let findings = health["direct_delivery"]["findings"].as_array().unwrap();
     assert_eq!(
         findings.len(),
-        5,
-        "explicit legacy task is absent from direct reporting"
+        6,
+        "the explicitly-labelled legacy task is the only one absent from direct \
+         reporting; the stray-PR task is direct and must be reported"
     );
     let classification = |id: &str| {
         findings.iter().find(|f| f["id"] == id).unwrap()["classification"]
@@ -413,6 +437,12 @@ async fn active_direct_merged_and_board_health_require_exact_applied_evidence() 
     assert_eq!(classification(&ids[2]), "conflict");
     assert_eq!(classification(&ids[3]), "unknown");
     assert_eq!(classification(&ids[5]), "unknown");
+    assert_eq!(
+        classification(&ids[6]),
+        "applying",
+        "a stray PR URL must not hide a direct-owned task from the section that \
+         reports its ledger state"
+    );
 
     sqlx::query(
         "UPDATE direct_delivery_epochs SET state = 'disabled' WHERE name = 'direct_delivery_v1'",
@@ -423,7 +453,7 @@ async fn active_direct_merged_and_board_health_require_exact_applied_evidence() 
     let disabled = repo.list_filtered(merged_query(project_id)).await.unwrap();
     assert_eq!(
         disabled.tasks.len(),
-        6,
+        7,
         "disabled epoch preserves legacy SHA classification"
     );
 }
