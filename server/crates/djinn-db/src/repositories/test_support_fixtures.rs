@@ -153,6 +153,45 @@ pub async fn set_model_turn_capability_fixture(db: &Database, pool_id: i64, capa
         .unwrap();
 }
 
+/// Remove or restore the durable model-turn schema marker row.
+///
+/// The A-to-D compatibility phase guard's first predicate compares the stored
+/// marker with the constant the running binary understands, so a compatibility
+/// fixture needs a way to remove *that one prerequisite* and put it back.
+/// Migration 173 pins the column with `CHECK (version = 1)`, so the marker
+/// cannot be staled to another revision — removing the row is the only
+/// representable absence — and dropping the table is not an option because
+/// then the guard's query errors instead of denying.
+///
+/// The raw mutation stays inside `djinn-db` because
+/// `scripts/check-raw-sql-boundary.sh` is default-deny and covers test files
+/// in dependent crates.
+pub async fn set_model_turn_schema_marker_present_for_test(db: &Database, present: bool) {
+    db.ensure_initialized().await.unwrap();
+    let changed = if present {
+        sqlx::query(
+            "INSERT INTO model_turn_admission_schema (marker, version) \
+             VALUES ('model_turn_admission_schema', 1) ON CONFLICT (marker) DO NOTHING",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap()
+    } else {
+        sqlx::query(
+            "DELETE FROM model_turn_admission_schema \
+             WHERE marker = 'model_turn_admission_schema'",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap()
+    };
+    assert_eq!(
+        changed.rows_affected(),
+        1,
+        "the model-turn schema marker must actually change presence"
+    );
+}
+
 /// Set a pool phase after fixture setup to exercise a real admission branch.
 pub async fn set_model_turn_phase_fixture(db: &Database, pool_id: i64, phase: &str) {
     sqlx::query("UPDATE model_turn_pools SET phase = $2 WHERE id = $1")

@@ -789,3 +789,27 @@ pub async fn run_dispatch_ready_tasks(
 pub fn dispatched_count(actor: &crate::actor::CoordinatorActor) -> u64 {
     actor.dispatched
 }
+
+/// Open the dispatch breaker for one task, or clear it.
+///
+/// `dispatch_cooldowns` is the exact map `dispatch_ready_tasks` consults
+/// before it looks at anything else about a candidate — the production backoff
+/// path writes it and the ready pass reads it. This forwarder writes the same
+/// entry so an out-of-crate conformance scenario can put a real task behind a
+/// real open breaker without a second cooldown mechanism of its own.
+pub fn set_dispatch_cooldown_for_test(
+    actor: &mut crate::actor::CoordinatorActor,
+    task_id: &str,
+    remaining: Option<std::time::Duration>,
+) {
+    match remaining {
+        Some(remaining) => {
+            actor
+                .dispatch_cooldowns
+                .insert(task_id.to_owned(), std::time::Instant::now() + remaining);
+        }
+        None => {
+            actor.dispatch_cooldowns.remove(task_id);
+        }
+    }
+}
