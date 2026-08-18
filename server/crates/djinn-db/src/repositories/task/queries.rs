@@ -159,6 +159,54 @@ fn infer_expected_role_for_task(task: &impl RoleSignalTask) -> Option<(&'static 
     None
 }
 
+/// The `merged` pseudo-status predicate backing the Kanban "Merged" column.
+///
+/// Routing is by the explicit legacy label plus canonical ownership, never by
+/// `pr_url`: a direct-owned task that somehow carries a PR URL must still be
+/// held to exact applied-ledger evidence for its persisted merge SHA, and fails
+/// closed for prepared, applying, conflict, and unknown states. Everything the
+/// direct arm does not own keeps the pre-existing legacy classification.
+///
+/// Named so [`super::legacy_delivery`] can assert the discriminator it uses.
+pub(super) const MERGED_PSEUDO_STATUS_SQL: &str = r#"status = 'closed' AND (
+                   CASE WHEN (
+                     /* Direct ownership, by the ONE discriminator: the explicit
+                        legacy label, plus a live epoch and a canonical active
+                        build attempt. `pr_url` is nullable and a stray value
+                        must never re-route a direct-owned task back onto the
+                        legacy classification. */
+                     NOT (tasks.labels @> '["direct-delivery-legacy"]'::jsonb)
+                     AND EXISTS (
+                       SELECT 1 FROM direct_delivery_epochs dde
+                       JOIN epics e ON e.id = tasks.epic_id
+                       JOIN proposal_build_attempts pba
+                         ON pba.proposal_id = e.proposal_id AND pba.lifecycle = 'active'
+                       WHERE dde.name = 'direct_delivery_v1' AND dde.state = 'active'
+                     )
+                   ) THEN EXISTS (
+                       SELECT 1 FROM task_deliveries td
+                       JOIN epics e ON e.id = tasks.epic_id
+                       JOIN proposal_build_attempts pba
+                         ON pba.id = td.build_attempt_id
+                        AND pba.proposal_id = e.proposal_id
+                        AND pba.lifecycle = 'active'
+                       WHERE td.task_id = tasks.id
+                         /* The newest immutable generation is authoritative.
+                            A prior applied row cannot prove integration after a
+                            later prepared, applying, conflict, or unknown row. */
+                         AND td.delivery_generation = (
+                           SELECT MAX(latest.delivery_generation) FROM task_deliveries latest
+                            WHERE latest.build_attempt_id = td.build_attempt_id
+                              AND latest.task_id = td.task_id
+                         )
+                         AND td.state = 'applied'
+                         AND td.candidate_sha = tasks.merge_commit_sha
+                   )
+                   ELSE merge_commit_sha IS NOT NULL
+                        OR (pr_url IS NOT NULL AND close_reason = 'completed')
+                   END
+                 )"#;
+
 fn dispatched_role_for_task(task: &BoardHealthMismatchCandidate) -> &'static str {
     match task.status.as_str() {
         "needs_task_review" | "in_task_review" => "reviewer",
@@ -786,52 +834,8 @@ pub(super) fn build_where(
 
     if let Some(s) = status {
         if s == "merged" {
-            // Pseudo-status backing the Kanban "Merged" column. An active
-            // canonical direct owner without a task-PR identity must have exact
-            // applied-ledger evidence for its persisted merge SHA. This fails
-            // closed for prepared, applying, conflict, and unknown states.
-            // Disabled epochs and explicit task-PR identities retain legacy
-            // classification; accidental nullable ledger fields cannot opt in.
-            clauses.push(
-                r#"status = 'closed' AND (
-                   (pr_url IS NOT NULL AND (merge_commit_sha IS NOT NULL OR close_reason = 'completed'))
-                   OR (pr_url IS NULL AND (
-                     (EXISTS (
-                       SELECT 1 FROM direct_delivery_epochs dde
-                       JOIN epics e ON e.id = tasks.epic_id
-                       JOIN proposal_build_attempts pba
-                         ON pba.proposal_id = e.proposal_id AND pba.lifecycle = 'active'
-                       WHERE dde.name = 'direct_delivery_v1' AND dde.state = 'active'
-                     ) AND EXISTS (
-                       SELECT 1 FROM task_deliveries td
-                       JOIN epics e ON e.id = tasks.epic_id
-                       JOIN proposal_build_attempts pba
-                         ON pba.id = td.build_attempt_id
-                        AND pba.proposal_id = e.proposal_id
-                        AND pba.lifecycle = 'active'
-                       WHERE td.task_id = tasks.id
-                         /* The newest immutable generation is authoritative.
-                            A prior applied row cannot prove integration after a
-                            later prepared, applying, conflict, or unknown row. */
-                         AND td.delivery_generation = (
-                           SELECT MAX(latest.delivery_generation) FROM task_deliveries latest
-                            WHERE latest.build_attempt_id = td.build_attempt_id
-                              AND latest.task_id = td.task_id
-                         )
-                         AND td.state = 'applied'
-                         AND td.candidate_sha = tasks.merge_commit_sha
-                     ))
-                     OR (NOT EXISTS (
-                       SELECT 1 FROM direct_delivery_epochs dde
-                       JOIN epics e ON e.id = tasks.epic_id
-                       JOIN proposal_build_attempts pba
-                         ON pba.proposal_id = e.proposal_id AND pba.lifecycle = 'active'
-                       WHERE dde.name = 'direct_delivery_v1' AND dde.state = 'active'
-                     ) AND merge_commit_sha IS NOT NULL)
-                   ))
-                 )"#
-                    .to_owned(),
-            );
+            // Pseudo-status backing the Kanban "Merged" column.
+            clauses.push(MERGED_PSEUDO_STATUS_SQL.to_owned());
         } else if let Some(neg) = s.strip_prefix('!') {
             let ph = format!("${}", param_offset + params.len() + 1);
             clauses.push(format!("status != {ph}"));

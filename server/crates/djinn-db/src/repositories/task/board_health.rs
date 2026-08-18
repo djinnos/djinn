@@ -348,13 +348,9 @@ pub(super) async fn attribution_findings_section(pool: &sqlx::PgPool) -> serde_j
     serde_json::json!({ "total": findings.len(), "findings": findings })
 }
 
-/// Active direct-delivery tasks and their latest immutable-generation state.
-/// Nullable rows cannot opt a task into this section: it requires the active
-/// epoch, canonical epic owner, and active build attempt. `integrated` is only
-/// emitted for the exact applied candidate persisted by `TaskIntegrated`.
-pub(super) async fn direct_delivery_section(pool: &sqlx::PgPool) -> serde_json::Value {
-    let rows = sqlx::query(
-        r#"SELECT t.id, t.short_id, t.status, t.merge_commit_sha,
+/// The additive direct-delivery board section's query. Named so
+/// [`super::legacy_delivery`] can assert the discriminator it routes on.
+pub(super) const DIRECT_DELIVERY_SECTION_SQL: &str = r#"SELECT t.id, t.short_id, t.status, t.merge_commit_sha,
                   pba.id AS build_attempt_id, latest.state, latest.candidate_sha
            FROM tasks t
            JOIN epics e ON e.id = t.epic_id
@@ -367,14 +363,21 @@ pub(super) async fn direct_delivery_section(pool: &sqlx::PgPool) -> serde_json::
            ) latest
            WHERE EXISTS (SELECT 1 FROM direct_delivery_epochs dde
                          WHERE dde.name = 'direct_delivery_v1' AND dde.state = 'active')
-             -- A task-PR identity is explicitly legacy. Do not let an
-             -- accidental ledger row opt it into this additive section.
-             AND t.pr_url IS NULL
-           ORDER BY t.updated_at ASC"#,
-    )
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+             -- Explicitly legacy, by label. NOT by `pr_url`: a stray PR
+             -- URL on a canonically direct-owned task must not hide it from
+             -- the section that reports its ledger state.
+             AND NOT (t.labels @> '["direct-delivery-legacy"]'::jsonb)
+           ORDER BY t.updated_at ASC"#;
+
+/// Active direct-delivery tasks and their latest immutable-generation state.
+/// Nullable rows cannot opt a task into this section: it requires the active
+/// epoch, canonical epic owner, and active build attempt. `integrated` is only
+/// emitted for the exact applied candidate persisted by `TaskIntegrated`.
+pub(super) async fn direct_delivery_section(pool: &sqlx::PgPool) -> serde_json::Value {
+    let rows = sqlx::query(DIRECT_DELIVERY_SECTION_SQL)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
     let findings: Vec<serde_json::Value> = rows
         .into_iter()
         .map(|row| {

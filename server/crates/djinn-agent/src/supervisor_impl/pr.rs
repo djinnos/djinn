@@ -35,6 +35,46 @@ use crate::task_merge::build_app_push_url;
 
 use super::disposition::{LiveMoverEvidence, NudgeHintEvidence, resolve_corrective_nudge_hint};
 
+/// Production talks to github.com through the installation-authenticated
+/// client. The retained legacy pod-worker fixture swaps only the API endpoint,
+/// so the auth mode, the request shapes, and the response classification stay
+/// the production ones.
+fn github_client_for_supervisor_pr_open(installation_id: u64) -> GitHubApiClient {
+    #[cfg(test)]
+    if let Some(base_url) = TEST_GITHUB_BASE_URL_OVERRIDE.lock().unwrap().clone() {
+        return GitHubApiClient::for_installation_with_base_url(installation_id, base_url);
+    }
+    GitHubApiClient::for_installation(installation_id)
+}
+
+#[cfg(test)]
+static TEST_GITHUB_BASE_URL_OVERRIDE: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_github_base_url_override_for_test(base_url: Option<String>) {
+    *TEST_GITHUB_BASE_URL_OVERRIDE.lock().unwrap() = base_url;
+}
+
+/// Production uses the installation-authenticated GitHub URL. The retained
+/// legacy pod-worker fixture swaps only its transport endpoint for a local bare
+/// repository, while exercising the real supervisor push operation.
+fn push_url_for_supervisor_pr_open(owner: &str, repo: &str, token: &str) -> String {
+    #[cfg(test)]
+    if let Some(url) = TEST_PUSH_URL_OVERRIDE.lock().unwrap().clone() {
+        return url;
+    }
+    build_app_push_url(owner, repo, token)
+}
+
+#[cfg(test)]
+static TEST_PUSH_URL_OVERRIDE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_push_url_override_for_test(url: Option<String>) {
+    *TEST_PUSH_URL_OVERRIDE.lock().unwrap() = url;
+}
+
 /// Open (or adopt) a GitHub PR for the completed task-run.
 ///
 /// Returns:
@@ -45,6 +85,65 @@ pub(crate) async fn supervisor_pr_open(
     task: &djinn_core::models::Task,
     callbacks: &SupervisorCallbackContext,
 ) -> TaskRunOutcome {
+    // Gate before every mirror or forge effect.
+    //
+    // This is the pod-worker PR-open body: `state/mod.rs` builds the RPC
+    // `SupervisorServices` from `services_for_agent_context_with_build_lease`,
+    // `djinn-supervisor` calls `open_pr`, and `direct_services.rs` lands here.
+    // Without this gate a canonically direct-owned task got a real GitHub PR
+    // and a persisted `pr_url` — the exact row the ledger SQL then had to
+    // decide about, and the reason `pr_url` was never a safe legacy
+    // discriminator. The decision is the same shared admission the coordinator
+    // dispatch body uses; neither derives routing from a task field.
+    let app_state = &callbacks.agent_context;
+    let gate_task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    match djinn_coordinator::direct_delivery::task_pr_eligibility(app_state.db.clone(), &task.id)
+        .await
+    {
+        Ok(djinn_coordinator::direct_delivery::TaskPrEligibility::LegacyAllowed) => {}
+        Ok(djinn_coordinator::direct_delivery::TaskPrEligibility::DirectDeliveryIneligible {
+            ..
+        }) => {
+            return TaskRunOutcome::Escalated {
+                reason:
+                    "task has an active direct-delivery attempt; task-PR adoption is ineligible"
+                        .into(),
+            };
+        }
+        Ok(
+            eligibility @ (djinn_coordinator::direct_delivery::TaskPrEligibility::NoProposalOwner
+            | djinn_coordinator::direct_delivery::TaskPrEligibility::ContractUnavailable(_)),
+        ) => {
+            if let Err(error) = djinn_coordinator::direct_delivery::park_task_pr_ineligibility(
+                &gate_task_repo,
+                &task.id,
+                &eligibility,
+            )
+            .await
+            {
+                return TaskRunOutcome::Failed {
+                    stage: "pr_open".into(),
+                    provider_failure: None,
+                    reason: format!("failed to durably park task-PR-ineligible task: {error}"),
+                    error_class: None,
+                    hint: None,
+                    body_excerpt: None,
+                };
+            }
+            return TaskRunOutcome::Escalated {
+                reason: "task-PR adoption denied by direct-delivery ownership or contract boundary"
+                    .into(),
+            };
+        }
+        Err(error) => {
+            return TaskRunOutcome::Escalated {
+                reason: format!(
+                    "task-PR adoption denied because direct-delivery admission failed: {error}"
+                ),
+            };
+        }
+    }
+
     if github_app_id().is_err() {
         return TaskRunOutcome::Failed {
             stage: "pr_open".into(),
@@ -149,7 +248,7 @@ pub(crate) async fn supervisor_pr_open(
             };
         }
     };
-    let push_url = build_app_push_url(&owner, &repo_name, &install_token.token);
+    let push_url = push_url_for_supervisor_pr_open(&owner, &repo_name, &install_token.token);
 
     let merge_target = default_target_branch(&spec.project_id, app_state).await;
 
@@ -238,9 +337,13 @@ pub(crate) async fn supervisor_pr_open(
         short_id = task.short_id,
     );
 
-    let github_client = GitHubApiClient::for_installation(installation_id);
+    let github_client = github_client_for_supervisor_pr_open(installation_id);
     let head_ref = format!("{owner}:{}", spec.task_branch);
 
+    // Record only once every prerequisite has succeeded and immediately before
+    // the real provider lookup that opens or adopts the task PR.
+    djinn_coordinator::direct_delivery::observe_boundary_operation("supervisor_pr_open");
+    djinn_coordinator::direct_delivery::observe_boundary_operation("task_pr_lookup");
     let existing_pr = match github_client
         .list_pulls_by_head_with_state(&owner, &repo_name, &head_ref, "all")
         .await
@@ -257,6 +360,7 @@ pub(crate) async fn supervisor_pr_open(
     };
 
     let pr = if let Some(existing) = existing_pr {
+        djinn_coordinator::direct_delivery::observe_boundary_operation("task_pr_adopt");
         if existing.state == PrState::Open {
             existing
         } else {
@@ -271,6 +375,9 @@ pub(crate) async fn supervisor_pr_open(
                         pr_number = existing.number,
                         error = %render_github_write_error("GitHub PR reopen failed", &reopen_err),
                         "supervisor PR-open: failed to reopen closed PR; creating a new one"
+                    );
+                    djinn_coordinator::direct_delivery::observe_boundary_operation(
+                        "task_pr_create",
                     );
                     match github_client
                         .create_pull_request(
@@ -316,6 +423,7 @@ pub(crate) async fn supervisor_pr_open(
             }
         }
     } else {
+        djinn_coordinator::direct_delivery::observe_boundary_operation("task_pr_create");
         match github_client
             .create_pull_request(
                 &owner,
