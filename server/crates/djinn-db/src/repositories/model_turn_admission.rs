@@ -624,6 +624,281 @@ pub enum ModelTurnPhaseTransitionOutcome {
     PoolUnavailable,
 }
 
+// ── Phase D: the per-pool admission-mode writer ────────────────────────────
+
+/// Why a mode changed. A closed vocabulary, mirrored by migration 212's CHECK.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelTurnModeChangeReason {
+    OperatorRequest,
+    CapabilityCoverageLoss,
+    IdentityIneligible,
+    Rollback,
+    /// The last in-flight lease reached a terminal state, so a draining pool
+    /// has nothing left to drain.
+    DrainSettled,
+    /// The leader's guarded enforcement pass advanced the pool.
+    EnforcementAdvance,
+}
+
+impl ModelTurnModeChangeReason {
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::OperatorRequest => "operator_request",
+            Self::CapabilityCoverageLoss => "capability_coverage_loss",
+            Self::IdentityIneligible => "identity_ineligible",
+            Self::Rollback => "rollback",
+            Self::DrainSettled => "drain_settled",
+            Self::EnforcementAdvance => "enforcement_advance",
+        }
+    }
+}
+
+/// Why a requested mode was refused. Bounded; never a free-text diagnostic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelTurnModeChangeRejection {
+    /// `enforce` is reachable only from `shadow`, `draining` only from a pool
+    /// that is actually admitting, and `off` only after a drain. Anything else
+    /// is not an edge of the mode graph.
+    UnsupportedTransition {
+        from: ModelTurnAdmissionPhase,
+        to: ModelTurnAdmissionPhase,
+    },
+    /// `enforce` demands a pool whose compatibility phase actually reached `d`
+    /// through [`ModelTurnAdmissionRepository::request_phase_transition_in_transaction`].
+    /// An uncovered or untrained pool never gets there, so it never enforces.
+    CompatibilityPhaseInsufficient { phase: ModelTurnCompatibilityPhase },
+    /// `enforce` demands a durably eligible identity.
+    IdentityIneligible { state: ModelTurnIdentityState },
+    /// A rollback step ran out of order — see [`ModelTurnRollbackPlanV1`].
+    RollbackOutOfOrder {
+        expected: ModelTurnRollbackStepV1,
+        attempted: ModelTurnRollbackStepV1,
+    },
+}
+
+impl ModelTurnModeChangeRejection {
+    /// The bounded code a caller may log or assert on. It carries no pool,
+    /// credential, account, project, user, request, or lease identifier.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::UnsupportedTransition { .. } => "unsupported_transition",
+            Self::CompatibilityPhaseInsufficient { .. } => "compatibility_phase_insufficient",
+            Self::IdentityIneligible { .. } => "identity_ineligible",
+            Self::RollbackOutOfOrder { .. } => "rollback_out_of_order",
+        }
+    }
+}
+
+/// What one mode write actually did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelTurnModeChangeOutcome {
+    /// The mode moved and exactly one ledger row was appended.
+    Applied {
+        from: ModelTurnAdmissionPhase,
+        to: ModelTurnAdmissionPhase,
+        /// The instant the ledger row recorded, taken **after** the pool row
+        /// was locked. Every lease admitted before this point is older than it.
+        changed_at: String,
+    },
+    /// The pool already stands at the requested mode. No row is appended.
+    Unchanged {
+        mode: ModelTurnAdmissionPhase,
+    },
+    /// A drain that settled to `off` in the same transaction because there was
+    /// nothing in flight to drain. Two ledger rows: the drain and the settle.
+    DrainedAndSettled {
+        changed_at: String,
+    },
+    Rejected(ModelTurnModeChangeRejection),
+    PoolUnavailable,
+}
+
+/// The ordered teardown a Phase-D rollback must follow.
+///
+/// The order is the safety property, not documentation: the durable mode only
+/// goes `off` once the layers that could still originate a turn are gone. The
+/// enum's discriminant order *is* the required order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelTurnRollbackStepV1 {
+    /// Stop the leader-side controller so nothing re-targets the pool.
+    Controller,
+    /// Retire the slot wrappers that can still ask for a turn.
+    SlotWrappers,
+    /// Retire the provider contracts the wrappers were bound to.
+    ProviderContracts,
+    /// Only now may the durable mode go `off`.
+    ModeOff,
+}
+
+impl ModelTurnRollbackStepV1 {
+    /// The one legal sequence. A test pins this literal, so reordering the
+    /// enum or this array is a visible change rather than a silent one.
+    pub const ORDER: [Self; 4] = [
+        Self::Controller,
+        Self::SlotWrappers,
+        Self::ProviderContracts,
+        Self::ModeOff,
+    ];
+}
+
+/// A rollback in progress. Steps may only be completed in
+/// [`ModelTurnRollbackStepV1::ORDER`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ModelTurnRollbackPlanV1 {
+    completed: usize,
+}
+
+impl ModelTurnRollbackPlanV1 {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { completed: 0 }
+    }
+
+    /// The only step this plan will accept next, or `None` when it is done.
+    #[must_use]
+    pub fn next_step(&self) -> Option<ModelTurnRollbackStepV1> {
+        ModelTurnRollbackStepV1::ORDER.get(self.completed).copied()
+    }
+
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.completed == ModelTurnRollbackStepV1::ORDER.len()
+    }
+
+    /// Complete `step`, or refuse it because a prior step is still pending.
+    ///
+    /// # Errors
+    ///
+    /// Returns the expected/attempted pair when `step` is not the next step.
+    pub fn complete(
+        &mut self,
+        step: ModelTurnRollbackStepV1,
+    ) -> std::result::Result<(), ModelTurnModeChangeRejection> {
+        match self.next_step() {
+            Some(expected) if expected == step => {
+                self.completed += 1;
+                Ok(())
+            }
+            Some(expected) => Err(ModelTurnModeChangeRejection::RollbackOutOfOrder {
+                expected,
+                attempted: step,
+            }),
+            None => Err(ModelTurnModeChangeRejection::RollbackOutOfOrder {
+                expected: ModelTurnRollbackStepV1::ModeOff,
+                attempted: step,
+            }),
+        }
+    }
+}
+
+/// A requested change to one pool's admission mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelTurnModeChangeInput {
+    pub pool_id: i64,
+    pub target_mode: ModelTurnAdmissionPhase,
+    pub reason: ModelTurnModeChangeReason,
+    pub controller_generation: i64,
+}
+
+/// The pool state one mode write locked and read.
+struct LockedPoolModeState {
+    phase: String,
+    identity_state: String,
+    compatibility_phase: String,
+    in_flight: i64,
+}
+
+/// Every edge of the admission-mode graph. Notice the absent one: there is no
+/// `enforce → off`, so an enforcing pool always passes through `draining`.
+const fn mode_edge_allowed(from: ModelTurnAdmissionPhase, to: ModelTurnAdmissionPhase) -> bool {
+    use ModelTurnAdmissionPhase::{Draining, Enforce, Off, Shadow};
+    matches!(
+        (from, to),
+        (Off, Shadow)
+            | (Shadow, Enforce)
+            | (Shadow, Draining)
+            | (Enforce, Draining)
+            | (Shadow, Off)
+            | (Draining, Off)
+    )
+}
+
+/// Take the canonical admission locks: the pool row first, then its bucket
+/// bindings ordered by `bucket_kind` — exactly `acquire_turn`'s order.
+async fn lock_pool_for_mode_change(
+    tx: &mut Transaction<'_, Postgres>,
+    pool_id: i64,
+) -> Result<Option<LockedPoolModeState>> {
+    let pool: Option<(String, String, String, i64)> = sqlx::query_as(
+        "SELECT phase, identity_state, compatibility_phase, in_flight \
+         FROM model_turn_pools WHERE id = $1 FOR UPDATE",
+    )
+    .bind(pool_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((phase, identity_state, compatibility_phase, in_flight)) = pool else {
+        return Ok(None);
+    };
+    // The second lock class, in the same documented order acquisition uses.
+    let _: Vec<(String,)> = sqlx::query_as(
+        "SELECT bucket_kind FROM model_turn_bucket_bindings \
+         WHERE pool_id = $1 ORDER BY bucket_kind FOR UPDATE",
+    )
+    .bind(pool_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(Some(LockedPoolModeState {
+        phase,
+        identity_state,
+        compatibility_phase,
+        in_flight,
+    }))
+}
+
+/// Move the mode and append its ledger row inside an already-locked
+/// transaction. Returns the instant the row recorded.
+async fn apply_mode_change(
+    tx: &mut Transaction<'_, Postgres>,
+    pool_id: i64,
+    from: ModelTurnAdmissionPhase,
+    to: ModelTurnAdmissionPhase,
+    reason: ModelTurnModeChangeReason,
+    controller_generation: i64,
+) -> Result<String> {
+    let moved = sqlx::query(
+        "UPDATE model_turn_pools SET phase = $2, updated_at = now() \
+         WHERE id = $1 AND phase = $3",
+    )
+    .bind(pool_id)
+    .bind(phase_name(to))
+    .bind(phase_name(from))
+    .execute(&mut **tx)
+    .await?;
+    if moved.rows_affected() != 1 {
+        return Err(crate::Error::InvalidData(
+            "model-turn pool mode moved under the writer".to_owned(),
+        ));
+    }
+    sqlx::query_scalar(
+        "INSERT INTO model_turn_pool_mode_transitions \
+         (pool_id, from_mode, to_mode, reason, controller_generation) \
+         VALUES ($1, $2, $3, $4, $5) \
+         RETURNING to_char(changed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
+    )
+    .bind(pool_id)
+    .bind(phase_name(from))
+    .bind(phase_name(to))
+    .bind(reason.code())
+    .bind(controller_generation)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(Into::into)
+}
+
 /// Durable repository surface for the additive v1 schema.
 #[derive(Clone)]
 pub struct ModelTurnAdmissionRepository {
@@ -975,6 +1250,266 @@ impl ModelTurnAdmissionRepository {
         .await?;
         tx.commit().await?;
         Ok(drained.into_iter().map(|(id,)| id).collect())
+    }
+
+    /// Move one pool's admission **mode**, appending exactly one ledger row.
+    ///
+    /// This is the first production writer of `model_turn_pools.phase`; before
+    /// Phase D only test fixtures wrote it. The canonical admission locks are
+    /// taken first — the pool row, then its bucket bindings ordered by
+    /// `bucket_kind`, exactly [`Self::acquire_turn`]'s order — so a concurrent
+    /// acquisition serializes behind this write instead of racing it.
+    ///
+    /// The mode graph is deliberately narrow:
+    ///
+    /// * `off → shadow`
+    /// * `shadow → enforce` — only for a pool whose compatibility phase
+    ///   actually reached `d` and whose identity is eligible
+    /// * `shadow → draining`, `enforce → draining`
+    /// * `shadow → off`, `draining → off`
+    ///
+    /// There is no `enforce → off` edge. An enforcing pool must pass through
+    /// `draining`, which is what makes "drained before the next acquisition"
+    /// a property of the storage rather than of caller discipline.
+    pub async fn set_pool_mode_in_transaction(
+        &self,
+        input: ModelTurnModeChangeInput,
+    ) -> Result<ModelTurnModeChangeOutcome> {
+        self.db.ensure_initialized().await?;
+        if input.pool_id <= 0 || input.controller_generation <= 0 {
+            return Err(crate::Error::InvalidData(
+                "invalid model-turn mode change".to_owned(),
+            ));
+        }
+        for attempt in 0..3 {
+            match self.set_pool_mode_once(&input).await {
+                Err(error) if attempt < 2 && is_serialization_failure(&error) => continue,
+                result => return result,
+            }
+        }
+        unreachable!("the bounded retry loop returns on its final iteration")
+    }
+
+    async fn set_pool_mode_once(
+        &self,
+        input: &ModelTurnModeChangeInput,
+    ) -> Result<ModelTurnModeChangeOutcome> {
+        let mut tx = self.db.pool().begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut *tx)
+            .await?;
+        let Some(locked) = lock_pool_for_mode_change(&mut tx, input.pool_id).await? else {
+            tx.commit().await?;
+            return Ok(ModelTurnModeChangeOutcome::PoolUnavailable);
+        };
+        let from = parse_phase(&locked.phase)?;
+        if from == input.target_mode {
+            tx.commit().await?;
+            return Ok(ModelTurnModeChangeOutcome::Unchanged { mode: from });
+        }
+        if !mode_edge_allowed(from, input.target_mode) {
+            tx.commit().await?;
+            return Ok(ModelTurnModeChangeOutcome::Rejected(
+                ModelTurnModeChangeRejection::UnsupportedTransition {
+                    from,
+                    to: input.target_mode,
+                },
+            ));
+        }
+        if input.target_mode == ModelTurnAdmissionPhase::Enforce {
+            let compatibility_phase = parse_compatibility_phase(&locked.compatibility_phase)?;
+            if compatibility_phase != ModelTurnCompatibilityPhase::D {
+                tx.commit().await?;
+                return Ok(ModelTurnModeChangeOutcome::Rejected(
+                    ModelTurnModeChangeRejection::CompatibilityPhaseInsufficient {
+                        phase: compatibility_phase,
+                    },
+                ));
+            }
+            let identity_state = parse_identity(&locked.identity_state)?;
+            if identity_state != ModelTurnIdentityState::Eligible {
+                tx.commit().await?;
+                return Ok(ModelTurnModeChangeOutcome::Rejected(
+                    ModelTurnModeChangeRejection::IdentityIneligible {
+                        state: identity_state,
+                    },
+                ));
+            }
+        }
+        let changed_at = apply_mode_change(
+            &mut tx,
+            input.pool_id,
+            from,
+            input.target_mode,
+            input.reason,
+            input.controller_generation,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(ModelTurnModeChangeOutcome::Applied {
+            from,
+            to: input.target_mode,
+            changed_at,
+        })
+    }
+
+    /// Stop admitting on one pool, and settle it to `off` immediately when
+    /// there is nothing in flight left to drain.
+    ///
+    /// A drain on an already-`off` pool is a no-op: no mode change, no ledger
+    /// row. Everything else runs under the same canonical locks as
+    /// [`Self::set_pool_mode_in_transaction`], so once this commits no later
+    /// acquisition can commit an `Admitted` outcome against the old mode.
+    pub async fn drain_pool_in_transaction(
+        &self,
+        pool_id: i64,
+        controller_generation: i64,
+        reason: ModelTurnModeChangeReason,
+    ) -> Result<ModelTurnModeChangeOutcome> {
+        self.db.ensure_initialized().await?;
+        if pool_id <= 0 || controller_generation <= 0 {
+            return Err(crate::Error::InvalidData(
+                "invalid model-turn drain".to_owned(),
+            ));
+        }
+        for attempt in 0..3 {
+            match self
+                .drain_pool_once(pool_id, controller_generation, reason)
+                .await
+            {
+                Err(error) if attempt < 2 && is_serialization_failure(&error) => continue,
+                result => return result,
+            }
+        }
+        unreachable!("the bounded retry loop returns on its final iteration")
+    }
+
+    async fn drain_pool_once(
+        &self,
+        pool_id: i64,
+        controller_generation: i64,
+        reason: ModelTurnModeChangeReason,
+    ) -> Result<ModelTurnModeChangeOutcome> {
+        let mut tx = self.db.pool().begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut *tx)
+            .await?;
+        let Some(locked) = lock_pool_for_mode_change(&mut tx, pool_id).await? else {
+            tx.commit().await?;
+            return Ok(ModelTurnModeChangeOutcome::PoolUnavailable);
+        };
+        let from = parse_phase(&locked.phase)?;
+        if matches!(
+            from,
+            ModelTurnAdmissionPhase::Off | ModelTurnAdmissionPhase::Draining
+        ) {
+            tx.commit().await?;
+            return Ok(ModelTurnModeChangeOutcome::Unchanged { mode: from });
+        }
+        let changed_at = apply_mode_change(
+            &mut tx,
+            pool_id,
+            from,
+            ModelTurnAdmissionPhase::Draining,
+            reason,
+            controller_generation,
+        )
+        .await?;
+        // Nothing in flight means nothing to drain: the pool has already
+        // reached the state the drain exists to wait for.
+        if locked.in_flight == 0 {
+            let settled = apply_mode_change(
+                &mut tx,
+                pool_id,
+                ModelTurnAdmissionPhase::Draining,
+                ModelTurnAdmissionPhase::Off,
+                ModelTurnModeChangeReason::DrainSettled,
+                controller_generation,
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(ModelTurnModeChangeOutcome::DrainedAndSettled {
+                changed_at: settled,
+            });
+        }
+        tx.commit().await?;
+        Ok(ModelTurnModeChangeOutcome::Applied {
+            from,
+            to: ModelTurnAdmissionPhase::Draining,
+            changed_at,
+        })
+    }
+
+    /// Take the final rollback step: move the durable mode to `off`.
+    ///
+    /// The plan is the gate. Attempting this while any earlier step is still
+    /// pending is refused **and mutates nothing**, so the durable mode cannot
+    /// go `off` while a slot wrapper or provider contract could still
+    /// originate a turn against it.
+    pub async fn roll_back_pool_to_off_in_transaction(
+        &self,
+        plan: &mut ModelTurnRollbackPlanV1,
+        pool_id: i64,
+        controller_generation: i64,
+    ) -> Result<ModelTurnModeChangeOutcome> {
+        if plan.next_step() != Some(ModelTurnRollbackStepV1::ModeOff) {
+            return Ok(ModelTurnModeChangeOutcome::Rejected(
+                ModelTurnModeChangeRejection::RollbackOutOfOrder {
+                    expected: plan.next_step().unwrap_or(ModelTurnRollbackStepV1::ModeOff),
+                    attempted: ModelTurnRollbackStepV1::ModeOff,
+                },
+            ));
+        }
+        let outcome = self
+            .set_pool_mode_in_transaction(ModelTurnModeChangeInput {
+                pool_id,
+                target_mode: ModelTurnAdmissionPhase::Off,
+                reason: ModelTurnModeChangeReason::Rollback,
+                controller_generation,
+            })
+            .await?;
+        if matches!(
+            outcome,
+            ModelTurnModeChangeOutcome::Applied { .. }
+                | ModelTurnModeChangeOutcome::Unchanged {
+                    mode: ModelTurnAdmissionPhase::Off
+                }
+        ) {
+            plan.complete(ModelTurnRollbackStepV1::ModeOff)
+                .map_err(|_| crate::Error::InvalidData("rollback step out of order".to_owned()))?;
+        }
+        Ok(outcome)
+    }
+
+    /// Read the durable mode-change ledger for one pool, oldest first.
+    pub async fn pool_mode_transitions(
+        &self,
+        pool_id: i64,
+        limit: i64,
+    ) -> Result<
+        Vec<(
+            ModelTurnAdmissionPhase,
+            ModelTurnAdmissionPhase,
+            String,
+            String,
+        )>,
+    > {
+        self.db.ensure_initialized().await?;
+        let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT from_mode, to_mode, reason, \
+                    to_char(changed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') \
+             FROM model_turn_pool_mode_transitions WHERE pool_id = $1 \
+             ORDER BY changed_at ASC, id ASC LIMIT $2",
+        )
+        .bind(pool_id)
+        .bind(limit.clamp(1, 256))
+        .fetch_all(self.db.pool())
+        .await?;
+        rows.into_iter()
+            .map(|(from, to, reason, changed_at)| {
+                Ok((parse_phase(&from)?, parse_phase(&to)?, reason, changed_at))
+            })
+            .collect()
     }
 
     /// Evaluate every A→B→C→D prerequisite and, only if all of them hold,
@@ -1541,8 +2076,15 @@ impl ModelTurnAdmissionRepository {
         sqlx::query("INSERT INTO model_turn_lease_terminals (lease_id, generation, request_id, outcome, accounting_state) VALUES ($1::uuid, $2, $3, 'expired', $4)")
             .bind(&input.identity.lease_id).bind(input.identity.generation).bind(&input.identity.request_id).bind(if unsent { "refunded" } else { "quarantined" }).execute(&mut *tx).await?;
         sqlx::query("UPDATE model_turn_reservations SET state = 'expired', terminal_at = $2::timestamptz WHERE id = $1::uuid").bind(&reservation_id).bind(&input.boundary_at).execute(&mut *tx).await?;
-        self.release_accounting(&mut tx, pool_id, &reservation_id, unsent, None)
-            .await?;
+        self.release_accounting(
+            &mut tx,
+            pool_id,
+            &reservation_id,
+            unsent,
+            None,
+            input.identity.generation,
+        )
+        .await?;
         tx.commit().await?;
         Ok(ModelTurnLeaseMutationOutcome::Applied)
     }
@@ -1655,6 +2197,7 @@ impl ModelTurnAdmissionRepository {
             &reservation_id,
             unsent,
             input.authoritative_usage.as_ref(),
+            input.identity.generation,
         )
         .await?;
         tx.commit().await?;
@@ -1832,7 +2375,12 @@ impl ModelTurnAdmissionRepository {
             sqlx::query("INSERT INTO model_turn_reservation_buckets (reservation_id, pool_id, bucket_kind, reserved_units) VALUES ($1::uuid, $2, $3, $4)")
                 .bind(&reservation_id).bind(input.pool_id).bind(bucket_kind_name(*kind)).bind(*units).execute(&mut *tx).await?;
         }
-        sqlx::query("INSERT INTO model_turn_leases (lease_id, generation, pool_id, reservation_id, request_id, owner_pod_uid) VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6)")
+        // `clock_timestamp()`, not the `now()` default: `reserved_at` must be the
+        // instant the lease row was actually created, not the instant this
+        // transaction opened. A drain records its own instant the same way, so
+        // "no lease was created after the drain committed" is a real comparison
+        // between two real instants rather than between two transaction starts.
+        sqlx::query("INSERT INTO model_turn_leases (lease_id, generation, pool_id, reservation_id, request_id, owner_pod_uid, reserved_at) VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6, clock_timestamp())")
             .bind(&lease_identity.lease_id).bind(lease_identity.generation).bind(input.pool_id).bind(&reservation_id).bind(&input.request_id).bind(&input.owner_pod_uid).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(ModelTurnAcquireOutcome::Admitted {
@@ -1888,6 +2436,7 @@ impl ModelTurnAdmissionRepository {
         reservation_id: &str,
         unsent: bool,
         usage: Option<&ModelTurnAuthoritativeUsage>,
+        generation: i64,
     ) -> Result<()> {
         sqlx::query("UPDATE model_turn_pools SET in_flight = GREATEST(0, in_flight - 1), updated_at = now() WHERE id = $1").bind(pool_id).execute(&mut **tx).await?;
         let buckets: Vec<(String, i64)> = sqlx::query_as("SELECT bucket_kind, reserved_units FROM model_turn_reservation_buckets WHERE reservation_id = $1::uuid ORDER BY bucket_kind FOR UPDATE").bind(reservation_id).fetch_all(&mut **tx).await?;
@@ -1900,6 +2449,10 @@ impl ModelTurnAdmissionRepository {
                 sqlx::query("UPDATE model_turn_bucket_bindings SET quarantined_units = quarantined_units + $3, updated_at = now() WHERE pool_id = $1 AND bucket_kind = $2").bind(pool_id).bind(&kind).bind(reserved).execute(&mut **tx).await?;
             }
         }
+        // The pool reaches `off` as a consequence of the *last* in-flight
+        // lease reaching a terminal state, in that lease's own transaction —
+        // not because a later pass noticed and decided it should have.
+        settle_drained_pool(tx, pool_id, generation).await?;
         Ok(())
     }
 
@@ -2155,6 +2708,46 @@ fn canonical_debits(debits: &[ModelTurnBucketDebit]) -> Result<BTreeMap<ModelTur
 
 fn commit_outcome(outcome: ModelTurnAcquireOutcome) -> Result<ModelTurnAcquireOutcome> {
     Ok(outcome)
+}
+
+/// Settle a draining pool to `off` the moment its last lease terminalizes.
+///
+/// The guard is the durable counter, not a caller's belief: the update only
+/// matches a pool that is still `draining` and now has `in_flight = 0`.
+async fn settle_drained_pool(
+    tx: &mut Transaction<'_, Postgres>,
+    pool_id: i64,
+    generation: i64,
+) -> Result<()> {
+    let settled = sqlx::query(
+        "UPDATE model_turn_pools SET phase = 'off', updated_at = now() \
+         WHERE id = $1 AND phase = 'draining' AND in_flight = 0",
+    )
+    .bind(pool_id)
+    .execute(&mut **tx)
+    .await?;
+    if settled.rows_affected() == 1 {
+        sqlx::query(
+            "INSERT INTO model_turn_pool_mode_transitions \
+             (pool_id, from_mode, to_mode, reason, controller_generation) \
+             VALUES ($1, 'draining', 'off', 'drain_settled', $2)",
+        )
+        .bind(pool_id)
+        .bind(generation.max(1))
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+/// The persisted spelling of one admission mode.
+const fn phase_name(phase: ModelTurnAdmissionPhase) -> &'static str {
+    match phase {
+        ModelTurnAdmissionPhase::Off => "off",
+        ModelTurnAdmissionPhase::Shadow => "shadow",
+        ModelTurnAdmissionPhase::Draining => "draining",
+        ModelTurnAdmissionPhase::Enforce => "enforce",
+    }
 }
 
 fn parse_phase(value: &str) -> Result<ModelTurnAdmissionPhase> {
