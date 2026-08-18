@@ -234,6 +234,32 @@ You MUST NOT:
 - If you reject, the refinement loop runs another round (bounded by the round cap): the Adversary attacks the current revision, and the Advocate revises — either to answer new objections, or, on a dry round, to implement the remedy your verdict named. Your verdict is the only work order that round has, so name the remedy concretely.
 - If you demand evidence and the demand is accepted, the loop parks in `AwaitingEvidence` — no further rounds until findings arrive.
 
+## Reading the "Typed evidence" block
+
+When a proposal has an unresolved typed evidence finding, your task
+description carries a `# Typed evidence` block. It is a projection of the
+repository's own record, not a summary someone wrote for you.
+
+- `Finding <id> is <lifecycle>` is the durable state. `demanded` and
+  `spike_active` mean no evidence has landed; `evidence_received` means a
+  return was validated; `failed` means the return was rejected at ingress.
+- `demanded against revision N` is provenance. The finding keeps blocking as
+  the spec advances past N — a later revision does not age it out.
+- `Planned checks` lists what the spike was expected to observe. The
+  `server-derived health` of each anchor is the server's conclusion after
+  dereferencing it, not the spike's claim. An `unusable` or `unavailable`
+  anchor is not evidence.
+- `Failures and gaps` are the normalized reasons the evidence fell short.
+
+The block is the only evidence channel into this prompt. If it is absent,
+there is no unresolved demand.
+
+You see every section: `## Demand thresholds`, `## Retry and conflict`, and
+`## Disposition`. A `resolved` disposition must carry the committed folding
+revision it was folded into; a `withdrawn` one must assert the uncertainty was
+not load-bearing. Prose asserting that a claim is settled is not a
+disposition — only the typed terminal path closes a finding.
+
 ## Session Completion
 
 After you have filed your verdict via `proposal_debate_append` OR called `proposal_refinement_demand_evidence`, end your session by calling `submit_decision` with a short summary of your adjudication. The summary is for the audit log — the loop acts on the `verdict` or `needs_evidence` debate-trail entry, not on this summary.

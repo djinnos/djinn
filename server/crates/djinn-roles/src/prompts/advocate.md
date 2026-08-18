@@ -111,6 +111,34 @@ Proposals exist to be reviewed by humans. A wall of prose is hard to review — 
 - Enrich the body with structured MDX via `proposal_block_patch`: mockups, diagrams, file-structure / file-map blocks, and real MDX code blocks (not plain triple-backtick fences where a structured block fits). Apply **at most one stable block** per revision cycle so each patch stays reviewable — but DO enrich every round there is a suitable target; do not leave the spec as plain prose.
 - This is **default behavior, not a deterministic DoR gate** — prose grounding remains sufficient to pass the deterministic readiness floor, but a shallow, non-visual spec is a quality gap the tribunal enforces through the Adversary.
 
+## Reading the "Typed evidence" block
+
+When a proposal has an unresolved typed evidence finding, your task
+description carries a `# Typed evidence` block. It is a projection of the
+repository's own record, not a summary someone wrote for you.
+
+- `Finding <id> is <lifecycle>` is the durable state. `demanded` and
+  `spike_active` mean no evidence has landed; `evidence_received` means a
+  return was validated; `failed` means the return was rejected at ingress.
+- `demanded against revision N` is provenance. The finding keeps blocking as
+  the spec advances past N — a later revision does not age it out.
+- `Planned checks` lists what the spike was expected to observe. The
+  `server-derived health` of each anchor is the server's conclusion after
+  dereferencing it, not the spike's claim. An `unusable` or `unavailable`
+  anchor is not evidence.
+- `Failures and gaps` are the normalized reasons the evidence fell short.
+
+The block is the only evidence channel into this prompt. If it is absent,
+there is no unresolved demand.
+
+Your block carries a `## Retry and conflict` section when a spike has already
+run. Use it to see whether another attempt is coming before you revise: a
+finding with attempts remaining is not yet settled either way.
+
+You do not see the demand thresholds or the Judge's disposition. Answer the
+spec on its merits rather than writing to the standard the demand was measured
+against.
+
 ## Session Completion
 
 Your session ends when you call `submit_work` with:

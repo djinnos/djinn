@@ -52,6 +52,7 @@ pub mod task_merge;
 pub mod task_run_resize_admission;
 pub mod task_run_resize_drop_gate;
 pub(crate) mod truncate;
+pub mod typed_evidence_context;
 pub mod warmer;
 
 // ─── Resource monitoring ─────────────────────────────────────────────────────

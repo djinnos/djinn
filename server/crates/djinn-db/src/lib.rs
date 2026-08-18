@@ -463,7 +463,9 @@ pub use repositories::{
         TypedEvidenceDispositionProjection, TypedEvidenceFindingProjection,
         TypedEvidenceLifecycleProjection, TypedEvidenceParityMismatchReason,
         TypedEvidenceParityProbe, TypedEvidenceRepository, TypedEvidenceRetryDispatchErrorInput,
-        UnresolvedTypedEvidenceProjection, legacy_demand_hash, normalized_demand_hash,
+        UnresolvedTypedEvidenceAttempt, UnresolvedTypedEvidenceCheck,
+        UnresolvedTypedEvidenceContext, UnresolvedTypedEvidenceProjection, legacy_demand_hash,
+        normalized_demand_hash,
     },
     usage_analytics::{
         EntityBreakdownRow, GroupDimension, ModelEffectivenessRow, ProjectModelMatrixRow,

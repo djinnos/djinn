@@ -424,6 +424,91 @@ mod typed_evidence_unresolved_projection {
         assert_eq!(after.demanded_revision_seq, 1);
     }
 
+    /// The context projection carries real attempt, planned-check, anchor, and
+    /// gap detail — not empty arrays beside a populated finding.
+    ///
+    /// The role prompts render exactly these fields, so an always-empty
+    /// projection would produce a block that says nothing while every other
+    /// assertion still passed.
+    #[tokio::test]
+    async fn unresolved_context_carries_attempt_check_and_gap_detail() {
+        let fixture = Fixture::new().await;
+        let (finding_id, _) = fixture
+            .evidence_received(CanonicalTypedEvidenceReturnOutcomeForTest::Partial)
+            .await;
+        let context = fixture
+            .typed()
+            .unresolved_context(&fixture.proposal_id)
+            .await
+            .unwrap()
+            .expect("an unresolved finding must project a context");
+
+        assert_eq!(context.finding.finding_id, finding_id);
+        assert_eq!(
+            context.attempts.len(),
+            1,
+            "the single spike attempt must be projected: {:?}",
+            context.attempts
+        );
+        assert_eq!(context.attempts[0].sequence, 1);
+        assert_eq!(
+            context.attempts[0].spike_task_id, fixture.spike_task_id,
+            "the attempt must name the real spike task"
+        );
+        assert_eq!(context.attempts[0].outcome.as_deref(), Some("partial"));
+
+        // A partial return plans two checks: one passing command observation
+        // with a healthy anchor, and one failing code check.
+        assert_eq!(
+            context.planned_checks.len(),
+            2,
+            "both planned checks must be projected: {:?}",
+            context.planned_checks
+        );
+        let command = context
+            .planned_checks
+            .iter()
+            .find(|check| check.method == "command")
+            .expect("the command check is planned");
+        assert_eq!(command.status.as_deref(), Some("passed"));
+        assert_eq!(
+            command.anchor_health.as_deref(),
+            Some("healthy"),
+            "server-derived anchor health must be projected"
+        );
+        assert!(
+            command
+                .anchor_locator
+                .as_deref()
+                .is_some_and(|locator| locator.starts_with("command:")),
+            "immutable anchor provenance must be projected: {command:?}"
+        );
+
+        assert!(
+            context
+                .gaps
+                .iter()
+                .any(|gap| gap.contains("canonical partial failure")),
+            "the normalized failure must be projected: {:?}",
+            context.gaps
+        );
+    }
+
+    /// A proposal with no unresolved finding projects no context at all, so a
+    /// caller injecting a prompt block gets "no block" rather than an empty one.
+    #[tokio::test]
+    async fn unresolved_context_is_absent_without_a_finding() {
+        let fixture = Fixture::new().await;
+        assert_eq!(
+            fixture
+                .typed()
+                .unresolved_context(&fixture.proposal_id)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn parity_probe_agrees_with_matching_authority() {
         let fixture = Fixture::new().await;
