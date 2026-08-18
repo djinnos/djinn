@@ -1575,3 +1575,194 @@ async fn every_typed_terminal_outcome_persists_once_on_its_exact_run() {
         );
     }
 }
+
+// ── Typed evidence role context (task tlyl) ──────────────────────────────
+
+/// Raise a real typed demand on the fixture's proposal and return the finding.
+///
+/// The demand is written by the production writer
+/// `set_structured_needs_evidence_spike`, so the block the coordinator renders
+/// is a projection of authority the repository actually holds.
+async fn demand_typed_evidence_for_outcome_fixture(f: &DurableOutcomeFixture) -> String {
+    let project_id = ProposalRepository::new(f.db.clone(), EventBus::noop())
+        .targets(&f.fixture.proposal_id)
+        .await
+        .expect("read outcome proposal targets")
+        .first()
+        .expect("outcome proposal has a target")
+        .project_id
+        .clone();
+    let spike_task_id = djinn_db::test_support::seed_task_row(
+        &f.db,
+        djinn_db::test_support::UsageTestTaskSeed {
+            project_id: &project_id,
+            status: "open",
+            close_reason: None,
+            total_reopen_count: 0,
+        },
+    )
+    .await;
+    let repo = ProposalRepository::new(f.db.clone(), EventBus::noop());
+    repo.set_structured_needs_evidence_spike(
+        &f.fixture.proposal_id,
+        &spike_task_id,
+        &djinn_core::models::NeedsEvidenceClaim {
+            question: "Can the launcher share a cgroup across pods?".into(),
+            target_subsystem: "launcher".into(),
+            spec_unknown_anchor: "cgroup delegation".into(),
+            insufficient_in_session_research: "needs a live kernel probe".into(),
+            expected_findings: "a delegated cgroup or a kernel refusal".into(),
+            created_by_task_id: spike_task_id.clone(),
+            round: 1,
+            against_revision_seq: 1,
+        },
+    )
+    .await
+    .expect("raise a typed evidence demand");
+    djinn_db::TypedEvidenceRepository::new(f.db.clone())
+        .unresolved_projection(&f.fixture.proposal_id)
+        .await
+        .expect("project the demand")
+        .expect("the demand is unresolved")
+        .finding_id
+}
+
+/// Create one refinement task for `role` and return its persisted description.
+async fn refinement_task_description(f: &DurableOutcomeFixture, role: &str) -> String {
+    let repo = ProposalRepository::new(f.db.clone(), EventBus::noop());
+    let head = repo
+        .get(&f.fixture.proposal_id)
+        .await
+        .expect("load proposal")
+        .expect("proposal exists")
+        .latest_revision_seq;
+    let task_id = f
+        .actor
+        .create_refinement_task_with_context_and_correlation(
+            &f.fixture.proposal_id,
+            role,
+            1,
+            head,
+            "typed evidence role context",
+            None,
+            Some(&f.fixture.user_id),
+            None,
+        )
+        .await
+        .expect("create uncorrelated refinement task");
+    TaskRepository::new(f.db.clone(), EventBus::noop())
+        .get(&task_id)
+        .await
+        .expect("load created task")
+        .expect("created task exists")
+        .description
+}
+
+/// AC4 — Adversary and Judge descriptions carry the rendered typed block for a
+/// proposal with an unresolved finding, and carry none when there is none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_evidence_role_context_reaches_every_tribunal_role() {
+    let f = durable_outcome_fixture().await;
+
+    // No finding yet: no block, for any role. This is the control — without it
+    // the assertions below could pass on a block that is always injected.
+    for role in ["adversary", "advocate", "judge"] {
+        let description = refinement_task_description(&f, role).await;
+        assert!(
+            !description.contains("# Typed evidence"),
+            "{role} must carry no typed block with no finding: {description}"
+        );
+    }
+
+    let finding_id = demand_typed_evidence_for_outcome_fixture(&f).await;
+
+    for role in ["adversary", "advocate", "judge"] {
+        let description = refinement_task_description(&f, role).await;
+        assert!(
+            description.contains("# Typed evidence"),
+            "{role} must carry the typed block: {description}"
+        );
+        assert!(
+            description.contains(&finding_id),
+            "{role} block must name the finding: {description}"
+        );
+        assert!(
+            description.contains("Can the launcher share a cgroup across pods?"),
+            "{role} block must carry the claim as one question: {description}"
+        );
+        assert!(
+            description.contains("demanded against revision 1"),
+            "{role} block must carry the originating revision: {description}"
+        );
+    }
+
+    // Role scoping survives the coordinator, not just the renderer: the demand
+    // surface reaches the Adversary and the Judge, never the Advocate.
+    let advocate = refinement_task_description(&f, "advocate").await;
+    let adversary = refinement_task_description(&f, "adversary").await;
+    let judge = refinement_task_description(&f, "judge").await;
+    assert!(
+        !advocate.contains(djinn_roles::typed_evidence_context::DISPOSITION_SECTION),
+        "the Advocate must not receive the disposition surface: {advocate}"
+    );
+    assert!(
+        !adversary.contains(djinn_roles::typed_evidence_context::RETRY_SECTION),
+        "the Adversary must not receive the retry surface: {adversary}"
+    );
+    assert_ne!(
+        advocate, judge,
+        "role scoping must produce different descriptions"
+    );
+
+    // A non-tribunal role gets no block at all.
+    let worker = refinement_task_description(&f, "worker").await;
+    assert!(
+        !worker.contains("# Typed evidence"),
+        "a non-tribunal role must carry no typed block: {worker}"
+    );
+}
+
+/// AC5 — the legacy raw-`body_metadata` dump is gone. An `evidence_findings`
+/// debate row no longer reaches any prompt; only the typed projection does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_evidence_findings_debate_row_no_longer_reaches_a_prompt() {
+    let f = durable_outcome_fixture().await;
+    let repo = ProposalRepository::new(f.db.clone(), EventBus::noop());
+    let metadata = serde_json::json!({
+        "answer": "legacy blob that must not be dumped into a prompt",
+        "evidence": ["legacy blob that must not be dumped into a prompt"],
+        "code_paths_inspected": [],
+        "confidence": 0.0,
+        "residual_risks": ["Structured V1 projection is authoritative."],
+        "recommendation_for_advocate": "legacy blob that must not be dumped into a prompt",
+    });
+    repo.add_debate_trail_entry(djinn_db::ProposalDebateTrailCreateInput {
+        proposal_id: &f.fixture.proposal_id,
+        kind: "evidence_findings",
+        body: "legacy findings body",
+        blocking: false,
+        agent_role: "spike",
+        author_kind: "agent",
+        author_model: None,
+        source_task_id: None,
+        against_revision_seq: 1,
+        round: 1,
+        body_metadata: Some(&metadata),
+    })
+    .await
+    .expect("write a legacy evidence_findings row");
+
+    let advocate = refinement_task_description(&f, "advocate").await;
+    assert!(
+        !advocate.contains("legacy blob that must not be dumped into a prompt"),
+        "the raw body_metadata dump must be gone: {advocate}"
+    );
+    assert!(
+        !advocate.contains("Structured findings metadata:"),
+        "the legacy metadata section must be gone: {advocate}"
+    );
+    assert!(
+        !advocate.contains("# Typed evidence"),
+        "a legacy debate row must not fabricate a typed block: {advocate}"
+    );
+}

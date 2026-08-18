@@ -254,6 +254,46 @@ pub struct UnresolvedTypedEvidenceProjection {
     pub failure_detail: Option<String>,
 }
 
+/// One planned check of the unresolved finding's latest attempt, with the
+/// server-derived health of its immutable anchor once a return has landed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnresolvedTypedEvidenceCheck {
+    pub check_id: String,
+    /// `code`, `graph`, or `command`.
+    pub method: String,
+    /// `passed`, `failed`, `not_run`, or `None` before the return.
+    pub status: Option<String>,
+    /// Immutable provenance for the observation.
+    pub anchor_locator: Option<String>,
+    /// `healthy`, `unusable`, or `unavailable` — derived by the server after
+    /// dereferencing the anchor, never asserted by the agent.
+    pub anchor_health: Option<String>,
+}
+
+/// One spike attempt against the unresolved finding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnresolvedTypedEvidenceAttempt {
+    pub sequence: i32,
+    pub spike_task_id: String,
+    /// Validated outcome of this attempt's return, if it produced one.
+    pub outcome: Option<String>,
+    /// Persisted ingress failure for this attempt, if it was rejected.
+    pub failure_detail: Option<String>,
+}
+
+/// Everything a role prompt may be told about the proposal's unresolved typed
+/// finding. Every field is projected; nothing is re-derived from tasks or
+/// debate rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnresolvedTypedEvidenceContext {
+    pub finding: UnresolvedTypedEvidenceProjection,
+    pub attempts: Vec<UnresolvedTypedEvidenceAttempt>,
+    /// Planned checks of the latest attempt.
+    pub planned_checks: Vec<UnresolvedTypedEvidenceCheck>,
+    /// Normalized failures and gaps of the latest validated return.
+    pub gaps: Vec<String>,
+}
+
 /// Why the typed and legacy evidence authorities disagree for a proposal.
 ///
 /// Consumers fail closed on any variant; the code exists so a refusal names
@@ -1449,6 +1489,92 @@ impl TypedEvidenceRepository {
         }
         self.unresolved_projection(&row.get::<String, _>("proposal_id"))
             .await
+    }
+
+    /// Project the unresolved finding together with the attempt, check,
+    /// anchor, and issue detail a role prompt renders.
+    ///
+    /// Returns `None` when nothing is unresolved, so a caller that injects a
+    /// prompt block gets "no block" for free rather than rendering an empty
+    /// one.
+    pub async fn unresolved_context(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<UnresolvedTypedEvidenceContext>> {
+        let Some(finding) = self.unresolved_projection(proposal_id).await? else {
+            return Ok(None);
+        };
+        let attempts = sqlx::query(
+            "SELECT a.id,a.sequence,a.spike_task_id, \
+                    (SELECT v.outcome FROM typed_evidence_validation_results v \
+                      WHERE v.attempt_id=a.id) AS outcome, \
+                    (SELECT t.metadata->>'validation_error' FROM typed_evidence_transitions t \
+                      WHERE t.finding_id=a.finding_id AND t.actor_task_id=a.spike_task_id \
+                        AND t.to_lifecycle='failed' \
+                        AND t.metadata->>'validation_error' IS NOT NULL \
+                      ORDER BY t.ordinal DESC LIMIT 1) AS failure_detail \
+               FROM typed_evidence_attempts a \
+              WHERE a.finding_id=$1 ORDER BY a.sequence",
+        )
+        .bind(&finding.finding_id)
+        .fetch_all(self.db.pool())
+        .await?;
+        let latest_attempt_id: Option<String> = attempts.last().map(|row| row.get("id"));
+        let attempts = attempts
+            .iter()
+            .map(|row| UnresolvedTypedEvidenceAttempt {
+                sequence: row.get("sequence"),
+                spike_task_id: row.get("spike_task_id"),
+                outcome: row.get("outcome"),
+                failure_detail: row.get("failure_detail"),
+            })
+            .collect();
+
+        let (planned_checks, gaps) = match latest_attempt_id {
+            None => (Vec::new(), Vec::new()),
+            Some(attempt_id) => {
+                let checks = sqlx::query(
+                    "SELECT c.check_id,c.method, \
+                            r.status AS status, \
+                            (SELECT an.locator FROM typed_evidence_anchors an \
+                              WHERE an.check_result_id=r.id ORDER BY an.id LIMIT 1) AS locator, \
+                            (SELECT h.health FROM typed_evidence_anchors an \
+                               JOIN typed_evidence_anchor_health h ON h.anchor_id=an.id \
+                              WHERE an.check_result_id=r.id ORDER BY an.id LIMIT 1) AS health \
+                       FROM typed_evidence_planned_checks c \
+                       LEFT JOIN typed_evidence_check_results r ON r.planned_check_id=c.id \
+                      WHERE c.attempt_id=$1 ORDER BY c.ordinal",
+                )
+                .bind(&attempt_id)
+                .fetch_all(self.db.pool())
+                .await?
+                .iter()
+                .map(|row| UnresolvedTypedEvidenceCheck {
+                    check_id: row.get("check_id"),
+                    method: row.get("method"),
+                    status: row.get("status"),
+                    anchor_locator: row.get("locator"),
+                    anchor_health: row.get("health"),
+                })
+                .collect();
+                let gaps = sqlx::query_scalar::<_, String>(
+                    "SELECT i.kind || ' ' || i.code || ': ' || i.detail \
+                       FROM typed_evidence_issues i \
+                       JOIN typed_evidence_validation_results v ON v.id=i.validation_result_id \
+                      WHERE v.attempt_id=$1 ORDER BY i.kind,i.id",
+                )
+                .bind(&attempt_id)
+                .fetch_all(self.db.pool())
+                .await?;
+                (checks, gaps)
+            }
+        };
+        Ok(Some(UnresolvedTypedEvidenceContext {
+            finding,
+            attempts,
+            planned_checks,
+            gaps,
+        }))
     }
 
     /// Compare typed and legacy evidence authority for a proposal.

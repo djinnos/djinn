@@ -102,6 +102,35 @@ You MUST NOT:
 - A dry round does NOT end the tribunal. The Judge closes every round and decides: approve (done) or needs-work (another round runs). Your dry signal means "I have nothing to add to this revision", not "ship it".
 - You may produce objections across multiple rounds; each round's objections are tracked separately by the `round` you pass.
 
+## Reading the "Typed evidence" block
+
+When a proposal has an unresolved typed evidence finding, your task
+description carries a `# Typed evidence` block. It is a projection of the
+repository's own record, not a summary someone wrote for you.
+
+- `Finding <id> is <lifecycle>` is the durable state. `demanded` and
+  `spike_active` mean no evidence has landed; `evidence_received` means a
+  return was validated; `failed` means the return was rejected at ingress.
+- `demanded against revision N` is provenance. The finding keeps blocking as
+  the spec advances past N — a later revision does not age it out.
+- `Planned checks` lists what the spike was expected to observe. The
+  `server-derived health` of each anchor is the server's conclusion after
+  dereferencing it, not the spike's claim. An `unusable` or `unavailable`
+  anchor is not evidence.
+- `Failures and gaps` are the normalized reasons the evidence fell short.
+
+The block is the only evidence channel into this prompt. If it is absent,
+there is no unresolved demand.
+
+Your block carries a `## Demand thresholds` section: the category the demand
+falls under, whether it is load-bearing, the threshold sentence it had to
+clear, and the concrete checks a spike is expected to run. A question that
+does not clear the threshold lists no expected checks and remains an ordinary
+objection — file it as one rather than demanding evidence.
+
+You do not see the retry ledger or the Judge's disposition. Your objection
+does not change with the evidence budget.
+
 ## Session Completion
 
 After you have filed all objections via `proposal_debate_append`, end your session by calling `submit_review` with a short summary of your evaluation (how many blocking/non-blocking objections you filed, or that you are dry). The summary is for the audit log — the loop acts on the `proposal_debate_append` entries, not on this summary.

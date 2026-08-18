@@ -7,9 +7,8 @@ use djinn_control_plane::tools::epic_ops::{
 use djinn_control_plane::tools::proposal_readiness::{
     LatestHeadReadinessResult, evaluate_latest_head_readiness,
 };
-use djinn_core::models::{
-    Proposal, ProposalDebateTrail, TaskRefinementCorrelation, TransitionAction,
-};
+use djinn_core::models::TribunalEvidenceLifecycle;
+use djinn_core::models::{ProposalDebateTrail, TaskRefinementCorrelation, TransitionAction};
 use djinn_core::refinement_liveness::{
     RefinementIntentState as DurableIntentState, RefinementParkKind, RefinementRole,
     RefinementRunState, RefinementStopReason,
@@ -18,8 +17,18 @@ use djinn_db::{
     CompleteRefinementIntentRequest, EffectiveCreatorProvenance, LoadRefinementRunSnapshotRequest,
     ParkRefinementRunFromIntentRequest, ProposalRepository, ResolveRefinementHumanReviewRequest,
     SourceIntentTransitionRequest, TaskRepository, TerminalRefinementRunFromIntentRequest,
-    UserSettingsRepository,
+    TypedEvidenceRepository, UnresolvedTypedEvidenceContext, UserSettingsRepository,
 };
+use djinn_roles::AgentType;
+use djinn_roles::typed_evidence_context::{
+    TypedEvidenceAttemptContext, TypedEvidenceContextAnchorHealth, TypedEvidenceContextLifecycle,
+    TypedEvidencePlannedCheckContext, TypedEvidenceRetryContext, TypedEvidenceRoleContextV1,
+    render_for_role,
+};
+
+/// The repository allows one retry after a failure, so an attempt ledger tops
+/// out at two. Mirrors `allocate_retry_in_transaction`'s single-slot rule.
+const MAX_TYPED_EVIDENCE_ATTEMPTS: i32 = 2;
 
 use super::refinement::{
     AdversaryPassResult, JudgeVerdictResult, RefinementLoopState, RefinementPhase, StopReason,
@@ -30,6 +39,91 @@ use super::actor::CoordinatorActor;
 use super::refinement_dispatch::RefinementSession;
 use super::refinement_lint_evidence::advocate_lint_rejection_from_session;
 pub(super) use super::refinement_lint_evidence::format_advocate_lint_correction_context;
+
+/// Map the repository projection onto the closed prompt record.
+///
+/// This is the only place the two shapes meet. The prompt record deliberately
+/// carries no free-text question collection, so nothing here can widen into a
+/// prose or QuestionForm inventory: there is no field to put one in.
+fn typed_evidence_role_context_from_projection(
+    context: &UnresolvedTypedEvidenceContext,
+) -> TypedEvidenceRoleContextV1 {
+    let finding = &context.finding;
+    let lifecycle = match finding.lifecycle {
+        TribunalEvidenceLifecycle::Demanded => TypedEvidenceContextLifecycle::Demanded,
+        TribunalEvidenceLifecycle::SpikeActive => TypedEvidenceContextLifecycle::SpikeActive,
+        TribunalEvidenceLifecycle::EvidenceReceived => {
+            TypedEvidenceContextLifecycle::EvidenceReceived
+        }
+        TribunalEvidenceLifecycle::Failed => TypedEvidenceContextLifecycle::Failed,
+        TribunalEvidenceLifecycle::Resolved => TypedEvidenceContextLifecycle::Resolved,
+        TribunalEvidenceLifecycle::Withdrawn => TypedEvidenceContextLifecycle::Withdrawn,
+    };
+    // The claim is one question. `NeedsEvidenceClaim.question` when the demand
+    // is structured, and the raw JSON only as a last resort for a legacy
+    // backfill — never a list.
+    let claim = finding
+        .claim
+        .get("question")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| finding.claim.to_string());
+
+    let mut record = TypedEvidenceRoleContextV1::new(
+        finding.finding_id.clone(),
+        lifecycle,
+        claim,
+        finding.demanded_revision_seq,
+    );
+    record.evidence_outcome = finding
+        .evidence_outcome
+        .map(|outcome| format!("{outcome:?}").to_lowercase());
+    record.gaps = context.gaps.clone();
+    record.planned_checks = context
+        .planned_checks
+        .iter()
+        .map(|check| TypedEvidencePlannedCheckContext {
+            check_id: check.check_id.clone(),
+            method: check.method.clone(),
+            status: check.status.clone(),
+            anchor_locator: check.anchor_locator.clone(),
+            anchor_health: check
+                .anchor_health
+                .as_deref()
+                .and_then(|health| match health {
+                    "healthy" => Some(TypedEvidenceContextAnchorHealth::Healthy),
+                    "unusable" => Some(TypedEvidenceContextAnchorHealth::Unusable),
+                    "unavailable" => Some(TypedEvidenceContextAnchorHealth::Unavailable),
+                    _ => None,
+                }),
+        })
+        .collect();
+    record.attempts = context
+        .attempts
+        .iter()
+        .map(|attempt| TypedEvidenceAttemptContext {
+            sequence: attempt.sequence,
+            spike_task_id: attempt.spike_task_id.clone(),
+            outcome: attempt.outcome.clone(),
+            failure_detail: attempt.failure_detail.clone(),
+        })
+        .collect();
+    // Retry surfaces the persisted attempt ledger. `MAX_TYPED_EVIDENCE_ATTEMPTS`
+    // is the repository's one-retry rule, not a number invented here.
+    if !context.attempts.is_empty() {
+        record.retry = Some(TypedEvidenceRetryContext {
+            attempts_used: context.attempts.len() as i32,
+            attempts_allowed: MAX_TYPED_EVIDENCE_ATTEMPTS,
+            last_failure: context
+                .attempts
+                .iter()
+                .rev()
+                .find_map(|attempt| attempt.failure_detail.clone()),
+            conflict_code: None,
+        });
+    }
+    record
+}
 
 /// Target-scoped ordering probes for the repository-backed outcome matrix.
 #[cfg(test)]
@@ -220,18 +314,6 @@ fn select_current_run_verdict<'a>(
                 .filter(&in_round)
                 .max_by(|a, b| a.created_at.cmp(&b.created_at))
         })
-}
-
-fn format_debate_context_entry(entry: &ProposalDebateTrail) -> String {
-    format!(
-        "- round {}, revision {}, {} by {} (blocking={}): {}",
-        entry.round,
-        entry.against_revision_seq,
-        entry.kind,
-        entry.agent_role,
-        entry.blocking,
-        entry.body
-    )
 }
 
 impl CoordinatorActor {
@@ -1294,10 +1376,13 @@ impl CoordinatorActor {
              Current DoR status: {readiness_context}"
         );
 
-        if agent_type.eq_ignore_ascii_case("advocate")
-            && let Some(evidence_context) = self
-                .build_advocate_evidence_findings_context(proposal.as_ref(), proposal_id)
-                .await
+        // Typed evidence reaches every tribunal role, scoped by role. The
+        // previous injection was Advocate-only and ended in a raw
+        // `body_metadata` dump, so an Adversary raising a demand and a Judge
+        // folding one both worked from prose.
+        if let Some(evidence_context) = self
+            .build_typed_evidence_role_context(agent_type, proposal_id)
+            .await
         {
             description.push_str("\n\n");
             description.push_str(&evidence_context);
@@ -1412,60 +1497,48 @@ impl CoordinatorActor {
         }
     }
 
-    async fn build_advocate_evidence_findings_context(
+    /// Render the typed evidence block for one tribunal role.
+    ///
+    /// The projection is the repository's; the rendering is
+    /// `djinn_agent::typed_evidence_context`, which is pure. This function
+    /// only maps between them, so what a role is told cannot drift from what
+    /// the repository holds.
+    ///
+    /// Returns `None` — and therefore injects no block at all — when the
+    /// proposal has no unresolved typed finding, or for a non-tribunal role.
+    async fn build_typed_evidence_role_context(
         &self,
-        proposal: Option<&Proposal>,
+        agent_type: &str,
         proposal_id: &str,
     ) -> Option<String> {
-        let event_bus = crate::events::event_bus_for(&self.events_tx);
-        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
-        let entries = match proposal_repo.debate_trail(proposal_id).await {
-            Ok(entries) => entries,
+        let role = match agent_type.to_ascii_lowercase().as_str() {
+            "advocate" => AgentType::Advocate,
+            "adversary" => AgentType::Adversary,
+            "judge" => AgentType::Judge,
+            _ => return None,
+        };
+        let context = match TypedEvidenceRepository::new(self.db.clone())
+            .unresolved_context(proposal_id)
+            .await
+        {
+            Ok(Some(context)) => context,
+            Ok(None) => return None,
             Err(e) => {
                 tracing::warn!(
                     proposal_id = %proposal_id,
                     error = %e,
-                    "Failed to read debate trail for evidence findings context"
+                    "Failed to project typed evidence for role context"
                 );
                 return None;
             }
         };
-
-        let findings = entries
-            .iter()
-            .rev()
-            .find(|entry| entry.kind == "evidence_findings" && entry.agent_role == "spike")?;
-
-        let mut context = String::from(
-            "Evidence findings received for this Advocate round. Use these findings to respond to the current proposal and objections before Judge adjudication resumes.\n",
-        );
-        if let Some(proposal) = proposal {
-            context.push_str("\nCurrent proposal body:\n");
-            context.push_str(&proposal.body);
-            context.push('\n');
-        }
-
-        let current_debate = entries
-            .iter()
-            .filter(|entry| matches!(entry.kind.as_str(), "objection" | "rebuttal"))
-            .map(format_debate_context_entry)
-            .collect::<Vec<_>>();
-        if !current_debate.is_empty() {
-            context.push_str("\nCurrent objections/rebuttals:\n");
-            context.push_str(&current_debate.join("\n"));
-            context.push('\n');
-        }
-
-        context.push_str("\nEvidence findings:\n");
-        context.push_str(&format_debate_context_entry(findings));
-        if let Some(metadata) = findings.body_metadata.as_deref().filter(|s| !s.is_empty()) {
-            context.push_str("\nStructured findings metadata:\n");
-            context.push_str(metadata);
-        }
-        Some(context)
+        Some(render_for_role(
+            role,
+            &typed_evidence_role_context_from_projection(&context),
+        ))
     }
 
-    /// Evaluate readiness through the shared current-head DoR/lint constructor.
+    /// Evaluate readiness through the shared current-head DoR/lint constructor.    /// Evaluate readiness through the shared current-head DoR/lint constructor.
     ///
     /// This is deliberately the sole coordinator path to
     /// `ProposalRepository::lint_for_revision`: the control-plane helper

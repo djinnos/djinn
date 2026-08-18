@@ -354,16 +354,42 @@ async fn valid_evidence_completion_resumes_only_advocate_and_leaves_typed_findin
         .await
         .expect("read advocate task")
         .expect("advocate task exists");
+    // The Advocate is resumed with the *typed* projection, not the legacy
+    // `evidence_findings` debate row. Task tlyl replaced the raw
+    // `body_metadata` dump with a role-scoped block, so the spike's prose and
+    // its metadata blob must no longer reach the prompt at all.
+    let finding_id = djinn_db::TypedEvidenceRepository::new(db.clone())
+        .unresolved_projection(&fixture.proposal_id)
+        .await
+        .expect("project the typed finding")
+        .expect("the finding is still unresolved after receipt")
+        .finding_id;
     assert!(
-        advocate_task
-            .description
-            .contains("Evidence findings received")
+        advocate_task.description.contains("# Typed evidence"),
+        "the Advocate must be resumed with the typed block: {}",
+        advocate_task.description
     );
-    assert!(advocate_task.description.contains("FINDINGS-BODY-E2E"));
     assert!(
-        advocate_task
+        advocate_task.description.contains(&finding_id),
+        "the typed block must name the finding: {}",
+        advocate_task.description
+    );
+    assert!(
+        !advocate_task
             .description
-            .contains("FINDINGS-ANSWER-E2E valid")
+            .contains("Evidence findings received"),
+        "the legacy findings preamble must be gone: {}",
+        advocate_task.description
+    );
+    assert!(
+        !advocate_task.description.contains("FINDINGS-BODY-E2E"),
+        "the legacy findings body must not reach the prompt: {}",
+        advocate_task.description
+    );
+    assert!(
+        !advocate_task.description.contains("FINDINGS-ANSWER-E2E"),
+        "the raw body_metadata dump must be gone: {}",
+        advocate_task.description
     );
 
     // Evidence receipt is deliberately not a structural disposition. Exercise

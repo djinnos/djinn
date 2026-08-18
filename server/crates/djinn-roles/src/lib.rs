@@ -13,6 +13,7 @@
 
 pub mod config;
 pub mod prompts;
+pub mod typed_evidence_context;
 
 use std::collections::HashMap;
 use std::sync::OnceLock;

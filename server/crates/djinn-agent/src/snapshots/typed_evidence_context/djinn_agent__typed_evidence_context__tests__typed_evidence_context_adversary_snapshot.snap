@@ -1,0 +1,32 @@
+---
+source: crates/djinn-agent/src/typed_evidence_context.rs
+expression: "render_for_role(AgentType::Adversary, &full_context())"
+---
+# Typed evidence
+
+Finding `01a01188-0000-7000-8000-00000000feed` is `evidence_received`, demanded against revision 3.
+Claim under demand: Can the launcher share a cgroup across pods?
+Validated evidence outcome: partial
+
+## Planned checks
+
+- `cgroup-delegation-probe` (command) — passed; anchor `command:01a01188-0000-7000-8000-0000000000aa` (server-derived health: healthy)
+- `launcher-clone-into-cgroup` (code) — failed (server-derived health: unavailable)
+
+## Attempts
+
+- attempt 1 on spike `01a01188-0000-7000-8000-0000000000b1`; payload rejected: missing_identity
+- attempt 2 on spike `01a01188-0000-7000-8000-0000000000b2` — partial
+
+## Failures and gaps
+
+- launcher-clone-into-cgroup: could not reach a host with delegation enabled
+
+## Demand thresholds
+
+Category: feasibility
+Load-bearing: yes
+Threshold: The spec cannot be accepted while it is unknown whether the kernel permits the delegation this design assumes.
+Expected checks:
+- Run the delegation probe on a representative host
+- Read the launcher's cgroup attach path
