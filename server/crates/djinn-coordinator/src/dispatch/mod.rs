@@ -60,3 +60,7 @@ pub(crate) use retry::RemediationKind;
 /// blameless-exhaustion regression suite asserts against the real constant.
 #[cfg(test)]
 pub(crate) use task_dispatch::BREAKER_OPEN_EXHAUSTION_SIGNAL_THRESHOLD;
+
+#[cfg(test)]
+#[path = "direct_delivery_consumer_cutover.rs"]
+mod direct_delivery_consumer_cutover;
