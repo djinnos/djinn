@@ -3227,23 +3227,44 @@ async fn scenario_08_breakers_are_senior_and_retries_release_before_acquiring() 
     cancel.cancel();
 
     // ── A leader enforcement pass leaves breaker state byte identical ─────
+    //
+    // The pool is at admission mode `enforce` with a live cooldown row sitting
+    // in `dispatch_state`, and the pass is driven with `window_trainable`
+    // true — the most permissive input it can be given. Its own reported
+    // denial is what proves it reached the enforcement decision rather than
+    // returning early, so the unchanged digest below is a real observation.
     cfni_register_incarnation(&db).await;
-    cfni_cover_route(&repository, pool_id).await;
+    let leader_pool = cfni_seed_pool(&db, "cfni-breaker-leader", "shadow").await;
+    cfni_cover_route(&repository, leader_pool).await;
+    // A durable breaker row, so the digest below compares real content rather
+    // than two absences.
+    djinn_db::test_support::seed_breaker_open_dispatch_state(&db, &task.id, "cfni/model", 30).await;
     let before = djinn_db::test_support::table_digest_for_test(&db, "dispatch_state").await;
+    assert_ne!(
+        before, "empty",
+        "the breaker relation must actually hold a row, or an unchanged digest \
+         is a comparison between two absences"
+    );
     let outcome = djinn_coordinator::model_turn_admission::enforcement::run_enforcement_pass_v1(
         &repository,
         &cfni_fence(),
         CFNI_GENERATION,
         &now_rfc3339(),
-        &std::collections::BTreeMap::from([(pool_id, vec![cfni_expected_key()])]),
+        &std::collections::BTreeMap::from([(leader_pool, vec![cfni_expected_key()])]),
         true,
     )
     .await
     .expect("enforcement pass must not error");
     assert!(
         !outcome.fenced,
-        "the registered incarnation must hold the fence, or the digest below \
-         would be unchanged because nothing ran at all"
+        "the registered incarnation must hold the fence, or nothing ran at all"
+    );
+    assert_eq!(
+        outcome.denials,
+        vec![(leader_pool, "compatibility_phase_insufficient")],
+        "the pass must have reached and recorded its enforcement decision, so \
+         the unchanged digest below is an observation rather than the absence \
+         of a pass"
     );
     assert_eq!(
         djinn_db::test_support::table_digest_for_test(&db, "dispatch_state").await,
