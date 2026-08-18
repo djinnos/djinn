@@ -22,7 +22,8 @@
     "test": "vitest run --pool=vmThreads",
     "test:watch": "vitest --pool=vmThreads",
     "test:typecheck": "tsc -p tsconfig.test.json --noEmit",
-    "test:typecheck:gate": "tsc -p tsconfig.test-gate.json --noEmit"
+    "test:typecheck:gate": "tsc -p tsconfig.test-gate.json --noEmit",
+    "test:ci": "node scripts/vitest-ci.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",

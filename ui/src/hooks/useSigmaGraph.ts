@@ -657,7 +657,12 @@ export function useSigmaGraph(
         // already stopped
       }
     }
-    if (graph) {
+    // The precomputed branch never starts a layout, so there is nothing to
+    // settle and `stopLayout` must be a true no-op there: a noverlap pass
+    // would displace the warm-time server coordinates the branch exists to
+    // preserve. Matches the mount effect, which also skips FA2 + noverlap
+    // when the marker is present.
+    if (graph && !graph.getAttribute(PRECOMPUTED_LAYOUT_ATTRIBUTE)) {
       // Same post-layout ordering as the auto stop-timer: attraction pass
       // runs after the supervisor stops and before noverlap. No-op for the
       // code graph canvas, which doesn't supply a `postLayout` option.
