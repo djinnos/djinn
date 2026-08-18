@@ -22996,6 +22996,73 @@ expression: signatures
           ],
           "type": "object"
         },
+        "TypedEvidenceAttemptModel": {
+          "description": "One spike attempt against a typed evidence finding.",
+          "properties": {
+            "failure_detail": {
+              "description": "Persisted ingress failure for this attempt, if it was rejected.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "outcome": {
+              "description": "Validated outcome of this attempt's return, if it produced one.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sequence": {
+              "description": "1-based attempt sequence.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "spike_task_id": {
+              "description": "The spike task that carried this attempt.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sequence",
+            "spike_task_id"
+          ],
+          "type": "object"
+        },
+        "TypedEvidenceDispositionModel": {
+          "description": "A Judge's recorded terminal decision for a finding.",
+          "properties": {
+            "disposition": {
+              "description": "`resolved` or `withdrawn`.",
+              "type": "string"
+            },
+            "folding_revision": {
+              "description": "The spec revision the disposition folds the finding into.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "judge_task_id": {
+              "description": "The Judge task that recorded it.",
+              "type": "string"
+            },
+            "outcome": {
+              "description": "`resolved`, `partial`, or `unresolved`.",
+              "type": "string"
+            },
+            "rationale": {
+              "description": "The Judge's rationale, rendered verbatim.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "disposition",
+            "outcome",
+            "folding_revision",
+            "judge_task_id",
+            "rationale"
+          ],
+          "type": "object"
+        },
         "TypedEvidenceGateStatus": {
           "description": "Typed evidence authority section of the composed gate status.\n\nEvery field is projected from `TypedEvidenceRepository`; nothing here is\nre-derived from tasks or debate rows.",
           "properties": {
@@ -23006,6 +23073,13 @@ expression: signatures
                 "integer",
                 "null"
               ]
+            },
+            "attempts": {
+              "description": "Every spike attempt against the finding, oldest first.",
+              "items": {
+                "$ref": "#/$defs/TypedEvidenceAttemptModel"
+              },
+              "type": "array"
             },
             "blocking": {
               "description": "Whether this section is currently refusing transitions.",
@@ -23027,7 +23101,18 @@ expression: signatures
               ]
             },
             "evidence_outcome": {
-              "description": "Validated outcome of the latest durable return: `resolved`, `partial`,\nor `unresolved`.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TypedEvidenceOutcomeModel"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Validated outcome of the latest durable return."
+            },
+            "failed_transition_id": {
+              "description": "The latest `-> failed` transition id. A retry must cite exactly this\none, so the browser cannot construct a retry the server would accept\nwithout the server having named the transition first.",
               "type": [
                 "string",
                 "null"
@@ -23055,12 +23140,34 @@ expression: signatures
                 "null"
               ]
             },
+            "gaps": {
+              "description": "Normalized failures and gaps of the latest validated return.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "judge_disposition": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TypedEvidenceDispositionModel"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The Judge's recorded disposition, when one exists."
+            },
             "lifecycle": {
-              "description": "`demanded`, `spike_active`, `evidence_received`, or `failed`.",
-              "type": [
-                "string",
-                "null"
-              ]
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TypedEvidenceLifecycleModel"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The finding's durable lifecycle state."
             },
             "mode": {
               "description": "Rollout stage this evaluation ran under: `off`, `shadow`, or `enforce`.",
@@ -23072,11 +23179,94 @@ expression: signatures
                 "string",
                 "null"
               ]
+            },
+            "planned_checks": {
+              "description": "Planned checks of the latest attempt, each carrying the immutable\nanchor and the health the *server* derived by dereferencing it.",
+              "items": {
+                "$ref": "#/$defs/TypedEvidencePlannedCheckModel"
+              },
+              "type": "array"
+            },
+            "retry_permitted": {
+              "description": "Whether the *calling* user currently holds retry authority for this\nproposal — an open Advocate or Judge task of the running refinement.\nThe write path re-checks under lock; this is projection only, so a\nstale `true` cannot admit a retry.",
+              "type": "boolean"
+            },
+            "usable_findings": {
+              "description": "Conclusions the server accepted as usable for the latest attempt.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             }
           },
           "required": [
             "mode",
-            "blocking"
+            "blocking",
+            "attempts",
+            "planned_checks",
+            "gaps",
+            "usable_findings",
+            "retry_permitted"
+          ],
+          "type": "object"
+        },
+        "TypedEvidenceLifecycleModel": {
+          "description": "Durable lifecycle vocabulary for a typed evidence finding.\n\nThis is the whole vocabulary, including the two terminal states a gate\nsection never carries: a generated client that pins only the unresolved\nfour would silently stop compiling against a terminal projection.",
+          "enum": [
+            "demanded",
+            "spike_active",
+            "evidence_received",
+            "failed",
+            "resolved",
+            "withdrawn"
+          ],
+          "type": "string"
+        },
+        "TypedEvidenceOutcomeModel": {
+          "description": "Validated outcome of a durable evidence return.",
+          "enum": [
+            "resolved",
+            "partial",
+            "unresolved"
+          ],
+          "type": "string"
+        },
+        "TypedEvidencePlannedCheckModel": {
+          "description": "One planned check of the latest attempt, with server-derived anchor health.",
+          "properties": {
+            "anchor_health": {
+              "description": "`healthy`, `unusable`, or `unavailable` — derived by the server after\ndereferencing the anchor, never asserted by the agent. `unusable`\nmeans the method is not server-compatible for this anchor.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "anchor_locator": {
+              "description": "Immutable provenance for the observation.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "check_id": {
+              "description": "Plan-local check identifier.",
+              "type": "string"
+            },
+            "method": {
+              "description": "Anchor method the check uses: `code`, `graph`, `command`, `artifact`,\n`memory`, `external`, or `repository`.",
+              "type": "string"
+            },
+            "status": {
+              "description": "`passed`, `failed`, or `not_run`. `None` before the return lands.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "check_id",
+            "method"
           ],
           "type": "object"
         },

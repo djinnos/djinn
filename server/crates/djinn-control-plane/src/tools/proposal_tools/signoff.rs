@@ -452,6 +452,28 @@ pub async fn build_gate_status(
     if let Some(failure) = typed_outcome.failure.as_deref() {
         blocked_explanations.push(capitalize_first(failure));
     }
+    // Presentation detail and retry authority are read only when a finding is
+    // actually reportable, so the pre-rollout path issues no extra queries.
+    let (typed_presentation, typed_retry_permitted) = match typed_outcome.projection.as_ref() {
+        None => (djinn_db::TypedEvidencePresentation::default(), false),
+        Some(projection) => {
+            let typed_repo = djinn_db::TypedEvidenceRepository::new(repo.db().clone());
+            let detail = typed_repo
+                .presentation_for_finding(&projection.finding_id)
+                .await
+                .unwrap_or_default();
+            // Retry authority is per-caller. An unauthenticated read projects
+            // `false`, which is the same answer the write path would give it.
+            let permitted = match djinn_core::auth_context::current_user_id() {
+                None => false,
+                Some(caller) => repo
+                    .caller_may_retry_evidence(proposal_id, &caller)
+                    .await
+                    .unwrap_or(false),
+            };
+            (detail, permitted)
+        }
+    };
     let typed_evidence = typed_outcome.is_reportable().then(|| {
         let projection = typed_outcome.projection.as_ref();
         crate::tools::proposal_ops::TypedEvidenceGateStatus {
@@ -460,14 +482,50 @@ pub async fn build_gate_status(
             parity_mismatch_reason: typed_outcome.fail_closed_reason.clone(),
             finding_id: projection.map(|p| p.finding_id.clone()),
             claim: projection.map(|p| p.claim.to_string()),
-            lifecycle: projection.map(|p| p.lifecycle.as_str().to_string()),
+            lifecycle: projection.map(|p| lifecycle_model(p.lifecycle)),
             demanded_revision_seq: projection.map(|p| p.demanded_revision_seq),
             attempt_seq: projection.and_then(|p| p.attempt_seq),
             evidence_outcome: projection
                 .and_then(|p| p.evidence_outcome)
-                .map(|outcome| format!("{outcome:?}").to_lowercase()),
+                .map(outcome_model),
             folding_revision: projection.and_then(|p| p.folding_revision),
             failure_detail: projection.and_then(|p| p.failure_detail.clone()),
+            attempts: typed_presentation
+                .attempts
+                .iter()
+                .map(|a| crate::tools::proposal_ops::TypedEvidenceAttemptModel {
+                    sequence: a.sequence,
+                    spike_task_id: a.spike_task_id.clone(),
+                    outcome: a.outcome.clone(),
+                    failure_detail: a.failure_detail.clone(),
+                })
+                .collect(),
+            planned_checks: typed_presentation
+                .planned_checks
+                .iter()
+                .map(
+                    |c| crate::tools::proposal_ops::TypedEvidencePlannedCheckModel {
+                        check_id: c.check_id.clone(),
+                        method: c.method.clone(),
+                        status: c.status.clone(),
+                        anchor_locator: c.anchor_locator.clone(),
+                        anchor_health: c.anchor_health.clone(),
+                    },
+                )
+                .collect(),
+            gaps: typed_presentation.gaps.clone(),
+            usable_findings: typed_presentation.usable_findings.clone(),
+            judge_disposition: typed_presentation.disposition.as_ref().map(|d| {
+                crate::tools::proposal_ops::TypedEvidenceDispositionModel {
+                    disposition: d.disposition.clone(),
+                    outcome: d.outcome.clone(),
+                    folding_revision: d.folding_revision,
+                    judge_task_id: d.judge_task_id.clone(),
+                    rationale: d.rationale.clone(),
+                }
+            }),
+            retry_permitted: typed_retry_permitted,
+            failed_transition_id: typed_presentation.latest_failed_transition_id.clone(),
         }
     });
 
@@ -494,6 +552,38 @@ pub async fn build_gate_status(
         needs_evidence,
         human_override_active: human_authority_is_current,
         blocked_explanations,
+    }
+}
+
+/// Map the durable lifecycle enum onto the wire enum.
+///
+/// Exhaustive on purpose: adding a durable state without deciding what the
+/// browser is told about it must not compile.
+fn lifecycle_model(
+    lifecycle: djinn_core::models::typed_evidence::TribunalEvidenceLifecycle,
+) -> crate::tools::proposal_ops::TypedEvidenceLifecycleModel {
+    use crate::tools::proposal_ops::TypedEvidenceLifecycleModel as Wire;
+    use djinn_core::models::typed_evidence::TribunalEvidenceLifecycle as Durable;
+    match lifecycle {
+        Durable::Demanded => Wire::Demanded,
+        Durable::SpikeActive => Wire::SpikeActive,
+        Durable::EvidenceReceived => Wire::EvidenceReceived,
+        Durable::Failed => Wire::Failed,
+        Durable::Resolved => Wire::Resolved,
+        Durable::Withdrawn => Wire::Withdrawn,
+    }
+}
+
+/// Map the durable evidence outcome onto the wire enum.
+fn outcome_model(
+    outcome: djinn_core::models::typed_evidence::TribunalEvidenceOutcome,
+) -> crate::tools::proposal_ops::TypedEvidenceOutcomeModel {
+    use crate::tools::proposal_ops::TypedEvidenceOutcomeModel as Wire;
+    use djinn_core::models::typed_evidence::TribunalEvidenceOutcome as Durable;
+    match outcome {
+        Durable::Resolved => Wire::Resolved,
+        Durable::Partial => Wire::Partial,
+        Durable::Unresolved => Wire::Unresolved,
     }
 }
 

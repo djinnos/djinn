@@ -3996,6 +3996,29 @@ impl ProposalRepository {
         })
     }
 
+    /// Whether `caller_user_id` currently holds the retry authority for
+    /// `proposal_id`: an open Advocate or Judge task of the running refinement
+    /// run that the caller created.
+    ///
+    /// This is the read-only twin of the authorization inside
+    /// [`Self::retry_evidence_atomically`] — the same predicate, without the
+    /// row locks. It exists so `proposal_show` can project whether an action
+    /// would be admitted rather than making the browser guess; the write path
+    /// still re-checks under lock, so a stale `true` cannot admit anything.
+    pub async fn caller_may_retry_evidence(
+        &self,
+        proposal_id: &str,
+        caller_user_id: &str,
+    ) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let found: Option<String> = sqlx::query_scalar("SELECT t.id FROM tasks t JOIN refinement_dispatch_intents i ON i.id=t.refinement_intent_id JOIN refinement_runs r ON r.id=i.run_id WHERE r.proposal_id=$1 AND r.state='running' AND i.state='materialized' AND i.task_id=t.id AND t.status IN ('open','in_progress') AND t.agent_type IN ('advocate','judge') AND t.refinement_run_id=r.id AND t.refinement_generation=r.generation AND t.refinement_round=i.round AND t.refinement_phase=i.phase AND t.refinement_role=i.role AND t.created_by_user_id=$2 LIMIT 1")
+            .bind(proposal_id)
+            .bind(caller_user_id)
+            .fetch_optional(self.db.pool())
+            .await?;
+        Ok(found.is_some())
+    }
+
     pub async fn retry_evidence_atomically(
         &self,
         input: AtomicEvidenceRetryInput,

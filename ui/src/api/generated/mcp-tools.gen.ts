@@ -10218,6 +10218,18 @@ export namespace ProposalShowOutputSchema {
    */
   export type EvidenceLifecyclePhase = ("awaiting_evidence" | "evidence_received" | "evidence_failed")
   /**
+   * Validated outcome of a durable evidence return.
+   */
+  export type TypedEvidenceOutcomeModel = ("resolved" | "partial" | "unresolved")
+  /**
+   * Durable lifecycle vocabulary for a typed evidence finding.
+   * 
+   * This is the whole vocabulary, including the two terminal states a gate
+   * section never carries: a generated client that pins only the unresolved
+   * four would silently stop compiling against a terminal projection.
+   */
+  export type TypedEvidenceLifecycleModel = ("demanded" | "spike_active" | "evidence_received" | "failed" | "resolved" | "withdrawn")
+  /**
    * Body encoding supplied by the caller.
    */
   export type BodyFormat = ("markdown" | "mdx")
@@ -10580,6 +10592,10 @@ export namespace ProposalShowOutputSchema {
    */
   attempt_seq?: number
   /**
+   * Every spike attempt against the finding, oldest first.
+   */
+  attempts: TypedEvidenceAttemptModel[]
+  /**
    * Whether this section is currently refusing transitions.
    */
   blocking: boolean
@@ -10593,10 +10609,15 @@ export namespace ProposalShowOutputSchema {
    */
   demanded_revision_seq?: number
   /**
-   * Validated outcome of the latest durable return: `resolved`, `partial`,
-   * or `unresolved`.
+   * Validated outcome of the latest durable return.
    */
-  evidence_outcome?: string
+  evidence_outcome?: (TypedEvidenceOutcomeModel | null)
+  /**
+   * The latest `-> failed` transition id. A retry must cite exactly this
+   * one, so the browser cannot construct a retry the server would accept
+   * without the server having named the transition first.
+   */
+  failed_transition_id?: string
   /**
    * Most specific persisted failure text for the finding.
    */
@@ -10611,9 +10632,17 @@ export namespace ProposalShowOutputSchema {
    */
   folding_revision?: number
   /**
-   * `demanded`, `spike_active`, `evidence_received`, or `failed`.
+   * Normalized failures and gaps of the latest validated return.
    */
-  lifecycle?: string
+  gaps: string[]
+  /**
+   * The Judge's recorded disposition, when one exists.
+   */
+  judge_disposition?: (TypedEvidenceDispositionModel | null)
+  /**
+   * The finding's durable lifecycle state.
+   */
+  lifecycle?: (TypedEvidenceLifecycleModel | null)
   /**
    * Rollout stage this evaluation ran under: `off`, `shadow`, or `enforce`.
    */
@@ -10623,6 +10652,99 @@ export namespace ProposalShowOutputSchema {
    * closed on this in every mode, including `off`.
    */
   parity_mismatch_reason?: string
+  /**
+   * Planned checks of the latest attempt, each carrying the immutable
+   * anchor and the health the *server* derived by dereferencing it.
+   */
+  planned_checks: TypedEvidencePlannedCheckModel[]
+  /**
+   * Whether the *calling* user currently holds retry authority for this
+   * proposal — an open Advocate or Judge task of the running refinement.
+   * The write path re-checks under lock; this is projection only, so a
+   * stale `true` cannot admit a retry.
+   */
+  retry_permitted: boolean
+  /**
+   * Conclusions the server accepted as usable for the latest attempt.
+   */
+  usable_findings: string[]
+  [k: string]: any
+  }
+  /**
+   * One spike attempt against a typed evidence finding.
+   */
+  export interface TypedEvidenceAttemptModel {
+  /**
+   * Persisted ingress failure for this attempt, if it was rejected.
+   */
+  failure_detail?: string
+  /**
+   * Validated outcome of this attempt's return, if it produced one.
+   */
+  outcome?: string
+  /**
+   * 1-based attempt sequence.
+   */
+  sequence: number
+  /**
+   * The spike task that carried this attempt.
+   */
+  spike_task_id: string
+  [k: string]: any
+  }
+  /**
+   * A Judge's recorded terminal decision for a finding.
+   */
+  export interface TypedEvidenceDispositionModel {
+  /**
+   * `resolved` or `withdrawn`.
+   */
+  disposition: string
+  /**
+   * The spec revision the disposition folds the finding into.
+   */
+  folding_revision: number
+  /**
+   * The Judge task that recorded it.
+   */
+  judge_task_id: string
+  /**
+   * `resolved`, `partial`, or `unresolved`.
+   */
+  outcome: string
+  /**
+   * The Judge's rationale, rendered verbatim.
+   */
+  rationale: string
+  [k: string]: any
+  }
+  /**
+   * One planned check of the latest attempt, with server-derived anchor health.
+   */
+  export interface TypedEvidencePlannedCheckModel {
+  /**
+   * `healthy`, `unusable`, or `unavailable` — derived by the server after
+   * dereferencing the anchor, never asserted by the agent. `unusable`
+   * means the method is not server-compatible for this anchor.
+   */
+  anchor_health?: string
+  /**
+   * Immutable provenance for the observation.
+   */
+  anchor_locator?: string
+  /**
+   * Plan-local check identifier.
+   */
+  check_id: string
+  /**
+   * Anchor method the check uses: `code`, `graph`, `command`, `artifact`,
+   * `memory`, `external`, or `repository`.
+   */
+  method: string
+  /**
+   * `passed`, `failed`, or `not_run`. `None` before the return lands.
+   */
+  status?: string
   [k: string]: any
   }
   /**

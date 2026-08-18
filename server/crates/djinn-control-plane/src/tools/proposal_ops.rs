@@ -1010,9 +1010,9 @@ pub struct TypedEvidenceGateStatus {
     /// The finding's claim, serialized as JSON text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claim: Option<String>,
-    /// `demanded`, `spike_active`, `evidence_received`, or `failed`.
+    /// The finding's durable lifecycle state.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lifecycle: Option<String>,
+    pub lifecycle: Option<TypedEvidenceLifecycleModel>,
     /// Revision the demand was raised against. Provenance, not a filter — the
     /// finding keeps blocking as the proposal head advances past it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1020,10 +1020,9 @@ pub struct TypedEvidenceGateStatus {
     /// Sequence of the latest allocated spike attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt_seq: Option<i32>,
-    /// Validated outcome of the latest durable return: `resolved`, `partial`,
-    /// or `unresolved`.
+    /// Validated outcome of the latest durable return.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub evidence_outcome: Option<String>,
+    pub evidence_outcome: Option<TypedEvidenceOutcomeModel>,
     /// Folding revision of a recorded disposition that did not carry the
     /// finding to a terminal lifecycle.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1031,6 +1030,104 @@ pub struct TypedEvidenceGateStatus {
     /// Most specific persisted failure text for the finding.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_detail: Option<String>,
+    /// Every spike attempt against the finding, oldest first.
+    pub attempts: Vec<TypedEvidenceAttemptModel>,
+    /// Planned checks of the latest attempt, each carrying the immutable
+    /// anchor and the health the *server* derived by dereferencing it.
+    pub planned_checks: Vec<TypedEvidencePlannedCheckModel>,
+    /// Normalized failures and gaps of the latest validated return.
+    pub gaps: Vec<String>,
+    /// Conclusions the server accepted as usable for the latest attempt.
+    pub usable_findings: Vec<String>,
+    /// The Judge's recorded disposition, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_disposition: Option<TypedEvidenceDispositionModel>,
+    /// Whether the *calling* user currently holds retry authority for this
+    /// proposal — an open Advocate or Judge task of the running refinement.
+    /// The write path re-checks under lock; this is projection only, so a
+    /// stale `true` cannot admit a retry.
+    pub retry_permitted: bool,
+    /// The latest `-> failed` transition id. A retry must cite exactly this
+    /// one, so the browser cannot construct a retry the server would accept
+    /// without the server having named the transition first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_transition_id: Option<String>,
+}
+
+/// Durable lifecycle vocabulary for a typed evidence finding.
+///
+/// This is the whole vocabulary, including the two terminal states a gate
+/// section never carries: a generated client that pins only the unresolved
+/// four would silently stop compiling against a terminal projection.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TypedEvidenceLifecycleModel {
+    Demanded,
+    SpikeActive,
+    EvidenceReceived,
+    Failed,
+    Resolved,
+    Withdrawn,
+}
+
+/// Validated outcome of a durable evidence return.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TypedEvidenceOutcomeModel {
+    Resolved,
+    Partial,
+    Unresolved,
+}
+
+/// One spike attempt against a typed evidence finding.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct TypedEvidenceAttemptModel {
+    /// 1-based attempt sequence.
+    pub sequence: i32,
+    /// The spike task that carried this attempt.
+    pub spike_task_id: String,
+    /// Validated outcome of this attempt's return, if it produced one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// Persisted ingress failure for this attempt, if it was rejected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_detail: Option<String>,
+}
+
+/// One planned check of the latest attempt, with server-derived anchor health.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct TypedEvidencePlannedCheckModel {
+    /// Plan-local check identifier.
+    pub check_id: String,
+    /// Anchor method the check uses: `code`, `graph`, `command`, `artifact`,
+    /// `memory`, `external`, or `repository`.
+    pub method: String,
+    /// `passed`, `failed`, or `not_run`. `None` before the return lands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Immutable provenance for the observation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_locator: Option<String>,
+    /// `healthy`, `unusable`, or `unavailable` — derived by the server after
+    /// dereferencing the anchor, never asserted by the agent. `unusable`
+    /// means the method is not server-compatible for this anchor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_health: Option<String>,
+}
+
+/// A Judge's recorded terminal decision for a finding.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct TypedEvidenceDispositionModel {
+    /// `resolved` or `withdrawn`.
+    pub disposition: String,
+    /// `resolved`, `partial`, or `unresolved`.
+    pub outcome: String,
+    /// The spec revision the disposition folds the finding into.
+    pub folding_revision: i32,
+    /// The Judge task that recorded it.
+    pub judge_task_id: String,
+    /// The Judge's rationale, rendered verbatim.
+    pub rationale: String,
 }
 
 /// One DoR failure in the gate status.
