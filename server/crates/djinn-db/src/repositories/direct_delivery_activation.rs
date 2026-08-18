@@ -76,7 +76,8 @@ impl fmt::Display for CapabilityCensusGap {
 }
 
 /// Why activation left the epoch disabled. Every variant is a refusal, never a
-/// partial application: the transaction rolls back to a read-only pass.
+/// partial application: each refusal path reaches its `return` before the
+/// compare-and-set, so the transaction it commits contains no write at all.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DirectDeliveryActivationRefusal {
     MissingSchema {

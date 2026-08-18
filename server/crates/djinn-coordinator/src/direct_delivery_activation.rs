@@ -28,10 +28,23 @@
 //! ([`djinn_provider::github_api::DIRECT_DELIVERY_REF_CONTRACT`],
 //! [`crate::direct_delivery::DIRECT_DELIVERY_ORCHESTRATOR_CONTRACT`],
 //! [`crate::direct_delivery::DIRECT_DELIVERY_CONSUMER_CUTOVER_CONTRACT`]). A
-//! binary built before those contracts existed reports a different value (or
-//! fails to compile), and is refused. `direct_delivery_activation_matrix`
-//! additionally enumerates the production sources behind each of them, so the
-//! declarations cannot outlive the code they name.
+//! binary built before those contracts existed does not define the constant at
+//! all, so this module would not compile against it.
+//! `direct_delivery_activation_matrix` additionally enumerates the production
+//! sources behind each of them, so the declarations cannot outlive the code
+//! they name.
+//!
+//! # Scope of the census population
+//!
+//! The census is taken over `coordinator_incarnations`: the leader-elected
+//! server processes, which are the only processes that reserve, activate,
+//! append to, or integrate a direct delivery. Taskrun worker pods are *not* in
+//! the population. They are consumers — `djinn-agent`'s task-PR-open body is
+//! gated by the same `task_pr_eligibility` call — but they neither register an
+//! incarnation nor advertise, so a worker pod running an image that predates
+//! that gate is not something this fence can observe. Activation therefore also
+//! requires an explicit operator request, which is where that judgement is
+//! made; the fence proves the coordinator fleet is ready, not the pod fleet.
 
 use djinn_core::models::{DirectDeliveryCapability, DirectDeliveryEpoch};
 use djinn_db::{
@@ -126,8 +139,10 @@ pub async fn observed_capabilities(db: &Database) -> Vec<DirectDeliveryCapabilit
 /// The census liveness threshold, expressed as the ISO instant a
 /// `coordinator_incarnations` row must have renewed at or after.
 ///
-/// It is deliberately the same window the orphaned-attempt reaper uses: a
-/// process activation counts as live must be a process recovery counts as live.
+/// It is deliberately the same window the orphaned-attempt reaper uses, so
+/// "live" cannot mean one thing to the activation fence and another to
+/// recovery: any process the reaper still treats as a live dispatch owner is a
+/// process this census must count.
 pub fn live_since_iso() -> Option<String> {
     let format = time::macros::format_description!(
         "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
