@@ -187,6 +187,50 @@ impl StreamTurnState {
 pub(super) type ProviderStream =
     Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>;
 
+/// Cadence at which a dispatched turn commits a lease heartbeat.
+pub const TURN_WATCHDOG_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+/// How long a dispatched turn may go without a **committed** heartbeat before
+/// the watchdog aborts the provider attempt.
+pub const TURN_WATCHDOG_ABORT_AFTER: Duration = Duration::from_secs(40);
+
+/// The turn watchdog loop.
+///
+/// Lifted out of [`CoveredAttemptTerminalGuard::start_watchdog`] with no change
+/// in behaviour, so the cadence and the abort deadline can be driven directly
+/// under paused time by the normative conformance target. Both are *behaviour*:
+/// a source-literal match on `TURN_WATCHDOG_HEARTBEAT_INTERVAL` and
+/// `TURN_WATCHDOG_ABORT_AFTER` survives moving the interval out of the select,
+/// making the heartbeat conditional, or dropping the spawn entirely, and
+/// therefore proves neither.
+///
+/// The deadline is measured from the last **committed** heartbeat, not from the
+/// last attempt: a heartbeat the durable fence refused leaves `last_success`
+/// exactly where it was, so a lease this task no longer owns runs the clock down
+/// and aborts.
+pub async fn run_turn_watchdog_v1(
+    coordinator: ModelTurnAdmissionCoordinator,
+    identity: ModelTurnLeaseIdentity,
+    abort: djinn_provider::ProviderAttemptAbortHandleV1,
+    stop: tokio_util::sync::CancellationToken,
+    fired: tokio_util::sync::CancellationToken,
+) {
+    let mut ticks = tokio::time::interval(TURN_WATCHDOG_HEARTBEAT_INTERVAL);
+    ticks.tick().await;
+    let mut last_success = tokio::time::Instant::now();
+    coordinator.watchdog_started();
+    loop {
+        tokio::select! {
+            _ = stop.cancelled() => return,
+            _ = ticks.tick() => { let deadline = last_success + TURN_WATCHDOG_ABORT_AFTER; tokio::select! {
+                biased;
+                _ = stop.cancelled() => return,
+                _ = tokio::time::sleep_until(deadline) => { coordinator.watchdog_deadline_reached().await; abort.abort(); fired.cancel(); return; },
+                result = coordinator.heartbeat(&identity) => if matches!(result, Ok(djinn_db::ModelTurnLeaseMutationOutcome::Applied | djinn_db::ModelTurnLeaseMutationOutcome::Idempotent)) { last_success = tokio::time::Instant::now(); coordinator.watchdog_heartbeat_committed(); },
+            }}
+        }
+    }
+}
+
 /// Sole post-dispatch owner of a covered B1 attempt and its fenced lease.
 /// Raw B1 frames are adapted only through the authoritative `StreamEvent` seam.
 pub(super) struct CoveredAttemptTerminalGuard {
@@ -259,21 +303,7 @@ impl CoveredAttemptTerminalGuard {
             let Some(identity) = identity else {
                 return;
             };
-            let mut ticks = tokio::time::interval(Duration::from_secs(20));
-            ticks.tick().await;
-            let mut last_success = tokio::time::Instant::now();
-            coordinator.watchdog_started();
-            loop {
-                tokio::select! {
-                    _ = stop.cancelled() => return,
-                    _ = ticks.tick() => { let deadline = last_success + Duration::from_secs(40); tokio::select! {
-                        biased;
-                        _ = stop.cancelled() => return,
-                        _ = tokio::time::sleep_until(deadline) => { coordinator.watchdog_deadline_reached().await; abort.abort(); fired.cancel(); return; },
-                        result = coordinator.heartbeat(&identity) => if matches!(result, Ok(djinn_db::ModelTurnLeaseMutationOutcome::Applied | djinn_db::ModelTurnLeaseMutationOutcome::Idempotent)) { last_success = tokio::time::Instant::now(); coordinator.watchdog_heartbeat_committed(); },
-                    }}
-                }
-            }
+            run_turn_watchdog_v1(coordinator, identity, abort, stop, fired).await;
         }));
     }
 

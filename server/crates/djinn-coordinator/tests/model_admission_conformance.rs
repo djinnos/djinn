@@ -1407,6 +1407,368 @@ async fn phase_d_bounded_telemetry_matches_the_allow_list_exactly() {
     );
 }
 
+/// Let the runtime make real progress without moving the paused clock.
+///
+/// `tokio::time::pause()` auto-advances the clock to the next timer deadline
+/// whenever the runtime parks with nothing to run, which would jump straight
+/// past the boundaries the watchdog scenario measures. Keeping one task
+/// permanently runnable stops the runtime from parking, while the scheduler's
+/// own periodic driver poll still completes the real database round trips the
+/// watchdog performs. The budget is measured with `std::time::Instant`, which
+/// `pause()` does not touch.
+async fn settle_without_advancing_virtual_time(budget: std::time::Duration) {
+    let started = std::time::Instant::now();
+    while started.elapsed() < budget {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// The 20-second heartbeat cadence and the 40-second abort deadline, proven as
+/// behaviour under paused time.
+///
+/// Proposal `96fy`'s first criterion asks this target to *prove* both timers.
+/// It used to discharge them with `source.contains("Duration::from_secs(20)")`
+/// against another crate's source text — an assertion that survives moving the
+/// interval out of the select, making the heartbeat conditional, or deleting
+/// the watchdog spawn and leaving the constants in dead code. The behaviour was
+/// genuinely proven, but in `djinn-slot`'s own unit tests, which the fixed
+/// command does not run: exactly the substitute target the eleventh criterion
+/// forbids.
+///
+/// Task `kcso` lifted the loop out of
+/// `CoveredAttemptTerminalGuard::start_watchdog` into `run_turn_watchdog_v1`
+/// with no behaviour change, so the production loop runs here directly against
+/// a real repository and two real leases. Nothing is faked: a committed
+/// heartbeat is an `UPDATE model_turn_leases SET heartbeat_at` observed in the
+/// row, and a refused one is the production generation fence.
+///
+/// **Cadence — a two-sided bound.** A lease that has never heartbeat carries
+/// `heartbeat_at IS NULL`. At t=19 it is still null; just past t=20 it is not.
+/// A shorter interval fails the first assertion and a longer one fails the
+/// second, so the constant is pinned from both directions rather than matched
+/// as text.
+///
+/// **Deadline — also two-sided.** The second watchdog is handed an identity
+/// whose generation the lease does not own, so every heartbeat it presents is
+/// `Fenced` and its last *committed* heartbeat stays at t≈0. Its ticks fall at
+/// t=20 and t=40. At t=20 the 40-second deadline has not passed, so the tick
+/// heartbeats (and is refused) rather than aborting; just past t=40 it has, and
+/// the attempt is aborted. A deadline shorter than one tick makes the *first*
+/// tick abort instead of heartbeating, which reddens the cadence assertion
+/// above; a deadline of 41 seconds leaves the t=40 tick inside the deadline, so
+/// nothing aborts and the last assertion reddens. Both directions were
+/// confirmed by mutation, not predicted.
+///
+/// **Partition, abort, quarantine, replacement.** The abort is what a
+/// partitioned slot does on its own: it stops sending. It releases nothing, and
+/// it must not — the attempt may already have reached the provider. The rest of
+/// the chronology is asserted after it: while the aborted lease is still in
+/// flight a second slot gets `Wait(Concurrency { target: 1, in_flight: 1 })`
+/// rather than a second dispatch; the leader-side reaper then terminalises it
+/// from the persisted timestamps alone at the 90-second boundary, recording
+/// `expired`/`quarantined` because it may have been sent; and only then does the
+/// *same* refused request dispatch. This clause was proven in `djinn-slot`'s
+/// `two_slots_share_target_one_and_quarantine_after_partitioned_watchdog_abort`
+/// before task `kcso` — the second substitute target the eleventh criterion
+/// forbids.
+///
+/// **Why the millisecond nudges.** Tokio's timer wheel fires an entry when the
+/// clock moves strictly *past* its deadline, so an advance that lands exactly
+/// on a deadline does not fire it. Each boundary below is therefore crossed by
+/// a couple of milliseconds. The nudge before the first assertion is what makes
+/// each `interval`'s immediate first tick complete at t≈0, which is where both
+/// watchdogs stamp the instant their deadlines are measured from.
+#[tokio::test]
+async fn the_turn_watchdog_commits_every_twenty_seconds_and_aborts_after_forty() {
+    use djinn_db::{ModelTurnLeaseIdentity, ModelTurnLeaseMutationOutcome};
+    use djinn_slot::reply_loop::model_turn_admission::ModelTurnAdmissionCoordinator;
+    use djinn_slot::reply_loop::streaming::run_turn_watchdog_v1;
+
+    /// Two milliseconds: enough to cross a deadline, far too little to reach
+    /// the next one twenty seconds away.
+    const NUDGE: std::time::Duration = std::time::Duration::from_millis(2);
+    /// Real-time budget given to each *negative* observation: how long the
+    /// watchdog is offered to misbehave before the assertion that it did not.
+    /// Longer is strictly stricter.
+    const SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+    /// Real-time cap on each *positive* observation. A loaded runner makes a
+    /// real database round trip take arbitrarily long in real time while the
+    /// virtual clock stands still, so these wait on the condition, not a
+    /// budget; the cap only stops the test hanging if the condition never
+    /// arrives.
+    const PATIENCE: std::time::Duration = std::time::Duration::from_secs(15);
+
+    let db = djinn_coordinator::test_helpers::create_test_db();
+    let repository = ModelTurnAdmissionRepository::new(db.clone());
+
+    /// Acquire one real lease against a fresh enforcing pool and take it
+    /// through the production pre-send fence, so each watchdog below is
+    /// heartbeating a lease that genuinely exists and is genuinely in flight.
+    async fn dispatched_lease(
+        db: &Database,
+        repository: &ModelTurnAdmissionRepository,
+        credential: &str,
+    ) -> (i64, ModelTurnLeaseIdentity) {
+        let pool_id = cfni_seed_pool(db, credential, "enforce").await;
+        repository
+            .seed_request_bucket_binding_for_test(pool_id, 4, 4)
+            .await
+            .expect("seed the request binding");
+        let ModelTurnAcquireOutcome::Admitted { lease, .. } = repository
+            .acquire_turn(ModelTurnAcquireInput {
+                pool_id,
+                request_id: format!("{credential}-request"),
+                owner_pod_uid: Some("pod-cfni-watchdog".to_owned()),
+                generation: 1,
+                debits: request_debit(1),
+            })
+            .await
+            .expect("acquisition must not error")
+        else {
+            panic!("the seeded pool must admit, or the watchdog has no lease");
+        };
+        assert_eq!(
+            repository
+                .mark_dispatching(&lease.identity)
+                .await
+                .expect("mark dispatching"),
+            ModelTurnLeaseMutationOutcome::Applied,
+        );
+        (pool_id, lease.identity)
+    }
+
+    let (_, owned) = dispatched_lease(&db, &repository, "cfni-watchdog-cadence").await;
+    let (partitioned_pool, held) =
+        dispatched_lease(&db, &repository, "cfni-watchdog-deadline").await;
+    // The same lease row under a generation it does not own. Every heartbeat
+    // this presents is refused by the production fence, so the *committed*
+    // heartbeat clock never moves.
+    let disowned = ModelTurnLeaseIdentity {
+        lease_id: held.lease_id.clone(),
+        generation: held.generation + 1,
+        request_id: held.request_id.clone(),
+    };
+    // Both halves need their premise checked before the chronology starts: the
+    // deadline half needs heartbeats that genuinely fail, and the cadence half
+    // needs a lease whose heartbeats genuinely succeed. If the first of these
+    // applied, the abort below would prove nothing.
+    assert_eq!(
+        repository
+            .heartbeat(&disowned)
+            .await
+            .expect("disowned heartbeat"),
+        ModelTurnLeaseMutationOutcome::Fenced,
+    );
+    assert_eq!(
+        repository.heartbeat(&held).await.expect("held heartbeat"),
+        ModelTurnLeaseMutationOutcome::Applied
+    );
+
+    let heartbeat_at = async |lease_id: &str| {
+        djinn_db::test_support::model_turn_lease_heartbeat_snapshot_fixture(&db, lease_id)
+            .await
+            .1
+    };
+    assert_eq!(
+        heartbeat_at(&owned.lease_id).await,
+        None,
+        "the cadence lease must start with no heartbeat instant at all, or the \
+         null-to-non-null transition below is not the watchdog's"
+    );
+
+    tokio::time::pause();
+    let spin = tokio_util::sync::CancellationToken::new();
+    let spinner = tokio::spawn({
+        let spin = spin.clone();
+        async move {
+            while !spin.is_cancelled() {
+                tokio::task::yield_now().await;
+            }
+        }
+    });
+
+    let cadence_stop = tokio_util::sync::CancellationToken::new();
+    let cadence = tokio::spawn(run_turn_watchdog_v1(
+        ModelTurnAdmissionCoordinator::new(repository.clone()),
+        owned.clone(),
+        djinn_provider::ProviderAttemptAbortHandleV1::new(),
+        cadence_stop.clone(),
+        tokio_util::sync::CancellationToken::new(),
+    ));
+
+    let abort = djinn_provider::ProviderAttemptAbortHandleV1::new();
+    let fired = tokio_util::sync::CancellationToken::new();
+    let deadline_stop = tokio_util::sync::CancellationToken::new();
+    let deadline = tokio::spawn(run_turn_watchdog_v1(
+        ModelTurnAdmissionCoordinator::new(repository.clone()),
+        disowned,
+        abort.clone(),
+        deadline_stop.clone(),
+        fired.clone(),
+    ));
+
+    // t≈0. Both loops take their immediate first `interval` tick and stamp the
+    // instant their 40-second deadlines are measured from.
+    settle_without_advancing_virtual_time(SETTLE).await;
+    tokio::time::advance(NUDGE).await;
+    settle_without_advancing_virtual_time(SETTLE).await;
+    assert_eq!(
+        heartbeat_at(&owned.lease_id).await,
+        None,
+        "the first interval tick is the loop starting, not a heartbeat"
+    );
+
+    // t=19: one second short of the cadence.
+    tokio::time::advance(std::time::Duration::from_secs(19)).await;
+    settle_without_advancing_virtual_time(SETTLE).await;
+    assert_eq!(
+        heartbeat_at(&owned.lease_id).await,
+        None,
+        "no heartbeat may be committed before 20 seconds have elapsed"
+    );
+    assert!(
+        !abort.is_aborted(),
+        "and nothing may abort 19 seconds into a 40-second deadline"
+    );
+
+    // t=20: the cadence. The positive observations wait on the condition
+    // rather than on a fixed budget, because a loaded runner makes a real
+    // database round trip take arbitrarily long in *real* time while the
+    // virtual clock stays exactly where it is. The negative observations above
+    // and below keep a fixed budget, for which longer is only ever stricter.
+    tokio::time::advance(std::time::Duration::from_secs(1) + NUDGE).await;
+    let mut committed = false;
+    let waited = std::time::Instant::now();
+    while waited.elapsed() < PATIENCE {
+        if heartbeat_at(&owned.lease_id).await.is_some() {
+            committed = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        committed,
+        "the watchdog must commit a heartbeat once 20 seconds have elapsed"
+    );
+    assert!(
+        !abort.is_aborted(),
+        "the 20-second tick heartbeats; it does not abort, because 40 seconds \
+         of silence have not yet passed"
+    );
+
+    // t=39: still inside the deadline the fenced watchdog is running down.
+    tokio::time::advance(std::time::Duration::from_secs(19)).await;
+    settle_without_advancing_virtual_time(SETTLE).await;
+    assert!(
+        !abort.is_aborted(),
+        "39 seconds without a committed heartbeat is not yet the deadline"
+    );
+    assert!(!fired.is_cancelled());
+
+    // t=40: the deadline.
+    tokio::time::advance(std::time::Duration::from_secs(1) + NUDGE).await;
+    let waited = std::time::Instant::now();
+    while waited.elapsed() < PATIENCE && !abort.is_aborted() {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        abort.is_aborted(),
+        "40 seconds without a committed heartbeat must abort the provider \
+         attempt"
+    );
+    assert!(
+        fired.is_cancelled(),
+        "and it must say so on its own signal, so a caller can tell a watchdog \
+         abort from a caller-requested one"
+    );
+
+    cadence_stop.cancel();
+    deadline_stop.cancel();
+    spin.cancel();
+    tokio::time::resume();
+    let _ = cadence.await;
+    let _ = deadline.await;
+    let _ = spinner.await;
+
+    // ── Partition, abort, quarantine, replacement ─────────────────────────
+    //
+    // The abort above is what a partitioned slot does on its own: it stops
+    // sending. It does not release anything, and it must not — the attempt may
+    // already have reached the provider. This is the rest of that chronology,
+    // and every step is a production function.
+    assert_eq!(
+        repository
+            .acquire_turn(ModelTurnAcquireInput {
+                pool_id: partitioned_pool,
+                request_id: "cfni-watchdog-replacement".to_owned(),
+                owner_pod_uid: Some("pod-cfni-watchdog-b".to_owned()),
+                generation: 1,
+                debits: request_debit(1),
+            })
+            .await
+            .expect("replacement acquisition must not error"),
+        ModelTurnAcquireOutcome::Wait(djinn_db::ModelTurnAdmissionWait::Concurrency {
+            target: 1,
+            in_flight: 1,
+        }),
+        "while the aborted lease is still in flight a second slot gets a typed \
+         wait, not a second dispatch: the abort released nothing"
+    );
+
+    // The leader-side reaper is what terminalises it, from the persisted
+    // timestamps alone, at the 90-second boundary.
+    let reaped =
+        djinn_coordinator::model_turn_admission::controller::reap_stale_model_turn_leases_v1(
+            &repository,
+            &rfc3339_offset_seconds(120),
+            djinn_coordinator::model_turn_admission::controller::REAPER_PASS_LIMIT,
+            None,
+        )
+        .await
+        .expect("the reaper pass must not error");
+    assert_eq!(
+        (reaped.expired, reaped.fenced),
+        (2, 0),
+        "the pass sweeps every stale in-flight lease this fixture holds — the \
+         cadence half's and the partitioned one — and none of them moved \
+         between the read and the compare-and-swap; got {reaped:?}"
+    );
+    assert_eq!(
+        djinn_db::test_support::model_turn_terminal_fixture(
+            &db,
+            &held.lease_id,
+            held.generation,
+            &held.request_id,
+        )
+        .await,
+        ("expired".to_owned(), "quarantined".to_owned()),
+        "a lease expired out of `dispatching` may already have been sent, so \
+         its spend stays quarantined rather than being refunded"
+    );
+
+    // Only now may the replacement dispatch, and it is the *same* request that
+    // was refused above.
+    assert!(
+        matches!(
+            repository
+                .acquire_turn(ModelTurnAcquireInput {
+                    pool_id: partitioned_pool,
+                    request_id: "cfni-watchdog-replacement".to_owned(),
+                    owner_pod_uid: Some("pod-cfni-watchdog-b".to_owned()),
+                    generation: 1,
+                    debits: request_debit(1),
+                })
+                .await
+                .expect("replacement acquisition must not error"),
+            ModelTurnAcquireOutcome::Admitted { .. }
+        ),
+        "once the reaper has terminalised the partitioned lease the replacement \
+         dispatches"
+    );
+
+    close(db).await;
+}
+
 /// The subscription controller is reachable from the fenced leader cycle, and
 /// `model_turn_pools.learned_concurrency` has a production writer.
 ///
@@ -1921,11 +2283,11 @@ fn read_sibling_crate_source(relative: &str) -> String {
 /// * **Reconcile is idempotent.** Two reconciliations of the same identity
 ///   produce `Applied` then `Idempotent` and exactly one terminal row.
 ///
-/// The 20-second heartbeat cadence and 40-second abort deadline are slot-local
-/// timers proven under paused time in
-/// `djinn-slot/src/reply_loop/turn/tests/turn_watchdog_tests.rs`; this target
-/// pins both literals at their production site so changing either is red here
-/// too.
+/// The 20-second heartbeat cadence and the 40-second abort deadline are
+/// slot-local timers. They are proven behaviourally, under paused time and
+/// against the production loop, by
+/// [`the_turn_watchdog_commits_every_twenty_seconds_and_aborts_after_forty`] in
+/// this same target.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scenario_01_enforced_attempt_is_atomic_fenced_and_reconciled_once() {
     use djinn_db::{
@@ -2251,18 +2613,10 @@ async fn scenario_01_enforced_attempt_is_atomic_fenced_and_reconciled_once() {
         "the reconciliation released concurrency exactly once"
     );
 
-    // ── The slot-side watchdog cadence, pinned at its production site ─────
-    let streaming = read_sibling_crate_source("djinn-slot/src/reply_loop/streaming.rs");
-    assert!(
-        streaming.contains("tokio::time::interval(Duration::from_secs(20))"),
-        "the heartbeat watchdog must tick every 20 seconds, independently of \
-         stream polling"
-    );
-    assert!(
-        streaming.contains("last_success + Duration::from_secs(40)"),
-        "the watchdog must abort provider I/O 40 seconds after the last \
-         committed heartbeat"
-    );
+    // The 20-second cadence and the 40-second abort deadline were pinned here
+    // by a source-string match on `djinn-slot`'s text until task `kcso`. They
+    // are now proven as behaviour, under paused time and against the production
+    // loop, in `the_turn_watchdog_commits_every_twenty_seconds_and_aborts_after_forty`.
 
     close(db).await;
 }
@@ -2468,6 +2822,13 @@ async fn scenario_02_expiring_one_lease_leaves_its_sibling_untouched() {
 /// afterwards and the loser holds a typed wait naming the bucket, the
 /// available units and what it needed. A bucket whose reset instant is set
 /// defers with `ResetAt` rather than spending against the next epoch.
+///
+/// The last half drives `ProviderApiKeyNormalizerV1` — the production API-key
+/// response normalizer — through the remaining named clauses: cold-start
+/// discovery, usage reconciliation, stale headers in both directions, reset
+/// epochs and epoch regression, incomplete/impossible/malformed headers,
+/// `retry-after` in delta, HTTP-date and overflow forms, and reactive-only
+/// Gemini refusing to take a proactive capacity from headers at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scenario_03_reservation_is_conservative_and_atomic_at_one_unit() {
     use djinn_provider::{
@@ -2641,6 +3002,296 @@ async fn scenario_03_reservation_is_conservative_and_atomic_at_one_unit() {
         }),
         "the loser receives a typed wait naming the bucket it needs"
     );
+
+    // ── The API-key response normalizer, end to end ───────────────────────
+    //
+    // Six of this criterion's nine named clauses — cold-start discovery, usage
+    // reconciliation, retry-after, reset epochs, stale headers and malformed
+    // headers, plus reactive-only Gemini — used to be discharged in
+    // `djinn-provider/tests/model_turn_normalizer.rs`, which the fixed command
+    // does not run. `ProviderApiKeyNormalizerV1` appeared zero times in this
+    // target. Task `kcso` brought them here. No production change was needed:
+    // the type is already `pub` and `djinn-provider` is already a dependency,
+    // so what follows drives the production normalizer directly.
+    {
+        use djinn_provider::{
+            ProviderAdmissionPolicyV1, ProviderApiKeyNormalizerV1, ProviderDiscoveryOwnershipV1,
+            ProviderObservationIgnoreReasonV1, ProviderReceiptTimeV1, ProviderUsageObservationV1,
+        };
+
+        /// A complete capacity header set: an explicit reset epoch and the four
+        /// remaining-unit buckets. `request` varies per observation because it
+        /// is what the growth and staleness rules below are read from.
+        fn headers(
+            epoch: &'static str,
+            request: &'static str,
+        ) -> [(&'static str, &'static str); 5] {
+            [
+                ("x-ratelimit-remaining-requests", request),
+                ("x-ratelimit-remaining-input-tokens", "8"),
+                ("x-ratelimit-remaining-output-tokens", "4"),
+                ("x-ratelimit-remaining-tokens", "12"),
+                ("x-ratelimit-reset", epoch),
+            ]
+        }
+        /// A fixed receipt instant, so every retry-after deadline below is an
+        /// exact number rather than a range: no wall clock enters the result.
+        fn receipt() -> ProviderReceiptTimeV1 {
+            ProviderReceiptTimeV1 {
+                wall: std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000),
+                monotonic_ms: 77,
+            }
+        }
+
+        // ── Cold-start discovery and usage reconciliation ─────────────────
+        let mut normalizer = ProviderApiKeyNormalizerV1::new(ProviderAdmissionPolicyV1::Proactive);
+        assert_eq!(
+            normalizer.discovery_ownership(),
+            ProviderDiscoveryOwnershipV1::DiscoveryRequired,
+            "a credential with no observed capacity has not discovered anything \
+             yet, so it may not enforce against an assumed limit"
+        );
+        assert_eq!(
+            normalizer.claim_discovery(1),
+            ProviderDiscoveryOwnershipV1::DiscoveryOwned {
+                request_sequence: 1
+            },
+            "exactly one request owns the cold-start probe"
+        );
+        let first = normalizer.observe(
+            1,
+            &headers("10", "2"),
+            ProviderUsageObservationV1 {
+                input_units: Some(3),
+                output_units: Some(5),
+                combined_units: Some(8),
+            },
+            receipt(),
+        );
+        assert_eq!(
+            first
+                .authoritative_usage
+                .expect("a complete usage observation is authoritative")
+                .request_units,
+            1,
+            "usage reconciliation attributes exactly one request unit to the \
+             attempt that produced it"
+        );
+        assert_eq!(
+            first
+                .available_capacity
+                .expect("complete headers establish capacity")
+                .request_units,
+            2,
+        );
+        assert_eq!(
+            first.discovery,
+            ProviderDiscoveryOwnershipV1::Known,
+            "once capacity is observed the credential is no longer in cold start"
+        );
+
+        // ── Stale headers: an older response may lower capacity, never raise it
+        let stale_growth = normalizer.observe(
+            0,
+            &headers("10", "99"),
+            ProviderUsageObservationV1::default(),
+            receipt(),
+        );
+        assert_eq!(
+            stale_growth.ignored,
+            Some(ProviderObservationIgnoreReasonV1::Stale),
+            "an out-of-order response may not grow enforceable capacity"
+        );
+        assert_eq!(stale_growth.available_capacity, None);
+        let stale_decrease = normalizer.observe(
+            0,
+            &headers("10", "1"),
+            ProviderUsageObservationV1::default(),
+            receipt(),
+        );
+        assert_eq!(
+            stale_decrease.ignored, None,
+            "but the same out-of-order response may still lower it"
+        );
+        assert_eq!(
+            stale_decrease
+                .available_capacity
+                .expect("a lowering observation applies")
+                .request_units,
+            1,
+        );
+        let decreased = normalizer.observe(
+            2,
+            &headers("10", "1"),
+            ProviderUsageObservationV1::default(),
+            receipt(),
+        );
+        assert_eq!(
+            decreased
+                .available_capacity
+                .expect("an in-order observation applies")
+                .request_units,
+            1,
+            "and the growth watermark did not move backwards behind it"
+        );
+
+        // ── Reset epochs: a larger epoch starts a window, a smaller one is a
+        //    regression and is refused outright ─────────────────────────────
+        let mut epochs = ProviderApiKeyNormalizerV1::new(ProviderAdmissionPolicyV1::Proactive);
+        epochs.observe(
+            4,
+            &headers("10", "2"),
+            ProviderUsageObservationV1::default(),
+            receipt(),
+        );
+        let reset = epochs.observe(
+            5,
+            &headers("11", "9"),
+            ProviderUsageObservationV1::default(),
+            receipt(),
+        );
+        assert_eq!(
+            reset.reset_epoch,
+            Some(11),
+            "a larger explicit epoch authoritatively opens a new window"
+        );
+        let regressing = epochs.observe(
+            6,
+            &headers("9", "20"),
+            ProviderUsageObservationV1::default(),
+            receipt(),
+        );
+        assert_eq!(
+            regressing.ignored,
+            Some(ProviderObservationIgnoreReasonV1::Regressing),
+            "an epoch that runs backwards is not a new window"
+        );
+
+        // ── Malformed and incomplete headers fail closed ──────────────────
+        let incomplete = epochs.observe(
+            7,
+            &[("x-ratelimit-remaining-requests", "1")],
+            ProviderUsageObservationV1::default(),
+            receipt(),
+        );
+        assert_eq!(
+            incomplete.ignored,
+            Some(ProviderObservationIgnoreReasonV1::Incomplete),
+            "a partial header set establishes no capacity at all"
+        );
+        let impossible = epochs.observe(
+            8,
+            &headers("11", "-1"),
+            ProviderUsageObservationV1::default(),
+            receipt(),
+        );
+        assert_eq!(
+            impossible.ignored,
+            Some(ProviderObservationIgnoreReasonV1::Impossible),
+            "negative remaining units are not a small number"
+        );
+        let malformed = epochs.observe(
+            9,
+            &headers("not-an-epoch", "1"),
+            ProviderUsageObservationV1::default(),
+            receipt(),
+        );
+        assert_eq!(
+            malformed.ignored,
+            Some(ProviderObservationIgnoreReasonV1::Malformed),
+        );
+        assert_eq!(
+            malformed.diagnostics.malformed, 1,
+            "and the refusal is counted, so a provider that always sends \
+             garbage is visible rather than silently ignored"
+        );
+
+        // ── retry-after: delta seconds, HTTP-date, and overflow ───────────
+        let delta = epochs.observe(
+            10,
+            &[("retry-after", "2")],
+            ProviderUsageObservationV1::default(),
+            receipt(),
+        );
+        assert_eq!(
+            delta.retry_after_deadline_monotonic_ms,
+            Some(2_077),
+            "delta seconds are measured from the receipt's own monotonic \
+             reading, never from a fresh clock read"
+        );
+        let date = epochs.observe(
+            11,
+            &[("retry-after", "Thu, 01 Jan 1970 00:16:42 GMT")],
+            ProviderUsageObservationV1::default(),
+            receipt(),
+        );
+        assert_eq!(
+            date.retry_after_deadline_monotonic_ms,
+            Some(2_077),
+            "and an HTTP-date form naming the same instant produces the same \
+             deadline"
+        );
+        let overflow = epochs.observe(
+            12,
+            &[("retry-after", "18446744073709551615")],
+            ProviderUsageObservationV1::default(),
+            ProviderReceiptTimeV1 {
+                monotonic_ms: u64::MAX,
+                ..receipt()
+            },
+        );
+        assert_eq!(
+            overflow.retry_after_deadline_monotonic_ms, None,
+            "a deadline that cannot be represented is no deadline"
+        );
+        assert_eq!(
+            overflow.ignored,
+            Some(ProviderObservationIgnoreReasonV1::Impossible)
+        );
+        assert_eq!(overflow.diagnostics.impossible, 2);
+        let unparsable = epochs.observe(
+            13,
+            &[("retry-after", "banana")],
+            ProviderUsageObservationV1::default(),
+            receipt(),
+        );
+        assert_eq!(
+            unparsable.ignored,
+            Some(ProviderObservationIgnoreReasonV1::Malformed)
+        );
+        assert_eq!(unparsable.diagnostics.malformed, 2);
+
+        // ── Reactive-only Gemini: headers never establish capacity ────────
+        let mut gemini =
+            ProviderApiKeyNormalizerV1::new(ProviderAdmissionPolicyV1::ReactiveOnlyTarget1);
+        let observation = gemini.observe(
+            1,
+            &headers("10", "99"),
+            ProviderUsageObservationV1::default(),
+            receipt(),
+        );
+        assert_eq!(
+            observation.available_capacity, None,
+            "a reactive-only route may not be given a proactive capacity from \
+             headers, however complete they are"
+        );
+        assert_eq!(
+            observation.discovery,
+            ProviderDiscoveryOwnershipV1::DiscoveryRequired,
+            "and it never leaves cold start on the strength of them"
+        );
+        let wait = gemini.observe(
+            2,
+            &[("retry-after", "1")],
+            ProviderUsageObservationV1::default(),
+            receipt(),
+        );
+        assert_eq!(
+            wait.retry_after_deadline_monotonic_ms,
+            Some(1_077),
+            "what it does honour is the provider telling it to wait"
+        );
+    }
 
     close(db).await;
 }
@@ -5155,10 +5806,151 @@ const REQUIRED_SCENARIOS: &[RequiredScenario] = &[
     },
 ];
 
+/// One load-bearing test that is not a `scenario_*` function, and the clause it
+/// carries.
+///
+/// Adversarial verification found that [`REQUIRED_SCENARIOS`] pinned only
+/// functions whose names begin with `scenario_`, leaving four tests that each
+/// discharge part of a criterion completely unpinned — deleting any of them
+/// left the manifest test green. `kueue_pending_workload_…` is the clearest
+/// case: it is what actually discharges the Kueue clause of criterion 7.
+struct SupportingTest {
+    /// The criterion group this test contributes to, or `0` when it guards the
+    /// target's own integrity rather than a numbered criterion.
+    group: usize,
+    /// What this test is here to establish.
+    clause: &'static str,
+    name: &'static str,
+    /// The function **item**, for the same reason [`RequiredScenario`] holds
+    /// one: deleting it, or renaming it without updating this entry, does not
+    /// compile.
+    test: fn(),
+}
+
+/// Every load-bearing test in this target that is not a numbered scenario.
+///
+/// `required_scenarios_manifest_covers_every_criterion_group` asserts that this
+/// list, plus [`REQUIRED_SCENARIOS`], plus the manifest test itself, is exactly
+/// the set of tests the target defines — so a load-bearing test cannot be added
+/// without being registered here, and cannot be deleted without breaking the
+/// build.
+const REQUIRED_SUPPORTING_TESTS: &[SupportingTest] = &[
+    SupportingTest {
+        group: 0,
+        clause: "Phase A's durable prerequisite: the schema marker is installed at the revision \
+                 this binary understands, a pool seeded under it resolves and writes exactly one \
+                 lease row, and an unresolvable pool writes zero.",
+        name: "phase_a_schema_prerequisite",
+        test: phase_a_schema_prerequisite,
+    },
+    SupportingTest {
+        group: 7,
+        clause: "The resident admission seam is reachable from outside the crate, so criterion \
+                 7's conjunction is asserted against the function dispatch actually calls.",
+        name: "resident_admission_seam_is_reachable_out_of_crate",
+        test: resident_admission_seam_is_reachable_out_of_crate,
+    },
+    SupportingTest {
+        group: 7,
+        clause: "Role-to-lane mapping is pinned, so a lane cap asserted for one role cannot \
+                 silently start applying to another.",
+        name: "model_lane_role_mapping_is_pinned",
+        test: model_lane_role_mapping_is_pinned,
+    },
+    SupportingTest {
+        group: 7,
+        clause: "The census of session-cap and lane-cap call sites is pinned, so no second \
+                 resident authority can appear alongside the one criterion 7 tests.",
+        name: "resident_admission_call_sites_are_pinned",
+        test: resident_admission_call_sites_are_pinned,
+    },
+    SupportingTest {
+        group: 7,
+        clause: "A Kueue-pending workload writes no model-turn lease and receives no replacement \
+                 dispatch: the Kueue clause of criterion 7.",
+        name: "kueue_pending_workload_writes_no_lease_and_gets_no_replacement_dispatch",
+        test: kueue_pending_workload_writes_no_lease_and_gets_no_replacement_dispatch,
+    },
+    SupportingTest {
+        group: 4,
+        clause: "The emitted (metric, label key, label value) set equals the Phase-D allow list \
+                 exactly, so telemetry can carry no credential or request identifier.",
+        name: "phase_d_bounded_telemetry_matches_the_allow_list_exactly",
+        test: phase_d_bounded_telemetry_matches_the_allow_list_exactly,
+    },
+    SupportingTest {
+        group: 9,
+        clause: "`enforce` has no production caller outside the guarded leader pass, which is the \
+                 fact criterion 9's coverage argument rests on.",
+        name: "enforce_has_no_production_caller_outside_the_guarded_leader_pass",
+        test: enforce_has_no_production_caller_outside_the_guarded_leader_pass,
+    },
+    SupportingTest {
+        group: 1,
+        clause: "The 20-second heartbeat cadence and the 40-second abort deadline, proven as \
+                 behaviour under paused time against the production watchdog loop, and the \
+                 partition-to-abort-to-quarantine-to-replacement chronology that follows the \
+                 abort.",
+        name: "the_turn_watchdog_commits_every_twenty_seconds_and_aborts_after_forty",
+        test: the_turn_watchdog_commits_every_twenty_seconds_and_aborts_after_forty,
+    },
+    SupportingTest {
+        group: 6,
+        clause: "The subscription controller is called from the fenced leader cycle and \
+                 `learned_concurrency` has a fenced production writer, so criterion 6's ladder \
+                 describes something production can reach.",
+        name: "the_subscription_learner_is_wired_to_the_fenced_leader_cycle",
+        test: the_subscription_learner_is_wired_to_the_fenced_leader_cycle,
+    },
+];
+
+/// The manifest test itself. It is the one test in this target that no manifest
+/// lists, because a manifest that had to list itself would be satisfied by its
+/// own presence — it guards the others, and the `[[test]]` entry in
+/// `Cargo.toml` guards it.
+const MANIFEST_TEST: &str = "required_scenarios_manifest_covers_every_criterion_group";
+
 /// The number of normative criterion groups in proposal `96fy`.
 const NORMATIVE_CRITERION_GROUPS: usize = 10;
 
 /// Every `scenario_*` function this target's source actually defines.
+/// Every `#[test]` / `#[tokio::test]` function this target's source defines.
+///
+/// The scan is deliberately over the attribute rather than over the function
+/// name: a test cannot avoid it by being named something other than
+/// `scenario_*`, which is exactly how four load-bearing tests went unpinned
+/// before task `kcso`. Helper functions declared inside a test body carry no
+/// test attribute and are not collected.
+fn registered_test_functions(source: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut expecting = false;
+    for line in source.lines().map(str::trim_start) {
+        if line.starts_with("#[test]") || line.starts_with("#[tokio::test") {
+            expecting = true;
+            continue;
+        }
+        if !expecting {
+            continue;
+        }
+        let Some(rest) = line
+            .strip_prefix("async fn ")
+            .or_else(|| line.strip_prefix("fn "))
+        else {
+            // Attributes may stack between the test attribute and the item.
+            continue;
+        };
+        expecting = false;
+        names.push(
+            rest.chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect::<String>(),
+        );
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn registered_scenario_functions(source: &str) -> Vec<String> {
     let mut names: Vec<String> = source
         .lines()
@@ -5194,10 +5986,15 @@ fn registered_scenario_functions(source: &str) -> Vec<String> {
 /// * *Adding* a `scenario_*` function without registering it: the set equality
 ///   fails, so the manifest cannot fall behind the target either.
 /// * *Pointing two groups at one function*: the distinct-address check fails.
+/// * *Adding **any** test without registering it*: the second half scans for
+///   `#[test]`/`#[tokio::test]` attributes rather than for names, and requires
+///   the set it finds to equal `REQUIRED_SCENARIOS` ∪ `REQUIRED_SUPPORTING_TESTS`
+///   ∪ this test. Before task `kcso` the manifest bound only functions named
+///   `scenario_*`, so four load-bearing tests were pinned by nothing at all.
 ///
-/// The scan is guarded against silently finding nothing by the sentinel
-/// assertions: it must find at least ten names, and it must find the name of
-/// the scenario the source demonstrably contains.
+/// Both scans are guarded against silently finding nothing by sentinel
+/// assertions: each must find at least as many names as its manifest lists, and
+/// each must find a name the source demonstrably contains.
 #[test]
 fn required_scenarios_manifest_covers_every_criterion_group() {
     assert_eq!(
@@ -5259,5 +6056,67 @@ fn required_scenarios_manifest_covers_every_criterion_group() {
         "the required-scenario manifest and the scenarios this target registers \
          must be the same set. A scenario was deleted, renamed or added without \
          updating REQUIRED_SCENARIOS."
+    );
+
+    // ── Every load-bearing test, not only the numbered scenarios ──────────
+    for entry in REQUIRED_SUPPORTING_TESTS {
+        assert!(
+            entry.clause.len() > 40,
+            "`{}` must restate the clause it carries, not label it",
+            entry.name
+        );
+        assert!(
+            entry.group <= NORMATIVE_CRITERION_GROUPS,
+            "`{}` names criterion group {}, which does not exist",
+            entry.name,
+            entry.group
+        );
+    }
+    let mut supporting_addresses: Vec<usize> = REQUIRED_SUPPORTING_TESTS
+        .iter()
+        .map(|entry| entry.test as usize)
+        .collect();
+    supporting_addresses.sort_unstable();
+    supporting_addresses.dedup();
+    assert_eq!(
+        supporting_addresses.len(),
+        REQUIRED_SUPPORTING_TESTS.len(),
+        "two supporting entries point at the same function"
+    );
+
+    let defined = registered_test_functions(&source);
+    assert!(
+        defined.len() >= REQUIRED_SCENARIOS.len() + REQUIRED_SUPPORTING_TESTS.len(),
+        "the attribute scan found only {} test functions; the scan is broken",
+        defined.len()
+    );
+    assert!(
+        defined.iter().any(|name| name == MANIFEST_TEST),
+        "the attribute scan missed this very test; the scan is broken"
+    );
+    let mut pinned: Vec<String> = REQUIRED_SCENARIOS
+        .iter()
+        .map(|entry| entry.name.to_owned())
+        .chain(
+            REQUIRED_SUPPORTING_TESTS
+                .iter()
+                .map(|entry| entry.name.to_owned()),
+        )
+        .chain(std::iter::once(MANIFEST_TEST.to_owned()))
+        .collect();
+    pinned.sort();
+    pinned.dedup();
+    assert_eq!(
+        pinned.len(),
+        REQUIRED_SCENARIOS.len() + REQUIRED_SUPPORTING_TESTS.len() + 1,
+        "a test is listed in both manifests"
+    );
+    assert_eq!(
+        pinned, defined,
+        "every test this target defines must be pinned by REQUIRED_SCENARIOS or \
+         REQUIRED_SUPPORTING_TESTS. Before task `kcso` the manifest bound only \
+         functions named `scenario_*`, so four load-bearing tests — including \
+         the one that discharges criterion 7's Kueue clause — could be deleted \
+         with this test still green."
     );
 }
