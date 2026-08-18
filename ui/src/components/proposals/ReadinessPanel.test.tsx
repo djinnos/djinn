@@ -21,6 +21,29 @@ vi.mock("@/lib/toast", () => ({
   },
 }));
 
+/**
+ * Drives a real interaction against every enabled control the panel currently
+ * renders, and returns how many it clicked.
+ *
+ * This is what makes the `expect(callMcpTool).not.toHaveBeenCalled()`
+ * assertions below falsifiable. A render-only test cannot issue a mutation no
+ * matter what the component does, so a zero-call assertion after it holds
+ * trivially. With the typed-evidence retry visibility guard removed, the retry
+ * button *is* rendered — this sweep then clicks it and the mutation fires, so
+ * every zero-call assertion in this file goes red. The positive control in
+ * "issues zero calls with typed presentation hidden" proves the sweep really
+ * does fire the mutation when the control is present.
+ */
+async function clickEveryRenderedControl(): Promise<number> {
+  const controls = Array.from(
+    document.body.querySelectorAll<HTMLButtonElement>("button:not([disabled])"),
+  );
+  for (const control of controls) {
+    await userEvent.click(control);
+  }
+  return controls.length;
+}
+
 function gateStatus(
   overrides: Partial<ProposalGateStatus> = {},
 ): ProposalGateStatus {
@@ -801,7 +824,7 @@ describe("ReadinessPanel typed evidence finding", () => {
     vi.mocked(callMcpTool).mockReset();
   });
 
-  it("renders the finding for each of the six lifecycle states", () => {
+  it("renders the finding for each of the six lifecycle states", async () => {
     for (const lifecycle of TYPED_LIFECYCLES) {
       const blocking = !["resolved", "withdrawn"].includes(lifecycle);
       const { unmount } = render(
@@ -827,12 +850,13 @@ describe("ReadinessPanel typed evidence finding", () => {
         card.textContent?.includes("Blocking"),
         `${lifecycle} blocking badge`,
       ).toBe(blocking);
+      await clickEveryRenderedControl();
       unmount();
     }
     expect(callMcpTool).not.toHaveBeenCalled();
   });
 
-  it("renders all three evidence outcomes, and says so when none has landed", () => {
+  it("renders all three evidence outcomes, and says so when none has landed", async () => {
     for (const outcome of ["resolved", "partial", "unresolved"] as const) {
       const { unmount } = render(
         <ReadinessPanel
@@ -849,6 +873,7 @@ describe("ReadinessPanel typed evidence finding", () => {
       expect(screen.getByTestId("typed-evidence-finding")).toHaveTextContent(
         outcome,
       );
+      await clickEveryRenderedControl();
       unmount();
     }
     render(
@@ -866,7 +891,7 @@ describe("ReadinessPanel typed evidence finding", () => {
     expect(callMcpTool).not.toHaveBeenCalled();
   });
 
-  it("distinguishes a healthy anchor from an unusable, method-incompatible one", () => {
+  it("distinguishes a healthy anchor from an unusable, method-incompatible one", async () => {
     render(
       <ReadinessPanel
         gateStatus={gateStatus({
@@ -920,10 +945,11 @@ describe("ReadinessPanel typed evidence finding", () => {
     expect(
       screen.getAllByTestId("typed-evidence-anchor-health"),
     ).toHaveLength(2);
+    await clickEveryRenderedControl();
     expect(callMcpTool).not.toHaveBeenCalled();
   });
 
-  it("renders a finding with attempts, failures, gaps, usable findings and a Judge disposition", () => {
+  it("renders a finding with attempts, failures, gaps, usable findings and a Judge disposition", async () => {
     render(
       <ReadinessPanel
         gateStatus={gateStatus({
@@ -999,10 +1025,11 @@ describe("ReadinessPanel typed evidence finding", () => {
     ).toHaveTextContent(
       "Unresolved typed evidence finding finding-abc (lifecycle: failed; demanded against revision 2)",
     );
+    await clickEveryRenderedControl();
     expect(callMcpTool).not.toHaveBeenCalled();
   });
 
-  it("renders identical blocking diagnostics as the proposal head advances to N+1 and N+2", () => {
+  it("renders identical blocking diagnostics as the proposal head advances to N+1 and N+2", async () => {
     // The finding was demanded against revision 2 and keeps blocking as the
     // head moves. If the panel recomputed staleness against the trail's latest
     // revision it would change what it renders here; it must not.
@@ -1039,6 +1066,7 @@ describe("ReadinessPanel typed evidence finding", () => {
         />,
       );
       rendered.push(screen.getByTestId("typed-evidence-finding").innerHTML);
+      await clickEveryRenderedControl();
       unmount();
     }
     expect(rendered[0]).toBe(rendered[1]);
@@ -1048,7 +1076,7 @@ describe("ReadinessPanel typed evidence finding", () => {
     expect(callMcpTool).not.toHaveBeenCalled();
   });
 
-  it("renders no typed section at all when the server published none", () => {
+  it("renders no typed section at all when the server published none", async () => {
     const { container } = render(
       <ReadinessPanel
         gateStatus={gateStatus({
@@ -1069,10 +1097,11 @@ describe("ReadinessPanel typed evidence finding", () => {
     // The legacy rendering is exactly what it was: the awaiting-evidence note.
     expect(screen.getByText("Awaiting evidence: lg-1")).toBeInTheDocument();
     expect(container.innerHTML).not.toContain("Typed evidence finding");
+    await clickEveryRenderedControl();
     expect(callMcpTool).not.toHaveBeenCalled();
   });
 
-  it("suppresses the typed section when the projection carries no finding id", () => {
+  it("suppresses the typed section when the projection carries no finding id", async () => {
     // A parity-mismatch projection reports a mode and a reason but no finding.
     // There is nothing to render, and rendering an empty card would read as a
     // finding that exists.
@@ -1095,6 +1124,7 @@ describe("ReadinessPanel typed evidence finding", () => {
       />,
     );
     expect(screen.queryByTestId("typed-evidence-finding")).toBeNull();
+    await clickEveryRenderedControl();
     expect(callMcpTool).not.toHaveBeenCalled();
   });
 });
@@ -1125,7 +1155,7 @@ describe("ReadinessPanel typed evidence retry action", () => {
     vi.mocked(showToast.error).mockClear();
   });
 
-  it("hides retry for every lifecycle other than failed, even when permitted", () => {
+  it("hides retry for every lifecycle other than failed, even when permitted", async () => {
     for (const lifecycle of TYPED_LIFECYCLES) {
       if (lifecycle === "failed") continue;
       const { unmount } = render(
@@ -1148,12 +1178,13 @@ describe("ReadinessPanel typed evidence retry action", () => {
         screen.queryByRole("button", { name: RETRY_LABEL }),
         lifecycle,
       ).toBeNull();
+      await clickEveryRenderedControl();
       unmount();
     }
     expect(callMcpTool).not.toHaveBeenCalled();
   });
 
-  it("hides retry for a failed finding the server does not permit this caller to retry", () => {
+  it("hides retry for a failed finding the server does not permit this caller to retry", async () => {
     render(
       <ReadinessPanel
         proposalId="p-1"
@@ -1170,10 +1201,11 @@ describe("ReadinessPanel typed evidence retry action", () => {
     );
     expect(screen.getByTestId("typed-evidence-finding")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: RETRY_LABEL })).toBeNull();
+    await clickEveryRenderedControl();
     expect(callMcpTool).not.toHaveBeenCalled();
   });
 
-  it("hides retry when permission is granted but the server named no failed transition", () => {
+  it("hides retry when permission is granted but the server named no failed transition", async () => {
     render(
       <ReadinessPanel
         proposalId="p-1"
@@ -1188,6 +1220,7 @@ describe("ReadinessPanel typed evidence retry action", () => {
       />,
     );
     expect(screen.queryByRole("button", { name: RETRY_LABEL })).toBeNull();
+    await clickEveryRenderedControl();
     expect(callMcpTool).not.toHaveBeenCalled();
   });
 
@@ -1254,7 +1287,13 @@ describe("ReadinessPanel typed evidence retry action", () => {
     expect(onChanged).not.toHaveBeenCalled();
   });
 
-  it("renders no resolve or withdraw control anywhere in the matrix", () => {
+  it("renders no resolve or withdraw control anywhere in the matrix", async () => {
+    // Every cell of the matrix is swept with real clicks, so the tool names
+    // collected below are the complete set of mutations the typed section can
+    // issue. The authorized retry is the only permitted one; a resolve or
+    // withdraw control would surface here as an extra tool name even if its
+    // button carried a label `FORBIDDEN_ACTION_LABELS` does not match.
+    const expectedRetryCells: string[] = [];
     for (const lifecycle of TYPED_LIFECYCLES) {
       for (const permitted of [false, true]) {
         for (const hasTransition of [false, true]) {
@@ -1293,14 +1332,24 @@ describe("ReadinessPanel typed evidence retry action", () => {
           expect(
             screen.getByTestId("typed-evidence-disposition"),
           ).toHaveTextContent("Folded into revision 5.");
+          if (lifecycle === "failed" && permitted && hasTransition) {
+            expectedRetryCells.push(label);
+          }
+          await clickEveryRenderedControl();
           unmount();
         }
       }
     }
-    expect(callMcpTool).not.toHaveBeenCalled();
+    // One cell — failed + permitted + a named failed transition — legitimately
+    // renders the retry control, and the sweep fires it. Every other cell must
+    // contribute nothing at all.
+    expect(expectedRetryCells).toEqual(["failed/true/true"]);
+    expect(
+      vi.mocked(callMcpTool).mock.calls.map(([tool]) => tool),
+    ).toEqual(["proposal_refinement_retry_evidence"]);
   });
 
-  it("issues zero calls with typed presentation hidden, and leaves legacy rendering unchanged", () => {
+  it("issues zero calls with typed presentation hidden, and leaves legacy rendering unchanged", async () => {
     // AC4, in its checkable form. `hiding typed presentation must not strand an
     // active task` is a server-side property no UI test can observe; what the
     // browser CAN be held to is that it issues no mutation at all when the
@@ -1337,6 +1386,17 @@ describe("ReadinessPanel typed evidence retry action", () => {
     const legacyNoteWithTyped = screen.getByText(
       "Awaiting evidence: lg-1",
     ).parentElement!.innerHTML;
+    // Positive control for the sweep used by every zero-call assertion in this
+    // file: with the retry control rendered, that same interaction DOES issue
+    // the mutation. So a later zero-call assertion after the same sweep is a
+    // statement about the component, not about the test doing nothing.
+    expect(await clickEveryRenderedControl()).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(callMcpTool).toHaveBeenCalledWith(
+        "proposal_refinement_retry_evidence",
+        { finding_id: "finding-abc", failed_transition_id: "transition-1" },
+      ),
+    );
     withTyped.unmount();
     vi.mocked(callMcpTool).mockReset();
 
@@ -1356,6 +1416,7 @@ describe("ReadinessPanel typed evidence retry action", () => {
     expect(
       screen.getByText("Awaiting evidence: lg-1").parentElement!.innerHTML,
     ).toBe(legacyNoteWithTyped);
+    await clickEveryRenderedControl();
     // The whole point: zero mutations issued.
     expect(callMcpTool).toHaveBeenCalledTimes(0);
   });
