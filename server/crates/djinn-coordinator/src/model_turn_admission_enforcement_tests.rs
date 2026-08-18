@@ -52,7 +52,7 @@ use djinn_k8s::{
 
 use crate::model_turn_admission::controller::project_dispatch_topology_paths_v1;
 use crate::model_turn_admission::enforcement::{
-    expected_paths_by_pool_v1, run_enforcement_pass_v1,
+    expected_paths_by_pool_v1, request_phase_advances_v1, run_enforcement_pass_v1,
 };
 
 const PROVIDER: &str = "enforce-provider";
@@ -659,4 +659,230 @@ fn the_pass_contains_no_wall_clock_wait() {
             "the enforcement pass must not contain `{forbidden}`"
         );
     }
+}
+
+/// A previous window's qualifier verdict is not evidence about this one.
+///
+/// The enforcement pass reads `last_phase_c_window_trainable` rather than
+/// re-qualifying, which is only sound if the controller cycle clears it the
+/// moment it starts on a new window. The dangerous shape is a cycle that
+/// *exits early* — an empty topology, an unreadable inventory, a projection
+/// that came back empty — because those paths never reach the line that
+/// records a verdict. Without the reset they leave the previous window's
+/// answer standing, and `true` is the one gate between a pool that has never
+/// been shown to sustain a window and `enforce`.
+///
+/// So this drives exactly that path: no observable pool, so the cycle returns
+/// before it can qualify anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_window_clears_the_previous_windows_qualifier_verdict() {
+    let db = Database::ephemeral().await.expect("db");
+    // Deliberately no observable pool: the controller cycle exits before it
+    // reaches the qualifier, which is the path that would otherwise inherit a
+    // stale verdict.
+    let repository = ModelTurnAdmissionRepository::new(db.clone());
+    assert!(
+        repository
+            .list_observable_pools(64)
+            .await
+            .expect("topology read")
+            .is_empty(),
+        "precondition: the cycle has nothing to qualify"
+    );
+
+    let mut actor = crate::actor::actor_with_test_db(db.clone());
+    register_incarnation(&db, &actor.coordinator_incarnation_id).await;
+    actor.catalog = enforcement_catalog();
+    actor.workload_inventory = Some(Arc::new(CountingInventory {
+        records: vec![ready_slot()],
+        reads: Arc::new(AtomicUsize::new(0)),
+    }));
+
+    // Stand in for a window that qualified, then force the next window to be
+    // unprocessed so the controller cycle starts fresh on it.
+    actor.last_phase_c_window_trainable = true;
+    actor.last_phase_c_window_start = None;
+    actor.run_completed_phase_c_window().await;
+    assert!(
+        !actor.last_phase_c_window_trainable,
+        "an early-exiting cycle must not leave the previous window's verdict standing"
+    );
+}
+
+// ── The A→B→C→D guard has a production caller ──────────────────────────────
+
+/// The leader tick is what makes the compatibility phase reachable at all.
+///
+/// Without this call `model_turn_pools.compatibility_phase` stays at `a`
+/// forever, `enforce` — which demands `d` — is unreachable for a reason that
+/// has nothing to do with whether the prerequisites hold, and the guard's six
+/// predicates never run outside a test. The assertion is the persisted
+/// decision row, not the returned value: a denial writes exactly one row
+/// naming which prerequisite failed, and one production tick must produce it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tick_asks_the_phase_guard_and_persists_its_decision() {
+    let db = Database::ephemeral().await.expect("db");
+    let repository = ModelTurnAdmissionRepository::new(db.clone());
+    let pool_id = seed_shadow_pool(&db, "phase-guard-tick").await;
+    // Covered, so the pass does not drain the pool out of the topology before
+    // the guard is asked about it.
+    cover(&repository, pool_id).await;
+
+    assert_eq!(
+        repository
+            .compatibility_phase(pool_id)
+            .await
+            .expect("read phase")
+            .expect("pool exists"),
+        ModelTurnCompatibilityPhase::A,
+        "precondition: a fresh pool starts at phase a"
+    );
+    assert!(
+        repository
+            .phase_transitions(pool_id, 64)
+            .await
+            .expect("read ledger")
+            .is_empty(),
+        "precondition: no phase decision has been recorded"
+    );
+
+    let mut actor = crate::actor::actor_with_test_db(db.clone());
+    register_incarnation(&db, &actor.coordinator_incarnation_id).await;
+    actor.catalog = enforcement_catalog();
+    actor.workload_inventory = Some(Arc::new(CountingInventory {
+        records: vec![ready_slot()],
+        reads: Arc::new(AtomicUsize::new(0)),
+    }));
+    actor.drive_tick_for_test().await;
+
+    let decisions = repository
+        .phase_transitions(pool_id, 64)
+        .await
+        .expect("read ledger");
+    assert_eq!(
+        decisions.len(),
+        1,
+        "one production tick must record exactly one phase decision"
+    );
+    let (requested, effective, _generation, predicates) = &decisions[0];
+    assert_eq!(*requested, ModelTurnCompatibilityPhase::B);
+    assert_eq!(
+        *effective,
+        ModelTurnCompatibilityPhase::A,
+        "the observation history Phase B never stored cannot hold, so the phase \
+         stays where it was"
+    );
+    // The row names which prerequisite failed rather than merely that one did.
+    assert_eq!(
+        predicates.get("observation_history"),
+        Some(&false),
+        "an empty attempt-chain history must be the named denial: {predicates:?}"
+    );
+    assert_eq!(
+        repository
+            .compatibility_phase(pool_id)
+            .await
+            .expect("read phase")
+            .expect("pool exists"),
+        ModelTurnCompatibilityPhase::A
+    );
+}
+
+/// A pool whose prerequisites do hold advances by exactly one step per pass,
+/// and never skips.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_guard_advances_one_step_per_pass_and_never_skips() {
+    let db = Database::ephemeral().await.expect("db");
+    let repository = ModelTurnAdmissionRepository::new(db.clone());
+    let pool_id = seed_shadow_pool(&db, "phase-guard-steps").await;
+    cover(&repository, pool_id).await;
+    let incarnation = "00000000-0000-7000-8000-0000000000e5";
+    register_incarnation(&db, incarnation).await;
+    // Every attempt chain in the freshness window is complete. This is the one
+    // prerequisite production cannot satisfy today, so it is seeded here
+    // through the production evidence writer rather than assumed.
+    for (index, stage) in [
+        djinn_db::ModelTurnPhaseCEvidenceStage::Decision,
+        djinn_db::ModelTurnPhaseCEvidenceStage::Dispatch,
+        djinn_db::ModelTurnPhaseCEvidenceStage::Heartbeat,
+        djinn_db::ModelTurnPhaseCEvidenceStage::ProviderOutcome,
+        djinn_db::ModelTurnPhaseCEvidenceStage::Reconcile,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let _ = index;
+        repository
+            .record_phase_c_evidence(djinn_db::ModelTurnPhaseCEvidenceInput {
+                pool_id,
+                slot_pod_uid: SLOT.to_owned(),
+                deployment_revision: REVISION.to_owned(),
+                provider_id: PROVIDER.to_owned(),
+                model_id: MODEL.to_owned(),
+                attempt_fingerprint:
+                    "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                        .to_owned(),
+                stage,
+                outcome: djinn_db::ModelTurnPhaseCEvidenceOutcome::Recorded,
+            })
+            .await
+            .expect("record evidence");
+    }
+
+    let expected = one_pool(pool_id);
+    for step in [
+        ModelTurnCompatibilityPhase::B,
+        ModelTurnCompatibilityPhase::C,
+        ModelTurnCompatibilityPhase::D,
+    ] {
+        let advanced = request_phase_advances_v1(
+            &repository,
+            &fence(incarnation),
+            GENERATION,
+            &evaluated_at(),
+            &expected,
+        )
+        .await
+        .expect("phase guard pass");
+        assert_eq!(
+            advanced,
+            vec![pool_id],
+            "each pass advances exactly one step"
+        );
+        assert_eq!(
+            repository
+                .compatibility_phase(pool_id)
+                .await
+                .expect("read phase")
+                .expect("pool exists"),
+            step
+        );
+    }
+    // At `d` there is no successor, so a further pass is a no-op and appends
+    // nothing.
+    let rows_at_d = repository
+        .phase_transitions(pool_id, 64)
+        .await
+        .expect("read ledger")
+        .len();
+    assert_eq!(rows_at_d, 3, "three steps, three decision rows");
+    let advanced = request_phase_advances_v1(
+        &repository,
+        &fence(incarnation),
+        GENERATION,
+        &evaluated_at(),
+        &expected,
+    )
+    .await
+    .expect("phase guard pass");
+    assert!(advanced.is_empty());
+    assert_eq!(
+        repository
+            .phase_transitions(pool_id, 64)
+            .await
+            .expect("read ledger")
+            .len(),
+        rows_at_d,
+        "a pool already at `d` must append no further decision"
+    );
 }

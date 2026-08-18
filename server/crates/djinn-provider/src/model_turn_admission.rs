@@ -249,8 +249,36 @@ pub enum ProviderAttemptAbortResultV1 {
 /// Timing needed by later throughput windows, represented without request IDs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct ProviderTokenEmissionV1 {
+    /// The injected monotonic instant at which this attempt began, so
+    /// time-to-first-token is derivable without any consumer holding an
+    /// `Instant`. It is an opaque counter, not a wall clock.
+    pub attempt_started_monotonic_ms: Option<u64>,
     pub first_token_monotonic_ms: Option<u64>,
     pub last_token_monotonic_ms: Option<u64>,
+}
+
+impl ProviderTokenEmissionV1 {
+    /// Seconds from the attempt starting to its first emitted token, or `None`
+    /// when either instant is missing or the pair does not move forwards.
+    #[must_use]
+    pub fn time_to_first_token_seconds(&self) -> Option<f64> {
+        let started = self.attempt_started_monotonic_ms?;
+        let first = self.first_token_monotonic_ms?;
+        first
+            .checked_sub(started)
+            .map(|delta| delta as f64 / 1000.0)
+    }
+
+    /// Seconds the stream spent emitting tokens, or `None` when the pair is
+    /// missing or does not span a positive interval.
+    #[must_use]
+    pub fn emission_span_seconds(&self) -> Option<f64> {
+        let first = self.first_token_monotonic_ms?;
+        let last = self.last_token_monotonic_ms?;
+        last.checked_sub(first)
+            .filter(|delta| *delta > 0)
+            .map(|delta| delta as f64 / 1000.0)
+    }
 }
 
 /// Receipt clocks injected at the transport boundary. The monotonic value is an

@@ -16,7 +16,12 @@ use djinn_db::{
     ModelTurnLeaseMutationOutcome, ModelTurnLeaseReconciliationInput,
     ModelTurnLeaseTerminalOutcome,
 };
+use djinn_provider::catalog::CatalogService;
 use djinn_provider::{ProviderAttemptPlanV1, ProviderAttemptTerminalV1, ProviderOutcomeV1};
+use djinn_telemetry::model_turn_metrics::{
+    ModelTurnRouteLabels, ModelTurnThrottleBucketV1, record_stream_output_rate, record_throttle,
+    record_time_to_first_token,
+};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, Notify};
 
@@ -179,6 +184,9 @@ struct CleanupTracker {
 #[derive(Clone)]
 pub struct ModelTurnAdmissionCoordinator {
     repository: ModelTurnAdmissionRepository,
+    /// The active catalog. Bounded telemetry is emitted only for routes it
+    /// resolves; without it this boundary emits nothing.
+    catalog: Option<CatalogService>,
     cleanups: Arc<CleanupTracker>,
     #[cfg(test)]
     post_dispatching_hook: Option<Arc<PrepareCancellationHook>>,
@@ -275,6 +283,7 @@ impl ModelTurnAdmissionCoordinator {
     pub fn new(repository: ModelTurnAdmissionRepository) -> Self {
         Self {
             repository,
+            catalog: None,
             cleanups: Arc::new(CleanupTracker::default()),
             #[cfg(test)]
             post_dispatching_hook: None,
@@ -284,6 +293,24 @@ impl ModelTurnAdmissionCoordinator {
             test_hooks: None,
         }
     }
+
+    /// Attach the active catalog so this boundary can emit bounded telemetry.
+    ///
+    /// Without it nothing is emitted at all: a provider/model label value must
+    /// be one the active catalog resolves, and a coordinator with no catalog
+    /// cannot establish that.
+    #[must_use]
+    pub fn with_catalog(mut self, catalog: CatalogService) -> Self {
+        self.catalog = Some(catalog);
+        self
+    }
+
+    /// The bounded route labels for one pool, or `None` when the route does
+    /// not resolve in the active catalog.
+    fn route_labels(&self, pool: &djinn_db::ModelTurnPool) -> Option<ModelTurnRouteLabels> {
+        let catalog = self.catalog.as_ref()?;
+        ModelTurnRouteLabels::qualify(pool.id, &pool.provider_id, &pool.model_id, catalog)
+    }
     #[cfg(test)]
     pub(super) fn with_test_hooks(
         repository: ModelTurnAdmissionRepository,
@@ -291,6 +318,7 @@ impl ModelTurnAdmissionCoordinator {
     ) -> Self {
         Self {
             repository,
+            catalog: None,
             cleanups: Arc::new(CleanupTracker::default()),
             post_dispatching_hook: None,
             post_active_hook: None,
@@ -304,6 +332,7 @@ impl ModelTurnAdmissionCoordinator {
     ) -> Self {
         Self {
             repository,
+            catalog: None,
             cleanups: Arc::new(CleanupTracker::default()),
             post_dispatching_hook: Some(hook),
             post_active_hook: None,
@@ -317,6 +346,7 @@ impl ModelTurnAdmissionCoordinator {
     ) -> Self {
         Self {
             repository,
+            catalog: None,
             cleanups: Arc::new(CleanupTracker::default()),
             post_dispatching_hook: None,
             post_active_hook: Some(hook),
@@ -388,7 +418,18 @@ impl ModelTurnAdmissionCoordinator {
                 })
                 .await?
             {
-                ModelTurnAcquireOutcome::Wait(wait) => Ok(ModelTurnPreparation::Wait(wait)),
+                ModelTurnAcquireOutcome::Wait(wait) => {
+                    // A deferral attributable to a specific bucket is the
+                    // throttle this series counts. Concurrency, drain, and
+                    // discovery waits are not bucket throttles and are
+                    // deliberately not counted here.
+                    if let Some(bucket) = throttled_bucket(&wait)
+                        && let Some(route) = self.route_labels(&pool)
+                    {
+                        record_throttle(&route, bucket);
+                    }
+                    Ok(ModelTurnPreparation::Wait(wait))
+                }
                 ModelTurnAcquireOutcome::Rejected(rejection) => {
                     Ok(ModelTurnPreparation::Rejected(rejection))
                 }
@@ -463,6 +504,7 @@ impl ModelTurnAdmissionCoordinator {
             ProviderAttemptTerminalV1::Aborted => ModelTurnLeaseTerminalOutcome::Cancelled,
             ProviderAttemptTerminalV1::Failed(_) => ModelTurnLeaseTerminalOutcome::Failed,
         };
+        let lease_id = identity.lease_id.clone();
         let result = self
             .repository
             .reconcile_lease(ModelTurnLeaseReconciliationInput {
@@ -472,11 +514,55 @@ impl ModelTurnAdmissionCoordinator {
                 detail: None,
             })
             .await;
+        // Bounded stream telemetry (task 75iz), from the attempt's own injected
+        // clocks. Nothing here is emitted unless the settled attempt actually
+        // produced the instants the series is defined over.
+        self.record_stream_telemetry(&lease_id, outcome).await;
         #[cfg(test)]
         if let Some(hooks) = &self.test_hooks {
             hooks.reconcile_finished.notify_waiters();
         }
         result
+    }
+
+    /// Emit time-to-first-token and per-stream output rate for one settled
+    /// attempt.
+    ///
+    /// Both come from `ProviderTokenEmissionV1`, whose instants are injected at
+    /// the transport boundary, so neither reads a local clock. A stream that
+    /// emitted no token, or whose emission span is not positive, has no rate to
+    /// report and produces no sample rather than a zero.
+    async fn record_stream_telemetry(&self, lease_id: &str, outcome: &ProviderOutcomeV1) {
+        if self.catalog.is_none() {
+            return;
+        }
+        let ttft = outcome.token_emission.time_to_first_token_seconds();
+        let rate = outcome
+            .token_emission
+            .emission_span_seconds()
+            .zip(
+                outcome
+                    .authoritative_usage
+                    .as_ref()
+                    .map(|usage| usage.output_units),
+            )
+            .filter(|(_, units)| *units > 0)
+            .map(|(span, units)| units as f64 / span);
+        if ttft.is_none() && rate.is_none() {
+            return;
+        }
+        let Ok(Some(pool)) = self.repository.pool_for_lease(lease_id).await else {
+            return;
+        };
+        let Some(route) = self.route_labels(&pool) else {
+            return;
+        };
+        if let Some(ttft) = ttft {
+            record_time_to_first_token(&route, ttft);
+        }
+        if let Some(rate) = rate {
+            record_stream_output_rate(&route, rate);
+        }
     }
     pub async fn heartbeat(
         &self,
@@ -533,6 +619,25 @@ impl ModelTurnAdmissionCoordinator {
 
 fn request_fingerprint(request_id: &str) -> String {
     format!("sha256:{:x}", Sha256::digest(request_id.as_bytes()))
+}
+
+/// The bucket a deferral is attributable to, when there is one.
+///
+/// A concurrency, drain, discovery, or binding wait is not a bucket throttle:
+/// counting them here would attribute a deferral to a rate-limit bucket that
+/// had nothing to do with it.
+fn throttled_bucket(wait: &ModelTurnAdmissionWait) -> Option<ModelTurnThrottleBucketV1> {
+    let kind = match wait {
+        ModelTurnAdmissionWait::BucketUnavailable { bucket_kind, .. }
+        | ModelTurnAdmissionWait::ResetAt { bucket_kind, .. } => *bucket_kind,
+        _ => return None,
+    };
+    Some(match kind {
+        djinn_db::ModelTurnBucketKind::Request => ModelTurnThrottleBucketV1::Request,
+        djinn_db::ModelTurnBucketKind::Input => ModelTurnThrottleBucketV1::Input,
+        djinn_db::ModelTurnBucketKind::Output => ModelTurnThrottleBucketV1::Output,
+        djinn_db::ModelTurnBucketKind::Combined => ModelTurnThrottleBucketV1::Combined,
+    })
 }
 
 #[cfg(test)]

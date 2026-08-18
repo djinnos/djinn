@@ -1290,9 +1290,11 @@ pub async fn run_reply_loop(
                     .map_or_else(
                         || ModelTurnAdmissionCoordinator::new(repository.clone()),
                         |hooks| ModelTurnAdmissionCoordinator::with_test_hooks(repository.clone(), hooks),
-                    );
+                    )
+                    .with_catalog(slot_ctx.catalog.clone());
                 #[cfg(not(test))]
-                let coordinator = ModelTurnAdmissionCoordinator::new(repository);
+                let coordinator = ModelTurnAdmissionCoordinator::new(repository)
+                    .with_catalog(slot_ctx.catalog.clone());
                 let preparation = coordinator
                     .prepare(
                         &plan,

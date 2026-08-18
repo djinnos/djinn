@@ -493,13 +493,13 @@ async fn the_reaper_resumes_from_persisted_timestamps_and_reclaims_at_most_once(
     assert_eq!(
         observed
             .iter()
-            .map(|observation| observation.identity.request_id.as_str())
+            .map(|(_, observation)| observation.identity.request_id.as_str())
             .collect::<Vec<_>>(),
         vec!["stale-attempt"],
         "only the durably stale observation is listed"
     );
 
-    let first = reap_stale_model_turn_leases_v1(&successor, boundary, 64)
+    let first = reap_stale_model_turn_leases_v1(&successor, boundary, 64, None)
         .await
         .expect("reaper pass");
     assert_eq!(
@@ -517,7 +517,7 @@ async fn the_reaper_resumes_from_persisted_timestamps_and_reclaims_at_most_once(
 
     // A duplicate pass — the classic double-reaper across handoff — expires
     // nothing and reclaims nothing a second time.
-    let second = reap_stale_model_turn_leases_v1(&successor, boundary, 64)
+    let second = reap_stale_model_turn_leases_v1(&successor, boundary, 64, None)
         .await
         .expect("duplicate reaper pass");
     assert_eq!(second, PhaseCReaperOutcomeV1::default());
@@ -602,7 +602,7 @@ async fn a_cancelled_leader_reaps_nothing() {
     let cancel = tokio_util::sync::CancellationToken::new();
     cancel.cancel();
     assert_eq!(
-        reap_stale_model_turn_leases_while_leading_v1(&repository, &cancel, boundary, 64)
+        reap_stale_model_turn_leases_while_leading_v1(&repository, &cancel, boundary, 64, None)
             .await
             .expect("cancelled reaper pass"),
         PhaseCReaperOutcomeV1::default(),
@@ -626,6 +626,7 @@ async fn a_cancelled_leader_reaps_nothing() {
             &tokio_util::sync::CancellationToken::new(),
             boundary,
             64,
+            None,
         )
         .await
         .expect("live reaper pass"),

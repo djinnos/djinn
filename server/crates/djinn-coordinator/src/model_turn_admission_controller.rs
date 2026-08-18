@@ -187,25 +187,56 @@ pub async fn reap_stale_model_turn_leases_while_leading_v1(
     cancel: &tokio_util::sync::CancellationToken,
     boundary_at: &str,
     limit: i64,
+    catalog: Option<&CatalogService>,
 ) -> djinn_db::Result<PhaseCReaperOutcomeV1> {
     if cancel.is_cancelled() {
         return Ok(PhaseCReaperOutcomeV1::default());
     }
-    reap_stale_model_turn_leases_v1(repository, boundary_at, limit).await
+    reap_stale_model_turn_leases_v1(repository, boundary_at, limit, catalog).await
 }
 
 pub async fn reap_stale_model_turn_leases_v1(
     repository: &ModelTurnAdmissionRepository,
     boundary_at: &str,
     limit: i64,
+    catalog: Option<&CatalogService>,
 ) -> djinn_db::Result<PhaseCReaperOutcomeV1> {
     let observations = repository
         .list_stale_lease_observations(boundary_at, limit)
         .await?;
     let mut outcome = PhaseCReaperOutcomeV1::default();
-    for observation in observations {
+    for (pool_id, observation) in observations {
+        // The disposition is decided by the lifecycle the watchdog observed:
+        // a lease that never left `reserved` was never sent, so its debit is
+        // refunded; anything further may have reached the provider and is
+        // quarantined until authoritative usage arrives. This is exactly the
+        // branch `expire_lease` writes into `model_turn_lease_terminals`.
+        let disposition =
+            if observation.observed_lifecycle == djinn_db::ModelTurnLeaseLifecycle::Reserved {
+                djinn_telemetry::model_turn_metrics::ModelTurnExpiryOutcomeV1::Refunded
+            } else {
+                djinn_telemetry::model_turn_metrics::ModelTurnExpiryOutcomeV1::Quarantined
+            };
         match repository.expire_lease(observation).await? {
-            ModelTurnLeaseMutationOutcome::Applied => outcome.expired += 1,
+            ModelTurnLeaseMutationOutcome::Applied => {
+                outcome.expired += 1;
+                // Route labels come from the pool the lease actually belonged
+                // to, and only if that route still resolves in the active
+                // catalog. A fenced observation expired nothing and is not
+                // counted.
+                if let Some(catalog) = catalog
+                    && let Ok(Some(pool)) = repository.pool_by_id(pool_id).await
+                    && let Some(route) =
+                        djinn_telemetry::model_turn_metrics::ModelTurnRouteLabels::qualify(
+                            pool.id,
+                            &pool.provider_id,
+                            &pool.model_id,
+                            catalog,
+                        )
+                {
+                    djinn_telemetry::model_turn_metrics::record_expiry_outcome(&route, disposition);
+                }
+            }
             _ => outcome.fenced += 1,
         }
     }
@@ -263,6 +294,7 @@ impl crate::CoordinatorActor {
             &self.cancel,
             &boundary_at,
             REAPER_PASS_LIMIT,
+            Some(&self.catalog),
         )
         .await
         {
@@ -308,6 +340,13 @@ impl crate::CoordinatorActor {
         if self.last_phase_c_window_start == Some(window.start_second()) {
             return;
         }
+        // A new window's verdict is not yet known, and a *previous* window's
+        // verdict is not evidence about this one. Clear it here so that every
+        // path out of this function short of a completed, unfenced,
+        // qualifying cycle leaves the Phase-D enforcement pass reading
+        // `false` — a read failure or an empty projection must not let a stale
+        // `true` advance a pool.
+        self.last_phase_c_window_trainable = false;
         let Some((started_at, ended_at)) = window_bounds_v1(window) else {
             return;
         };
