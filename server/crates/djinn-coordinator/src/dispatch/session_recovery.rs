@@ -1783,35 +1783,19 @@ impl CoordinatorActor {
                             );
                         }
                         Ok(Some(task)) => {
-                            match crate::direct_delivery::admit_direct_delivery_liveness(
+                            // Same collaborator the repository-backed zombie
+                            // seam tests enter, sharing this actor's real
+                            // direct-delivery reconciler.
+                            match admit_zombie_session_release(
                                 self.db.clone(),
                                 &task_repo,
                                 &task.id,
+                                || self.reconcile_direct_delivery_task(&task),
                             )
                             .await
                             {
-                                Ok(crate::direct_delivery::DirectDeliveryLiveness::Legacy)
-                                | Ok(crate::direct_delivery::DirectDeliveryLiveness::Dispatch) => {}
-                                Ok(crate::direct_delivery::DirectDeliveryLiveness::Reconcile) => {
-                                    match self.reconcile_direct_delivery_task(&task).await {
-                                        Ok(outcome) => {
-                                            tracing::info!(task_id = %task_id, ?outcome, "CoordinatorActor: reconciled applying direct delivery instead of zombie-release")
-                                        }
-                                        Err(error) => {
-                                            tracing::error!(task_id = %task_id, %error, "CoordinatorActor: direct reconciliation failed; refusing zombie-release")
-                                        }
-                                    }
-                                    continue;
-                                }
-                                Ok(crate::direct_delivery::DirectDeliveryLiveness::Settled)
-                                | Ok(crate::direct_delivery::DirectDeliveryLiveness::Parked) => {
-                                    tracing::info!(task_id = %task_id, "CoordinatorActor: direct delivery is settled or parked; refusing zombie-release");
-                                    continue;
-                                }
-                                Err(error) => {
-                                    tracing::error!(task_id = %task_id, %error, "CoordinatorActor: direct-delivery admission unavailable; refusing zombie-release");
-                                    continue;
-                                }
+                                RecoveryReleaseAdmission::Release => {}
+                                RecoveryReleaseAdmission::Refuse(_) => continue,
                             }
                             let release = match task.status.as_str() {
                                 "in_progress" => Some((TransitionAction::Release, "open")),
@@ -2411,35 +2395,15 @@ impl CoordinatorActor {
                     }
                 }
 
-                match crate::direct_delivery::admit_direct_delivery_liveness(
-                    self.db.clone(),
-                    &repo,
-                    &task.id,
-                )
+                // Same collaborator the repository-backed orphan seam tests
+                // enter, sharing this actor's real direct-delivery reconciler.
+                match admit_execution_state_orphan_release(self.db.clone(), &repo, &task.id, || {
+                    self.reconcile_direct_delivery_task(&task)
+                })
                 .await
                 {
-                    Ok(crate::direct_delivery::DirectDeliveryLiveness::Legacy)
-                    | Ok(crate::direct_delivery::DirectDeliveryLiveness::Dispatch) => {}
-                    Ok(crate::direct_delivery::DirectDeliveryLiveness::Reconcile) => {
-                        match self.reconcile_direct_delivery_task(&task).await {
-                            Ok(outcome) => {
-                                tracing::info!(task_id = %task.short_id, ?outcome, "CoordinatorActor: reconciled applying direct delivery instead of orphan-release")
-                            }
-                            Err(error) => {
-                                tracing::error!(task_id = %task.short_id, %error, "CoordinatorActor: direct reconciliation failed; refusing orphan-release")
-                            }
-                        }
-                        continue;
-                    }
-                    Ok(crate::direct_delivery::DirectDeliveryLiveness::Settled)
-                    | Ok(crate::direct_delivery::DirectDeliveryLiveness::Parked) => {
-                        tracing::info!(task_id = %task.short_id, "CoordinatorActor: direct delivery is settled or parked; refusing orphan-release");
-                        continue;
-                    }
-                    Err(error) => {
-                        tracing::error!(task_id = %task.short_id, %error, "CoordinatorActor: direct-delivery admission unavailable; refusing orphan-release");
-                        continue;
-                    }
+                    RecoveryReleaseAdmission::Release => {}
+                    RecoveryReleaseAdmission::Refuse(_) => continue,
                 }
 
                 let (release_action, release_to) = match task.status.as_str() {
@@ -3355,6 +3319,122 @@ impl CoordinatorActor {
 ///
 /// This is a standalone pure helper (no `&self`) so it can be unit-tested
 /// without constructing a full [`CoordinatorActor`].
+/// Why a recovery seam refused to release a task.
+///
+/// These are distinct on purpose. "The engine ran and the delivery is now
+/// settled" and "the contract could not be read at all" both stop a release,
+/// but only the second is a fail-closed condition, and collapsing them would
+/// make a broken epoch indistinguishable from a healthy completed delivery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecoveryReleaseRefusal {
+    /// An `Applying` generation was consumed by the direct-delivery engine.
+    /// The release is refused because the delivery, not the recovery seam, owns
+    /// this task's next transition.
+    Reconciled,
+    /// An `Applying` generation was found but the engine could not advance it.
+    ReconcileFailed,
+    /// The delivery already reached a terminal state (applied, conflicted, or
+    /// superseded). The task is genuinely finished, not broken.
+    Settled,
+    /// Schema, epoch, ownership, or persisted delivery state was unreadable,
+    /// undefined, or unresolvable. Fail closed rather than release.
+    ///
+    /// Kept distinct from `Settled` on purpose: production refuses the release
+    /// either way, but a broken epoch and a completed delivery are different
+    /// operational facts, and collapsing them would make the first invisible.
+    FailedClosed,
+}
+
+/// Whether a recovery seam may run its release/reopen transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecoveryReleaseAdmission {
+    /// Legacy delivery, or active-direct with no ledger row: the seam's
+    /// pre-existing release transition proceeds unchanged.
+    Release,
+    Refuse(RecoveryReleaseRefusal),
+}
+
+/// Shared body behind both recovery-release seams.
+///
+/// `Applying` is **consumed** here — the caller-owned `DirectDeliveryEngine`
+/// runs before any release or reopen decision is returned — rather than merely
+/// classified. Routing comes from canonical ledger facts (epoch, resolved
+/// active attempt, persisted generation), never from nullable task-PR fields.
+async fn admit_recovery_release<F, Fut>(
+    db: djinn_db::Database,
+    tasks: &TaskRepository,
+    task_id: &str,
+    seam: &'static str,
+    reconcile: F,
+) -> RecoveryReleaseAdmission
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<crate::direct_delivery::DeliveryOutcome>>,
+{
+    match crate::direct_delivery::admit_direct_delivery_liveness(db, tasks, task_id).await {
+        Ok(crate::direct_delivery::DirectDeliveryLiveness::Legacy)
+        | Ok(crate::direct_delivery::DirectDeliveryLiveness::Dispatch) => {
+            RecoveryReleaseAdmission::Release
+        }
+        Ok(crate::direct_delivery::DirectDeliveryLiveness::Reconcile) => match reconcile().await {
+            Ok(outcome) => {
+                tracing::info!(task_id = %task_id, seam, ?outcome, "CoordinatorActor: reconciled applying direct delivery instead of recovery-release");
+                RecoveryReleaseAdmission::Refuse(RecoveryReleaseRefusal::Reconciled)
+            }
+            Err(error) => {
+                tracing::error!(task_id = %task_id, seam, %error, "CoordinatorActor: direct reconciliation failed; refusing recovery-release");
+                RecoveryReleaseAdmission::Refuse(RecoveryReleaseRefusal::ReconcileFailed)
+            }
+        },
+        Ok(crate::direct_delivery::DirectDeliveryLiveness::Settled) => {
+            tracing::info!(task_id = %task_id, seam, "CoordinatorActor: direct delivery is settled; refusing recovery-release");
+            RecoveryReleaseAdmission::Refuse(RecoveryReleaseRefusal::Settled)
+        }
+        // `Parked` is the epoch boundary's fail-closed answer — no proposal
+        // owner, or an unavailable contract — not a finished delivery.
+        Ok(crate::direct_delivery::DirectDeliveryLiveness::Parked) => {
+            tracing::info!(task_id = %task_id, seam, "CoordinatorActor: direct delivery parked (unresolved ownership or unavailable contract); refusing recovery-release");
+            RecoveryReleaseAdmission::Refuse(RecoveryReleaseRefusal::FailedClosed)
+        }
+        Err(error) => {
+            tracing::error!(task_id = %task_id, seam, %error, "CoordinatorActor: direct-delivery admission unavailable; refusing recovery-release");
+            RecoveryReleaseAdmission::Refuse(RecoveryReleaseRefusal::FailedClosed)
+        }
+    }
+}
+
+/// Recovery-release admission for the zombie-session seam.
+///
+/// Named separately from the orphan seam so each release site has its own
+/// collaborator to enter and its own replay proof, rather than one seam's
+/// safety being inferred from the other's coverage.
+pub(crate) async fn admit_zombie_session_release<F, Fut>(
+    db: djinn_db::Database,
+    tasks: &TaskRepository,
+    task_id: &str,
+    reconcile: F,
+) -> RecoveryReleaseAdmission
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<crate::direct_delivery::DeliveryOutcome>>,
+{
+    admit_recovery_release(db, tasks, task_id, "zombie_release", reconcile).await
+}
+
+/// Recovery-release admission for the execution-state orphan seam.
+pub(crate) async fn admit_execution_state_orphan_release<F, Fut>(
+    db: djinn_db::Database,
+    tasks: &TaskRepository,
+    task_id: &str,
+    reconcile: F,
+) -> RecoveryReleaseAdmission
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<crate::direct_delivery::DeliveryOutcome>>,
+{
+    admit_recovery_release(db, tasks, task_id, "orphan_release", reconcile).await
+}
+
 pub(crate) fn build_liveness_evidence(
     pool_info: Option<&RunningTaskInfo>,
     db_state: &CurrentLivenessState,
@@ -4803,3 +4883,7 @@ mod restart_amnesia_tests {
         assert!(!clock.first_call_hang);
     }
 }
+
+#[cfg(test)]
+#[path = "session_recovery_direct_delivery_tests.rs"]
+mod direct_delivery_tests;
