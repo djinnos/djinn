@@ -16,7 +16,7 @@ use djinn_db::{
     Database, DeliveryFinalizeInput, DeliveryMappedHeadRetryInput, DeliveryPrepareInput,
     DeliveryReworkInput, DeliveryTransitionResult, DirectDeliveryCapabilityRepository,
     DirectDeliverySchemaCapability, ProposalBuildAttemptRepository, ResolveTaskActiveAttemptResult,
-    TaskIntegrationResult, TaskRepository,
+    TaskIntegrationResult, TaskIntegrationStaleness, TaskRepository,
 };
 use djinn_git::{
     DirectDeliveryBuild, DirectDeliveryInput, DirectDeliverySignature,
@@ -518,7 +518,54 @@ fn resume_delivery_source(
 pub enum LedgerResult {
     Applied,
     Replayed,
+    /// Transient: the ledger declined for a condition another attempt can clear.
     Stale,
+    /// Permanent: the ledger declined for a condition no retry can clear.
+    ///
+    /// Kept a separate variant rather than a flag on `Stale` so that a caller
+    /// which only knows how to wait for staleness to pass cannot silently treat
+    /// this as something to wait for.
+    PermanentlyStale(PermanentStaleness),
+}
+
+impl LedgerResult {
+    /// Whether the ledger declined the transition, transiently or permanently.
+    ///
+    /// Transition writers (prepare, rework, begin-apply, finalize) already treat
+    /// any decline as terminal, so they ask this rather than comparing against
+    /// one variant and silently ignoring the other.
+    pub const fn is_stale(self) -> bool {
+        matches!(self, Self::Stale | Self::PermanentlyStale(_))
+    }
+}
+
+/// A ledger decline that no number of retries can turn into an integration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PermanentStaleness {
+    /// The task is not `approved`. Every recovery seam that reconciles an
+    /// `Applying` generation selects `in_progress`, `in_task_review`, or
+    /// `in_lead_intervention`, so this is the production-reachable case.
+    TaskNotApproved,
+    /// No ledger row exists at this exact delivery identity.
+    MissingGeneration,
+    /// The generation is no longer `applying`.
+    GenerationNotApplying,
+    /// The persisted candidate and the observed applied candidate disagree.
+    CandidateIdentityMismatch,
+}
+
+impl PermanentStaleness {
+    fn from_ledger(staleness: TaskIntegrationStaleness) -> Option<Self> {
+        match staleness {
+            TaskIntegrationStaleness::UnfinalizedAttemptHead => None,
+            TaskIntegrationStaleness::TaskNotApproved => Some(Self::TaskNotApproved),
+            TaskIntegrationStaleness::MissingGeneration => Some(Self::MissingGeneration),
+            TaskIntegrationStaleness::GenerationNotApplying => Some(Self::GenerationNotApplying),
+            TaskIntegrationStaleness::CandidateIdentityMismatch => {
+                Some(Self::CandidateIdentityMismatch)
+            }
+        }
+    }
 }
 
 /// The sole production remote seam. It cannot create, merge, or approve task PRs.
@@ -753,7 +800,14 @@ impl DeliveryLedger for RepositoryDeliveryLedger {
         Ok(match self.tasks.task_integrated(&integrated).await? {
             TaskIntegrationResult::Integrated(_) => LedgerResult::Applied,
             TaskIntegrationResult::Replayed(_) => LedgerResult::Replayed,
-            TaskIntegrationResult::Stale { .. } => LedgerResult::Stale,
+            // The ledger already knows which decline can converge; carry that
+            // fact rather than re-deriving it from nullable row snapshots.
+            TaskIntegrationResult::Stale { staleness, .. } => {
+                match PermanentStaleness::from_ledger(staleness) {
+                    Some(permanent) => LedgerResult::PermanentlyStale(permanent),
+                    None => LedgerResult::Stale,
+                }
+            }
         })
     }
     async fn is_mapped_first_parent(&self, attempt: &ActiveAttempt, sha: &str) -> Result<bool> {
@@ -847,12 +901,53 @@ pub enum ParkReason {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeliveryOutcome {
-    Integrated { candidate_sha: String },
-    ConflictParked { reason: String },
-    UnexpectedHeadParked { observed_sha: Option<String> },
-    RetryBoundParked { observed_heads: usize },
+    Integrated {
+        candidate_sha: String,
+    },
+    ConflictParked {
+        reason: String,
+    },
+    UnexpectedHeadParked {
+        observed_sha: Option<String>,
+    },
+    RetryBoundParked {
+        observed_heads: usize,
+    },
+    /// The remote already carries this generation's candidate, but the ledger
+    /// will never integrate it. Terminal: nothing here converges by waiting.
+    Unintegrable {
+        candidate_sha: String,
+        reason: PermanentStaleness,
+    },
+    /// The remote already carries this generation's candidate and the ledger
+    /// decline is genuinely transient, but its selected parent did not finalize
+    /// within [`INTEGRATION_RECONCILE_BUDGET`].
+    ///
+    /// Terminal **for this call only**: the exact-candidate reconciliation at
+    /// the top of `deliver` re-enters this same integration on the next pass,
+    /// so the caller's own loop owns the next attempt rather than this one
+    /// holding a coordinator loop open indefinitely.
+    IntegrationDeferred {
+        candidate_sha: String,
+    },
     Disabled,
 }
+
+/// How long `integrate` waits for a genuinely transient decline to clear.
+///
+/// A selected parent's transaction is a database transaction, not a scheduler
+/// turn, so the budget is wall-clock rather than a poll count. It is bounded
+/// because a coordinator recovery pass that never returns is a worse failure
+/// than one that defers: exhausting it is reported, not swallowed.
+pub const INTEGRATION_RECONCILE_BUDGET: Duration = Duration::from_secs(10);
+
+/// How many times the same already-mapped head may be replayed before the
+/// attempt is parked at the stale-head retry bound.
+///
+/// Distinct from the three-distinct-heads budget: that one bounds how many
+/// immutable generations a topology race may mint, this one bounds re-CASing
+/// the candidate already prepared for one head.
+pub const MAPPED_HEAD_REPLAY_BUDGET: usize = 3;
 
 #[async_trait]
 pub trait DeliveryLedger: Send + Sync {
@@ -1010,7 +1105,7 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
                 if self
                     .prepare_generation(&identity, &source, &conflict)
                     .await?
-                    == LedgerResult::Stale
+                    .is_stale()
                 {
                     return Ok(DeliveryOutcome::RetryBoundParked { observed_heads: 0 });
                 }
@@ -1027,8 +1122,8 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
                         &reason,
                     )
                     .await?;
-                if finalized == LedgerResult::Stale
-                    || (applying == LedgerResult::Stale && finalized != LedgerResult::Replayed)
+                if finalized.is_stale()
+                    || (applying.is_stale() && finalized != LedgerResult::Replayed)
                 {
                     return Ok(DeliveryOutcome::RetryBoundParked { observed_heads: 0 });
                 }
@@ -1053,16 +1148,17 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
         if self
             .prepare_generation(&identity, &delivery_source, &candidate)
             .await?
-            == LedgerResult::Stale
+            .is_stale()
             || self
                 .ledger
                 .begin_apply(&identity, &delivery_source.transition_id)
                 .await?
-                == LedgerResult::Stale
+                .is_stale()
         {
             return Ok(DeliveryOutcome::RetryBoundParked { observed_heads: 0 });
         }
         let mut observed_mapped_heads = HashSet::new();
+        let mut replayed_mapped_heads = 0usize;
         loop {
             match self
                 .remote
@@ -1089,8 +1185,28 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
                     // A replayed stale response for the same mapped head is not
                     // another topology change. Retry its prepared successor,
                     // rather than minting another immutable generation.
+                    //
+                    // Bounded, because this arm mints no generation and does no
+                    // ledger work: a remote that keeps reporting a head whose
+                    // own CAS it then rejects would otherwise spin here without
+                    // even yielding, and this loop is reachable from the
+                    // coordinator's recovery seams.
                     if !observed_mapped_heads.insert(head.clone()) {
                         debug_assert_eq!(candidate.selected_parent_sha, head);
+                        if replayed_mapped_heads >= MAPPED_HEAD_REPLAY_BUDGET {
+                            self.ledger
+                                .park(
+                                    &attempt.build_attempt_id,
+                                    &identity,
+                                    ParkReason::StaleHeadRetryBound,
+                                    &head,
+                                )
+                                .await?;
+                            return Ok(DeliveryOutcome::RetryBoundParked {
+                                observed_heads: observed_mapped_heads.len(),
+                            });
+                        }
+                        replayed_mapped_heads += 1;
                         parent = head;
                         continue;
                     }
@@ -1164,7 +1280,7 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
                                     &conflict,
                                 )
                                 .await?
-                                == LedgerResult::Stale
+                                .is_stale()
                             {
                                 return Ok(DeliveryOutcome::RetryBoundParked {
                                     observed_heads: observed_mapped_heads.len(),
@@ -1182,9 +1298,8 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
                                     &reason,
                                 )
                                 .await?;
-                            if finalized == LedgerResult::Stale
-                                || (applying == LedgerResult::Stale
-                                    && finalized != LedgerResult::Replayed)
+                            if finalized.is_stale()
+                                || (applying.is_stale() && finalized != LedgerResult::Replayed)
                             {
                                 return Ok(DeliveryOutcome::RetryBoundParked {
                                     observed_heads: observed_mapped_heads.len(),
@@ -1215,12 +1330,12 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
                             &next_candidate,
                         )
                         .await?
-                        == LedgerResult::Stale
+                        .is_stale()
                         || self
                             .ledger
                             .begin_apply(&next_identity, &next_source.transition_id)
                             .await?
-                            == LedgerResult::Stale
+                            .is_stale()
                     {
                         return Ok(DeliveryOutcome::RetryBoundParked {
                             observed_heads: observed_mapped_heads.len(),
@@ -1249,21 +1364,39 @@ impl<L: DeliveryLedger, R: AttemptRef, B: CandidateBuilder> DirectDeliveryEngine
         // database transaction can remain in progress longer than an arbitrary
         // number of executor turns. No replay here can mutate the remote ref
         // or change this generation's identity.
+        let deadline = tokio::time::Instant::now() + INTEGRATION_RECONCILE_BUDGET;
         loop {
-            if self
+            match self
                 .ledger
                 .integrate(TaskIntegrated::new(identity.clone(), &sha, &sha, &sha)?)
                 .await?
-                != LedgerResult::Stale
             {
-                return Ok(DeliveryOutcome::Integrated { candidate_sha: sha });
+                LedgerResult::Applied | LedgerResult::Replayed => {
+                    return Ok(DeliveryOutcome::Integrated { candidate_sha: sha });
+                }
+                // No wait clears this one. The recovery seams reconcile
+                // `Applying` generations on tasks that are `in_progress`,
+                // `in_task_review`, or `in_lead_intervention` — none of which
+                // `task_integrated` can close from — so retrying here is what
+                // used to hang the coordinator's recovery pass outright.
+                LedgerResult::PermanentlyStale(reason) => {
+                    return Ok(DeliveryOutcome::Unintegrable {
+                        candidate_sha: sha,
+                        reason,
+                    });
+                }
+                // `TaskIntegrated` performs the transactional durable-head
+                // check. A transient decline means its selected parent has not
+                // finalized yet; wait before asking that transaction to
+                // reconcile again rather than misclassifying a transient parent
+                // transaction as an unexpected remote head.
+                LedgerResult::Stale => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Ok(DeliveryOutcome::IntegrationDeferred { candidate_sha: sha });
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
             }
-            // `TaskIntegrated` performs the transactional durable-head check.
-            // A stale result means its selected parent has not finalized yet;
-            // wait before asking that transaction to reconcile again rather
-            // than misclassifying a transient parent transaction as an
-            // unexpected remote head.
-            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     }
     async fn park_unexpected(
@@ -1299,6 +1432,9 @@ mod tests {
         mapped: bool,
         replay_terminal_conflict: bool,
         rework_result: LedgerResult,
+        /// Results `integrate` hands back in order. The last entry repeats, so
+        /// a script ending in a decline models a condition that never clears.
+        integrate_results: Arc<Mutex<std::collections::VecDeque<LedgerResult>>>,
     }
     #[async_trait]
     impl DeliveryLedger for Ledger {
@@ -1360,7 +1496,15 @@ mod tests {
                 .lock()
                 .map_err(|_| anyhow!("poison"))?
                 .push(format!("integrate:{}", i.identity.delivery_generation));
-            Ok(LedgerResult::Applied)
+            let mut scripted = self
+                .integrate_results
+                .lock()
+                .map_err(|_| anyhow!("poison"))?;
+            Ok(match scripted.len() {
+                0 => LedgerResult::Applied,
+                1 => scripted[0],
+                _ => scripted.pop_front().unwrap_or(LedgerResult::Applied),
+            })
         }
         async fn is_mapped_first_parent(&self, _: &ActiveAttempt, sha: &str) -> Result<bool> {
             Ok(sha == "base" || self.mapped)
@@ -1504,7 +1648,116 @@ mod tests {
             mapped: false,
             replay_terminal_conflict: false,
             rework_result: LedgerResult::Applied,
+            integrate_results: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         }
+    }
+
+    /// Count the integration attempts the engine actually made.
+    fn integrate_calls(calls: &Arc<Mutex<Vec<String>>>) -> usize {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.starts_with("integrate:"))
+            .count()
+    }
+
+    /// One clean delivery reaching integration, with a scripted ledger.
+    fn integration_engine(
+        calls: Arc<Mutex<Vec<String>>>,
+        scripted: Vec<LedgerResult>,
+    ) -> DirectDeliveryEngine<Ledger, Remote, Builder> {
+        let (remote, _) = remote(
+            vec![RemoteUpdate::Updated {
+                sha: "commit-base".into(),
+            }],
+            vec![Some("base")],
+        );
+        let mut state = ledger(calls);
+        state.integrate_results = Arc::new(Mutex::new(scripted.into()));
+        DirectDeliveryEngine::new(state, remote, Builder { conflict: false })
+    }
+
+    // ─── i5fn: transient and permanent staleness are not the same wait ─────
+
+    /// Transient staleness still retries, and still converges.
+    #[tokio::test(start_paused = true)]
+    async fn transient_integration_staleness_retries_until_it_converges() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let engine = integration_engine(
+            calls.clone(),
+            vec![
+                LedgerResult::Stale,
+                LedgerResult::Stale,
+                LedgerResult::Stale,
+                LedgerResult::Applied,
+            ],
+        );
+        assert_eq!(
+            engine.deliver(source(1)).await.unwrap(),
+            DeliveryOutcome::Integrated {
+                candidate_sha: "commit-base".into()
+            }
+        );
+        assert_eq!(
+            integrate_calls(&calls),
+            4,
+            "every transient decline must be retried, not swallowed"
+        );
+    }
+
+    /// A permanently stale generation is terminal on its first answer: it is
+    /// neither retried nor reported as an integration.
+    #[tokio::test(start_paused = true)]
+    async fn permanent_integration_staleness_is_terminal_without_a_single_retry() {
+        for reason in [
+            PermanentStaleness::TaskNotApproved,
+            PermanentStaleness::MissingGeneration,
+            PermanentStaleness::GenerationNotApplying,
+            PermanentStaleness::CandidateIdentityMismatch,
+        ] {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let engine =
+                integration_engine(calls.clone(), vec![LedgerResult::PermanentlyStale(reason)]);
+            assert_eq!(
+                engine.deliver(source(1)).await.unwrap(),
+                DeliveryOutcome::Unintegrable {
+                    candidate_sha: "commit-base".into(),
+                    reason
+                }
+            );
+            assert_eq!(
+                integrate_calls(&calls),
+                1,
+                "{reason:?}: a condition no retry can clear must not be retried"
+            );
+        }
+    }
+
+    /// The remaining wait is bounded. A transient decline that never clears is
+    /// deferred to the caller's own loop rather than held open forever.
+    ///
+    /// Time is paused, so the assertion is about the engine's bound and not
+    /// about how fast this machine is.
+    #[tokio::test(start_paused = true)]
+    async fn a_transient_decline_that_never_clears_is_deferred_not_spun_on() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let engine = integration_engine(calls.clone(), vec![LedgerResult::Stale]);
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            engine.deliver(source(1)).await.unwrap(),
+            DeliveryOutcome::IntegrationDeferred {
+                candidate_sha: "commit-base".into()
+            }
+        );
+        assert!(
+            started.elapsed() >= INTEGRATION_RECONCILE_BUDGET,
+            "the engine must actually spend its budget before deferring"
+        );
+        assert!(
+            integrate_calls(&calls) > 1,
+            "a transient decline is retried inside the budget"
+        );
     }
     fn remote(
         updates: Vec<RemoteUpdate>,
@@ -1942,6 +2195,48 @@ mod tests {
             ]
         );
         assert!(updates.lock().unwrap().is_empty());
+    }
+    /// A remote that keeps reporting the same mapped head its own CAS rejects
+    /// used to spin this arm forever without yielding. It is bounded now.
+    ///
+    /// The remote here is exhaustible on purpose: an unbounded engine would
+    /// drain it and then fail on "missing update" rather than park, so the
+    /// assertion cannot be satisfied by an engine that never stops.
+    #[tokio::test]
+    async fn endlessly_replayed_mapped_head_parks_at_the_replay_bound() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let (mut remote, updates) = remote(
+            std::iter::repeat_n(
+                RemoteUpdate::Stale {
+                    observed_sha: Some("mapped".into()),
+                },
+                MAPPED_HEAD_REPLAY_BUDGET + 3,
+            )
+            .collect(),
+            vec![Some("base")],
+        );
+        remote.calls = Some(calls.clone());
+        let mut state = ledger(calls.clone());
+        state.mapped = true;
+        let engine = DirectDeliveryEngine::new(state, remote, Builder { conflict: false });
+        assert_eq!(
+            engine.deliver(source(1)).await.unwrap(),
+            DeliveryOutcome::RetryBoundParked { observed_heads: 1 }
+        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.last().unwrap(), "park:StaleHeadRetryBound");
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.as_str() == "update:mapped:commit-mapped")
+                .count(),
+            MAPPED_HEAD_REPLAY_BUDGET + 1,
+            "the replayed head is retried a bounded number of times and no more"
+        );
+        assert!(
+            !updates.lock().unwrap().is_empty(),
+            "parking must happen before the scripted remote is exhausted"
+        );
     }
     #[tokio::test]
     async fn third_distinct_mapped_head_parks_at_retry_bound() {
