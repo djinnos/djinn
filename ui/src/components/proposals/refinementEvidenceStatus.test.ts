@@ -2,8 +2,14 @@ import { describe, expect, it } from "vitest";
 import type {
   ProposalRefinementStatus,
   NeedsEvidenceStatus,
+  TypedEvidenceGateStatus,
 } from "@/api/types";
-import { classifyRefinementEvidence } from "./refinementEvidenceStatus";
+import {
+  BLOCKING_TYPED_LIFECYCLES,
+  TYPED_EVIDENCE_LIFECYCLES,
+  classifyRefinementEvidence,
+} from "./refinementEvidenceStatus";
+import actionMatrix from "./__fixtures__/typed-evidence-action-matrix.json";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -445,5 +451,325 @@ describe("classifyRefinementEvidence", () => {
     };
     const d = classifyRefinementEvidence(status);
     expect(d.claimSummary).toBe("Plain claim without question");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Typed evidence action matrix (zzbp)
+// ---------------------------------------------------------------------------
+//
+// The fixture is the contract. Every row is driven through the single
+// classifier, and the axes are asserted to be complete before the rows run —
+// a matrix that quietly lost its `retry_permitted: true` half would otherwise
+// pass while proving nothing about the capability axis.
+//
+// The fourth axis is not decoration. `presentation_for_finding` projects the
+// latest `-> failed` transition from the append-only transition log, so a
+// finding that failed once and was then retried is `spike_active` while still
+// carrying a real failed transition id. Without that axis, a classifier that
+// dropped the lifecycle check entirely would still pass every row.
+
+interface MatrixRow {
+  name: string;
+  gate: Record<string, unknown>;
+  expect: {
+    kind: string;
+    blocking: boolean;
+    retry: boolean;
+    resolve: boolean;
+    withdraw: boolean;
+  };
+}
+
+const matrix = actionMatrix as unknown as {
+  lifecycles: string[];
+  outcomes: string[];
+  rows: MatrixRow[];
+};
+
+/** Classify one fixture row through the single public classifier. */
+function classifyRow(row: MatrixRow) {
+  return classifyRefinementEvidence(
+    activeStatus,
+    undefined,
+    row.gate as unknown as TypedEvidenceGateStatus,
+  );
+}
+
+describe("typed evidence action matrix", () => {
+  // ---- The matrix itself is complete -------------------------------------
+
+  it("covers every lifecycle x outcome x capability x failed-transition combination", () => {
+    // The lifecycle axis must be the whole pinned vocabulary, not a subset
+    // someone trimmed. `TYPED_EVIDENCE_LIFECYCLES` is itself pinned to the
+    // generated union at compile time in refinementEvidenceStatus.ts.
+    expect([...matrix.lifecycles].sort()).toEqual(
+      [...TYPED_EVIDENCE_LIFECYCLES].sort(),
+    );
+    expect([...matrix.outcomes].sort()).toEqual(
+      ["none", "partial", "resolved", "unresolved"].sort(),
+    );
+
+    const key = (row: MatrixRow) =>
+      [
+        String(row.gate.lifecycle),
+        String(row.gate.evidence_outcome ?? "none"),
+        String(row.gate.retry_permitted),
+        String(typeof row.gate.failed_transition_id === "string"),
+      ].join("|");
+    const seen = new Set(matrix.rows.map(key));
+    const wanted: string[] = [];
+    for (const lifecycle of matrix.lifecycles) {
+      for (const outcome of matrix.outcomes) {
+        for (const permitted of ["false", "true"]) {
+          for (const hasTransition of ["false", "true"]) {
+            wanted.push(`${lifecycle}|${outcome}|${permitted}|${hasTransition}`);
+          }
+        }
+      }
+    }
+    expect([...seen].sort()).toEqual([...wanted].sort());
+    expect(wanted).toHaveLength(6 * 4 * 2 * 2);
+    expect(matrix.rows).toHaveLength(wanted.length);
+  });
+
+  // ---- Every row is actually driven --------------------------------------
+
+  it("drives every fixture row through classifyRefinementEvidence", () => {
+    const driven: string[] = [];
+    for (const row of matrix.rows) {
+      const display = classifyRow(row);
+      driven.push(row.name);
+      expect(display.typed.kind, row.name).toBe(row.expect.kind);
+      expect(display.typed.blocking, row.name).toBe(row.expect.blocking);
+      expect(display.typed.actions.retry, row.name).toBe(row.expect.retry);
+      expect(display.typed.actions.resolve, row.name).toBe(row.expect.resolve);
+      expect(display.typed.actions.withdraw, row.name).toBe(
+        row.expect.withdraw,
+      );
+      // Identity and provenance are carried through verbatim — the classifier
+      // never invents or reformats either.
+      expect(display.typed.findingId, row.name).toBe(row.gate.finding_id);
+      expect(display.typed.failedTransitionId, row.name).toBe(
+        row.gate.failed_transition_id ?? null,
+      );
+      expect(display.typed.evidenceOutcome, row.name).toBe(
+        row.gate.evidence_outcome ?? null,
+      );
+    }
+    // A row that threw or was skipped would not reach here.
+    expect(driven).toHaveLength(matrix.rows.length);
+    expect(driven.length).toBe(96);
+  });
+
+  // ---- AC2: retry needs the lifecycle AND server-projected permission -----
+
+  it("shows retry only for a failed finding the server says this caller may retry", () => {
+    const shown = matrix.rows.filter(
+      (row) => classifyRow(row).typed.actions.retry,
+    );
+    for (const row of shown) {
+      expect(row.gate.lifecycle, row.name).toBe("failed");
+      expect(row.gate.retry_permitted, row.name).toBe(true);
+      expect(typeof row.gate.failed_transition_id, row.name).toBe("string");
+    }
+    // Not vacuous: every eligible row does show it.
+    const eligible = matrix.rows.filter(
+      (row) =>
+        row.gate.lifecycle === "failed" &&
+        row.gate.retry_permitted === true &&
+        typeof row.gate.failed_transition_id === "string",
+    );
+    expect(eligible.length).toBe(4);
+    expect(shown).toHaveLength(eligible.length);
+
+    // Each half alone is insufficient.
+    for (const row of matrix.rows) {
+      const display = classifyRow(row);
+      if (row.gate.lifecycle !== "failed") {
+        expect(display.typed.actions.retry, `non-failed: ${row.name}`).toBe(
+          false,
+        );
+      }
+      if (row.gate.retry_permitted !== true) {
+        expect(display.typed.actions.retry, `unpermitted: ${row.name}`).toBe(
+          false,
+        );
+      }
+    }
+  });
+
+  it("keeps retry hidden on a non-failed finding that still carries a historical failed transition", () => {
+    // The exact shape a retried finding has: `spike_active`, an authorized
+    // caller, and a real failed transition id left behind by the earlier
+    // attempt. Offering retry here would double-dispatch a running spike.
+    const rows = matrix.rows.filter(
+      (row) =>
+        row.gate.lifecycle === "spike_active" &&
+        row.gate.retry_permitted === true &&
+        typeof row.gate.failed_transition_id === "string",
+    );
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      const display = classifyRow(row);
+      expect(display.typed.failedTransitionId, row.name).toBe(
+        row.gate.failed_transition_id,
+      );
+      expect(display.typed.actions.retry, row.name).toBe(false);
+    }
+  });
+
+  it("withholds retry when the server granted permission but named no failed transition", () => {
+    const rows = matrix.rows.filter(
+      (row) =>
+        row.gate.lifecycle === "failed" &&
+        row.gate.retry_permitted === true &&
+        row.gate.failed_transition_id === undefined,
+    );
+    expect(rows.length).toBe(4);
+    for (const row of rows) {
+      const display = classifyRow(row);
+      expect(display.typed.kind, row.name).toBe("typed_failed");
+      expect(display.typed.failedTransitionId, row.name).toBeNull();
+      // The write path demands the transition id, so a retry the browser
+      // cannot construct must not be offered.
+      expect(display.typed.actions.retry, row.name).toBe(false);
+    }
+  });
+
+  // ---- AC3: no resolve/withdraw affordance, anywhere ----------------------
+
+  it("exposes no resolve or withdraw affordance on any row", () => {
+    for (const row of matrix.rows) {
+      const actions = classifyRow(row).typed.actions;
+      expect(actions.resolve, row.name).toBe(false);
+      expect(actions.withdraw, row.name).toBe(false);
+    }
+    // The action surface is closed: retry/resolve/withdraw and nothing else,
+    // so a future action cannot be added without updating this assertion.
+    expect(
+      Object.keys(classifyRow(matrix.rows[0]).typed.actions).sort(),
+    ).toEqual(["resolve", "retry", "withdraw"]);
+  });
+
+  // ---- AC4: the four blocking states are distinct from the clean states ---
+
+  it("maps each of the four blocking lifecycles to its own kind, distinct from the clean states", () => {
+    const kindFor = (lifecycle: string) => {
+      const row = matrix.rows.find((r) => r.gate.lifecycle === lifecycle);
+      expect(row, `fixture must carry a ${lifecycle} row`).toBeDefined();
+      return classifyRow(row!).typed.kind;
+    };
+    const blockingKinds = BLOCKING_TYPED_LIFECYCLES.map(kindFor);
+    expect(blockingKinds).toEqual([
+      "typed_demanded",
+      "typed_spike_active",
+      "typed_evidence_received",
+      "typed_failed",
+    ]);
+    // Four states, four distinct kinds.
+    expect(new Set(blockingKinds).size).toBe(4);
+
+    const cleanKinds = ["resolved", "withdrawn"].map(kindFor);
+    expect(new Set(cleanKinds)).toEqual(new Set(["typed_clear"]));
+    for (const kind of blockingKinds) {
+      expect(cleanKinds).not.toContain(kind);
+    }
+
+    // And every blocking-lifecycle row reports blocking=true, while the
+    // terminal ones report false.
+    for (const row of matrix.rows) {
+      const expectedBlocking = (
+        BLOCKING_TYPED_LIFECYCLES as readonly string[]
+      ).includes(String(row.gate.lifecycle));
+      expect(classifyRow(row).typed.blocking, row.name).toBe(expectedBlocking);
+    }
+  });
+
+  it("reports the server's blocking flag, not a locally recomputed one", () => {
+    // Shadow mode: the server surfaces an unresolved `demanded` finding but is
+    // not refusing transitions on it yet. The lifecycle would say "blocking";
+    // the server says otherwise, and the server wins. The display kind still
+    // reports which lifecycle state it is, so the two facts stay separable.
+    const shadow = classifyRefinementEvidence(activeStatus, undefined, {
+      mode: "shadow",
+      blocking: false,
+      finding_id: "finding-shadow",
+      lifecycle: "demanded",
+      demanded_revision_seq: 1,
+      attempts: [],
+      planned_checks: [],
+      gaps: [],
+      usable_findings: [],
+      retry_permitted: false,
+    } as unknown as TypedEvidenceGateStatus);
+    expect(shadow.typed.kind).toBe("typed_demanded");
+    expect(shadow.typed.blocking).toBe(false);
+
+    // And the converse: a terminal lifecycle the server still reports as
+    // blocking (a fail-closed parity refusal) is rendered as blocking.
+    const failClosed = classifyRefinementEvidence(activeStatus, undefined, {
+      mode: "enforce",
+      blocking: true,
+      finding_id: "finding-parity",
+      lifecycle: "resolved",
+      parity_mismatch_reason: "typed_evidence_parity_mismatch",
+      demanded_revision_seq: 1,
+      attempts: [],
+      planned_checks: [],
+      gaps: [],
+      usable_findings: [],
+      retry_permitted: false,
+    } as unknown as TypedEvidenceGateStatus);
+    expect(failClosed.typed.kind).toBe("typed_clear");
+    expect(failClosed.typed.blocking).toBe(true);
+  });
+
+  // ---- AC5: an unhandled lifecycle fails, it does not default ------------
+
+  it("throws on a fixture row carrying a lifecycle nobody handled", () => {
+    const smuggled: MatrixRow = {
+      name: "smuggled lifecycle",
+      gate: { ...matrix.rows[0].gate, lifecycle: "escalated_to_a_human" },
+      expect: {
+        kind: "typed_clear",
+        blocking: false,
+        retry: false,
+        resolve: false,
+        withdraw: false,
+      },
+    };
+    // The failure mode this guards is rendering an unknown blocking state as a
+    // clean one, which silently unblocks a gate in the reviewer's eyes.
+    expect(() => classifyRow(smuggled)).toThrow(
+      /unhandled typed evidence lifecycle/,
+    );
+    // Free text cannot ride in on the lifecycle field either.
+    expect(() =>
+      classifyRow({
+        ...smuggled,
+        gate: { ...smuggled.gate, lifecycle: "the judge is still thinking" },
+      }),
+    ).toThrow(/unhandled typed evidence lifecycle/);
+  });
+
+  it("reports no typed finding as typed_clear with no actions", () => {
+    for (const absent of [undefined, null, {}]) {
+      const display = classifyRefinementEvidence(
+        activeStatus,
+        undefined,
+        absent as unknown as TypedEvidenceGateStatus,
+      );
+      expect(display.typed.kind).toBe("typed_clear");
+      expect(display.typed.blocking).toBe(false);
+      expect(display.typed.actions).toEqual({
+        retry: false,
+        resolve: false,
+        withdraw: false,
+      });
+      expect(display.typed.findingId).toBeNull();
+      // The legacy classification is untouched by the typed section's absence.
+      expect(display.kind).toBe("in_progress");
+    }
   });
 });

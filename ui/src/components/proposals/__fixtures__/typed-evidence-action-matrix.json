@@ -1,0 +1,2451 @@
+{
+  "description": "Typed-evidence action matrix. Every row is lifecycle x evidence outcome x server-projected retry capability x whether the server named a failed transition. The lifecycle axis is the complete pinned vocabulary from refinementEvidenceStatus.ts; a row carrying any other value makes classifyTypedEvidence throw rather than fall through to a default.",
+  "lifecycles": [
+    "demanded",
+    "spike_active",
+    "evidence_received",
+    "failed",
+    "resolved",
+    "withdrawn"
+  ],
+  "outcomes": [
+    "none",
+    "resolved",
+    "partial",
+    "unresolved"
+  ],
+  "permissions": [
+    false,
+    true
+  ],
+  "failed_transition_present": [
+    false,
+    true
+  ],
+  "rows": [
+    {
+      "name": "demanded / outcome=none / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-001",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "demanded",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false
+      },
+      "expect": {
+        "kind": "typed_demanded",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "demanded / outcome=none / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-002",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "demanded",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "failed_transition_id": "transition-002"
+      },
+      "expect": {
+        "kind": "typed_demanded",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "demanded / outcome=none / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-003",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "demanded",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true
+      },
+      "expect": {
+        "kind": "typed_demanded",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "demanded / outcome=none / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-004",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "demanded",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "failed_transition_id": "transition-004"
+      },
+      "expect": {
+        "kind": "typed_demanded",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "demanded / outcome=resolved / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-005",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "demanded",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "resolved"
+      },
+      "expect": {
+        "kind": "typed_demanded",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "demanded / outcome=resolved / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-006",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "demanded",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "resolved",
+        "failed_transition_id": "transition-006"
+      },
+      "expect": {
+        "kind": "typed_demanded",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "demanded / outcome=resolved / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-007",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "demanded",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "resolved"
+      },
+      "expect": {
+        "kind": "typed_demanded",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "demanded / outcome=resolved / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-008",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "demanded",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "resolved",
+        "failed_transition_id": "transition-008"
+      },
+      "expect": {
+        "kind": "typed_demanded",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "demanded / outcome=partial / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-009",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "demanded",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "partial"
+      },
+      "expect": {
+        "kind": "typed_demanded",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "demanded / outcome=partial / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-010",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "demanded",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "partial",
+        "failed_transition_id": "transition-010"
+      },
+      "expect": {
+        "kind": "typed_demanded",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "demanded / outcome=partial / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-011",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "demanded",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "partial"
+      },
+      "expect": {
+        "kind": "typed_demanded",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "demanded / outcome=partial / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-012",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "demanded",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "partial",
+        "failed_transition_id": "transition-012"
+      },
+      "expect": {
+        "kind": "typed_demanded",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "demanded / outcome=unresolved / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-013",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "demanded",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "unresolved"
+      },
+      "expect": {
+        "kind": "typed_demanded",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "demanded / outcome=unresolved / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-014",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "demanded",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "unresolved",
+        "failed_transition_id": "transition-014"
+      },
+      "expect": {
+        "kind": "typed_demanded",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "demanded / outcome=unresolved / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-015",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "demanded",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "unresolved"
+      },
+      "expect": {
+        "kind": "typed_demanded",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "demanded / outcome=unresolved / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-016",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "demanded",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "unresolved",
+        "failed_transition_id": "transition-016"
+      },
+      "expect": {
+        "kind": "typed_demanded",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "spike_active / outcome=none / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-017",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "spike_active",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false
+      },
+      "expect": {
+        "kind": "typed_spike_active",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "spike_active / outcome=none / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-018",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "spike_active",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "failed_transition_id": "transition-018"
+      },
+      "expect": {
+        "kind": "typed_spike_active",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "spike_active / outcome=none / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-019",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "spike_active",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true
+      },
+      "expect": {
+        "kind": "typed_spike_active",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "spike_active / outcome=none / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-020",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "spike_active",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "failed_transition_id": "transition-020"
+      },
+      "expect": {
+        "kind": "typed_spike_active",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "spike_active / outcome=resolved / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-021",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "spike_active",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "resolved"
+      },
+      "expect": {
+        "kind": "typed_spike_active",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "spike_active / outcome=resolved / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-022",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "spike_active",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "resolved",
+        "failed_transition_id": "transition-022"
+      },
+      "expect": {
+        "kind": "typed_spike_active",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "spike_active / outcome=resolved / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-023",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "spike_active",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "resolved"
+      },
+      "expect": {
+        "kind": "typed_spike_active",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "spike_active / outcome=resolved / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-024",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "spike_active",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "resolved",
+        "failed_transition_id": "transition-024"
+      },
+      "expect": {
+        "kind": "typed_spike_active",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "spike_active / outcome=partial / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-025",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "spike_active",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "partial"
+      },
+      "expect": {
+        "kind": "typed_spike_active",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "spike_active / outcome=partial / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-026",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "spike_active",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "partial",
+        "failed_transition_id": "transition-026"
+      },
+      "expect": {
+        "kind": "typed_spike_active",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "spike_active / outcome=partial / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-027",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "spike_active",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "partial"
+      },
+      "expect": {
+        "kind": "typed_spike_active",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "spike_active / outcome=partial / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-028",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "spike_active",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "partial",
+        "failed_transition_id": "transition-028"
+      },
+      "expect": {
+        "kind": "typed_spike_active",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "spike_active / outcome=unresolved / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-029",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "spike_active",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "unresolved"
+      },
+      "expect": {
+        "kind": "typed_spike_active",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "spike_active / outcome=unresolved / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-030",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "spike_active",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "unresolved",
+        "failed_transition_id": "transition-030"
+      },
+      "expect": {
+        "kind": "typed_spike_active",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "spike_active / outcome=unresolved / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-031",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "spike_active",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "unresolved"
+      },
+      "expect": {
+        "kind": "typed_spike_active",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "spike_active / outcome=unresolved / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-032",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "spike_active",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "unresolved",
+        "failed_transition_id": "transition-032"
+      },
+      "expect": {
+        "kind": "typed_spike_active",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "evidence_received / outcome=none / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-033",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "evidence_received",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false
+      },
+      "expect": {
+        "kind": "typed_evidence_received",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "evidence_received / outcome=none / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-034",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "evidence_received",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "failed_transition_id": "transition-034"
+      },
+      "expect": {
+        "kind": "typed_evidence_received",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "evidence_received / outcome=none / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-035",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "evidence_received",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true
+      },
+      "expect": {
+        "kind": "typed_evidence_received",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "evidence_received / outcome=none / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-036",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "evidence_received",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "failed_transition_id": "transition-036"
+      },
+      "expect": {
+        "kind": "typed_evidence_received",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "evidence_received / outcome=resolved / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-037",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "evidence_received",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "resolved"
+      },
+      "expect": {
+        "kind": "typed_evidence_received",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "evidence_received / outcome=resolved / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-038",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "evidence_received",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "resolved",
+        "failed_transition_id": "transition-038"
+      },
+      "expect": {
+        "kind": "typed_evidence_received",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "evidence_received / outcome=resolved / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-039",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "evidence_received",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "resolved"
+      },
+      "expect": {
+        "kind": "typed_evidence_received",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "evidence_received / outcome=resolved / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-040",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "evidence_received",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "resolved",
+        "failed_transition_id": "transition-040"
+      },
+      "expect": {
+        "kind": "typed_evidence_received",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "evidence_received / outcome=partial / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-041",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "evidence_received",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "partial"
+      },
+      "expect": {
+        "kind": "typed_evidence_received",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "evidence_received / outcome=partial / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-042",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "evidence_received",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "partial",
+        "failed_transition_id": "transition-042"
+      },
+      "expect": {
+        "kind": "typed_evidence_received",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "evidence_received / outcome=partial / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-043",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "evidence_received",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "partial"
+      },
+      "expect": {
+        "kind": "typed_evidence_received",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "evidence_received / outcome=partial / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-044",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "evidence_received",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "partial",
+        "failed_transition_id": "transition-044"
+      },
+      "expect": {
+        "kind": "typed_evidence_received",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "evidence_received / outcome=unresolved / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-045",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "evidence_received",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "unresolved"
+      },
+      "expect": {
+        "kind": "typed_evidence_received",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "evidence_received / outcome=unresolved / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-046",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "evidence_received",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "unresolved",
+        "failed_transition_id": "transition-046"
+      },
+      "expect": {
+        "kind": "typed_evidence_received",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "evidence_received / outcome=unresolved / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-047",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "evidence_received",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "unresolved"
+      },
+      "expect": {
+        "kind": "typed_evidence_received",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "evidence_received / outcome=unresolved / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-048",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "evidence_received",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "unresolved",
+        "failed_transition_id": "transition-048"
+      },
+      "expect": {
+        "kind": "typed_evidence_received",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "failed / outcome=none / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-049",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "failed",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false
+      },
+      "expect": {
+        "kind": "typed_failed",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "failed / outcome=none / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-050",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "failed",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "failed_transition_id": "transition-050"
+      },
+      "expect": {
+        "kind": "typed_failed",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "failed / outcome=none / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-051",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "failed",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true
+      },
+      "expect": {
+        "kind": "typed_failed",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "failed / outcome=none / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-052",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "failed",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "failed_transition_id": "transition-052"
+      },
+      "expect": {
+        "kind": "typed_failed",
+        "blocking": true,
+        "retry": true,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "failed / outcome=resolved / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-053",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "failed",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "resolved"
+      },
+      "expect": {
+        "kind": "typed_failed",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "failed / outcome=resolved / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-054",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "failed",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "resolved",
+        "failed_transition_id": "transition-054"
+      },
+      "expect": {
+        "kind": "typed_failed",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "failed / outcome=resolved / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-055",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "failed",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "resolved"
+      },
+      "expect": {
+        "kind": "typed_failed",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "failed / outcome=resolved / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-056",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "failed",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "resolved",
+        "failed_transition_id": "transition-056"
+      },
+      "expect": {
+        "kind": "typed_failed",
+        "blocking": true,
+        "retry": true,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "failed / outcome=partial / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-057",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "failed",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "partial"
+      },
+      "expect": {
+        "kind": "typed_failed",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "failed / outcome=partial / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-058",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "failed",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "partial",
+        "failed_transition_id": "transition-058"
+      },
+      "expect": {
+        "kind": "typed_failed",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "failed / outcome=partial / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-059",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "failed",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "partial"
+      },
+      "expect": {
+        "kind": "typed_failed",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "failed / outcome=partial / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-060",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "failed",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "partial",
+        "failed_transition_id": "transition-060"
+      },
+      "expect": {
+        "kind": "typed_failed",
+        "blocking": true,
+        "retry": true,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "failed / outcome=unresolved / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-061",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "failed",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "unresolved"
+      },
+      "expect": {
+        "kind": "typed_failed",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "failed / outcome=unresolved / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-062",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "failed",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "unresolved",
+        "failed_transition_id": "transition-062"
+      },
+      "expect": {
+        "kind": "typed_failed",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "failed / outcome=unresolved / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-063",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "failed",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "unresolved"
+      },
+      "expect": {
+        "kind": "typed_failed",
+        "blocking": true,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "failed / outcome=unresolved / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": true,
+        "finding_id": "finding-064",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "failed",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "unresolved",
+        "failed_transition_id": "transition-064"
+      },
+      "expect": {
+        "kind": "typed_failed",
+        "blocking": true,
+        "retry": true,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "resolved / outcome=none / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-065",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "resolved",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "resolved / outcome=none / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-066",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "resolved",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "failed_transition_id": "transition-066"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "resolved / outcome=none / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-067",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "resolved",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "resolved / outcome=none / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-068",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "resolved",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "failed_transition_id": "transition-068"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "resolved / outcome=resolved / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-069",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "resolved",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "resolved"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "resolved / outcome=resolved / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-070",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "resolved",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "resolved",
+        "failed_transition_id": "transition-070"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "resolved / outcome=resolved / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-071",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "resolved",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "resolved"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "resolved / outcome=resolved / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-072",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "resolved",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "resolved",
+        "failed_transition_id": "transition-072"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "resolved / outcome=partial / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-073",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "resolved",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "partial"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "resolved / outcome=partial / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-074",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "resolved",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "partial",
+        "failed_transition_id": "transition-074"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "resolved / outcome=partial / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-075",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "resolved",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "partial"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "resolved / outcome=partial / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-076",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "resolved",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "partial",
+        "failed_transition_id": "transition-076"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "resolved / outcome=unresolved / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-077",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "resolved",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "unresolved"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "resolved / outcome=unresolved / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-078",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "resolved",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "unresolved",
+        "failed_transition_id": "transition-078"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "resolved / outcome=unresolved / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-079",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "resolved",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "unresolved"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "resolved / outcome=unresolved / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-080",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "resolved",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "unresolved",
+        "failed_transition_id": "transition-080"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "withdrawn / outcome=none / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-081",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "withdrawn",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "withdrawn / outcome=none / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-082",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "withdrawn",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "failed_transition_id": "transition-082"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "withdrawn / outcome=none / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-083",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "withdrawn",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "withdrawn / outcome=none / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-084",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "withdrawn",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "failed_transition_id": "transition-084"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "withdrawn / outcome=resolved / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-085",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "withdrawn",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "resolved"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "withdrawn / outcome=resolved / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-086",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "withdrawn",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "resolved",
+        "failed_transition_id": "transition-086"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "withdrawn / outcome=resolved / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-087",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "withdrawn",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "resolved"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "withdrawn / outcome=resolved / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-088",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "withdrawn",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "resolved",
+        "failed_transition_id": "transition-088"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "withdrawn / outcome=partial / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-089",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "withdrawn",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "partial"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "withdrawn / outcome=partial / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-090",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "withdrawn",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "partial",
+        "failed_transition_id": "transition-090"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "withdrawn / outcome=partial / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-091",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "withdrawn",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "partial"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "withdrawn / outcome=partial / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-092",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "withdrawn",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "partial",
+        "failed_transition_id": "transition-092"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "withdrawn / outcome=unresolved / retry_permitted=false / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-093",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "withdrawn",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "unresolved"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "withdrawn / outcome=unresolved / retry_permitted=false / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-094",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "withdrawn",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": false,
+        "evidence_outcome": "unresolved",
+        "failed_transition_id": "transition-094"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "withdrawn / outcome=unresolved / retry_permitted=true / failed_transition=false",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-095",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "withdrawn",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "unresolved"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    },
+    {
+      "name": "withdrawn / outcome=unresolved / retry_permitted=true / failed_transition=true",
+      "gate": {
+        "mode": "enforce",
+        "blocking": false,
+        "finding_id": "finding-096",
+        "claim": "{\"question\":\"is the launcher cgroup delegable\"}",
+        "lifecycle": "withdrawn",
+        "demanded_revision_seq": 2,
+        "attempt_seq": 1,
+        "attempts": [],
+        "planned_checks": [],
+        "gaps": [],
+        "usable_findings": [],
+        "retry_permitted": true,
+        "evidence_outcome": "unresolved",
+        "failed_transition_id": "transition-096"
+      },
+      "expect": {
+        "kind": "typed_clear",
+        "blocking": false,
+        "retry": false,
+        "resolve": false,
+        "withdraw": false
+      }
+    }
+  ]
+}
