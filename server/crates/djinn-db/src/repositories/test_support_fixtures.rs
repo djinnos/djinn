@@ -163,6 +163,42 @@ pub async fn set_model_turn_phase_fixture(db: &Database, pool_id: i64, phase: &s
         .unwrap();
 }
 
+/// Count every persisted `model_turn_leases` row in the database.
+///
+/// The conformance target asserts admission outcomes by the number of durable
+/// lease rows the production acquisition path actually wrote, rather than by
+/// the enum a fixture handed back. A denied acquisition must leave this total
+/// unchanged.
+pub async fn model_turn_lease_total_count_fixture(db: &Database) -> i64 {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_scalar("SELECT count(*) FROM model_turn_leases")
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
+
+/// Count persisted `model_turn_leases` rows scoped to one admission pool.
+pub async fn model_turn_lease_count_for_pool_fixture(db: &Database, pool_id: i64) -> i64 {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_scalar("SELECT count(*) FROM model_turn_leases WHERE pool_id = $1")
+        .bind(pool_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
+
+/// The largest `model_turn_pools.id` present, or `None` for an empty ledger.
+///
+/// Lets a test derive a pool id that provably does not resolve without
+/// hard-coding one that a parallel fixture might later occupy.
+pub async fn model_turn_max_pool_id_fixture(db: &Database) -> Option<i64> {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_scalar("SELECT max(id) FROM model_turn_pools")
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
+
 pub async fn model_turn_lease_lifecycle_fixture(db: &Database, lease_id: &str) -> String {
     sqlx::query_scalar("SELECT lifecycle FROM model_turn_leases WHERE lease_id = $1::uuid")
         .bind(lease_id)

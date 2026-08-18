@@ -38,6 +38,11 @@ mod park_reason_tests;
 
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use admission::model_under_user_cap;
+// Crate-internal re-export so `test_helpers` can forward the lane half of the
+// resident conjunction to the out-of-crate conformance target. Visibility of
+// the function itself is unchanged: it stays `pub(crate)` in `admission`.
+#[allow(unused_imports)]
+pub(crate) use admission::lane_under_user_cap;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use admission::{

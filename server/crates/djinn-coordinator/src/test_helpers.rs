@@ -709,3 +709,59 @@ pub async fn close_refinement_role_task(
         )
         .await;
 }
+
+// ── Resident-admission seam for the out-of-crate conformance target ───────
+//
+// `CoordinatorActor::resident_admission_allows`, `model_under_user_cap` and
+// `lane_under_user_cap` are `pub(crate)` and stay that way: nothing outside
+// this crate may call the dispatch admission primitives in production. The
+// `model_admission_conformance` integration target lives outside the crate, so
+// it reaches them through these forwarders, which are compiled only under
+// `cfg(test)` or the `test-support` feature.
+//
+// Each forwarder has no logic of its own — it calls exactly the function the
+// production dispatch path calls, with the same arguments in the same order.
+// A regression in the primitive is therefore visible through the forwarder.
+
+/// Forward to the production resident-admission conjunction applied at the
+/// outer dispatch boundary (`CoordinatorActor::resident_admission_allows`,
+/// called from `dispatch::task_dispatch`'s multi-model candidate filter).
+pub fn resident_admission_allows(
+    running_by_model: &std::collections::HashMap<(String, String), u32>,
+    running_by_lane: &std::collections::HashMap<(String, djinn_core::models::ModelLane), u32>,
+    user: &str,
+    model: &str,
+    role: &str,
+    max_sessions: &std::collections::HashMap<String, u32>,
+    lane_max_sessions: Option<&djinn_core::models::LaneMaxSessions>,
+) -> bool {
+    crate::actor::CoordinatorActor::resident_admission_allows(
+        running_by_model,
+        running_by_lane,
+        user,
+        model,
+        role,
+        max_sessions,
+        lane_max_sessions,
+    )
+}
+
+/// Forward to the shared per-user/per-model cap primitive.
+pub fn model_under_user_cap(
+    running_by_user_model: &std::collections::HashMap<(String, String), u32>,
+    creator: &str,
+    model: &str,
+    cap: u32,
+) -> bool {
+    crate::dispatch::model_under_user_cap(running_by_user_model, creator, model, cap)
+}
+
+/// Forward to the shared per-user/per-lane cap primitive.
+pub fn lane_under_user_cap(
+    running_by_user_lane: &std::collections::HashMap<(String, djinn_core::models::ModelLane), u32>,
+    creator: &str,
+    lane: djinn_core::models::ModelLane,
+    cap: Option<u32>,
+) -> bool {
+    crate::dispatch::lane_under_user_cap(running_by_user_lane, creator, lane, cap)
+}
