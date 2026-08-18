@@ -737,7 +737,6 @@ pub fn project_dispatch_topology_paths_v1(
     }
     ExpectedAttemptPathProjectionV1 {
         expected_paths: expected_paths.into_iter().collect(),
-        joined_reports: Vec::new(),
     }
 }
 

@@ -233,7 +233,17 @@ pub async fn run_turn_watchdog_v1(
 
 /// Sole post-dispatch owner of a covered B1 attempt and its fenced lease.
 /// Raw B1 frames are adapted only through the authoritative `StreamEvent` seam.
-pub(super) struct CoveredAttemptTerminalGuard {
+///
+/// `pub` rather than `pub(super)` so that the guard a production launch hands
+/// back can be *named* outside this crate. That is not an API widening:
+/// [`crate::reply_loop`] declares `mod streaming` privately in a production
+/// build and `pub mod streaming` only under `test`/`test-support`, so nothing
+/// downstream can reach this type unless it opted into the test-support
+/// feature. Every method stays `pub(super)`; the type is an opaque handle whose
+/// only use out of crate is to be held alive, which is exactly what proposal
+/// `96fy`'s conformance target needs in order to observe that a launch really
+/// spawned the turn watchdog.
+pub struct CoveredAttemptTerminalGuard {
     attempt: Arc<tokio::sync::Mutex<Option<ProviderSseAttemptV1>>>,
     /// Available even while `next_event` is polling under the attempt mutex,
     /// so cancellation can request B1 abort immediately.

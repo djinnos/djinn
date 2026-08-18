@@ -13,14 +13,12 @@ use djinn_db::{
     ModelTurnPhaseCEvidenceOutcome, ModelTurnPhaseCEvidenceStage, ModelTurnPool,
 };
 use djinn_k8s::{WorkloadObjectKind, WorkloadRecord};
-use djinn_provider::{ProviderAttemptPlanV1, ProviderOutcomeV1, catalog::CatalogService};
+use djinn_provider::{ProviderOutcomeV1, catalog::CatalogService};
 use djinn_slot::model_turn_capability::{
     ModelTurnCapabilityCoverageV2, ModelTurnCapabilityReportV2,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-
-use crate::CoordinatorActor;
 
 /// One trusted expected Phase-C route at one Ready live slot.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -64,38 +62,22 @@ impl ExpectedAttemptPathV1 {
     }
 }
 
-/// A capability report that exact-joined an already expected route.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct JoinedCapabilityReportV1 {
-    pub expected_path: ExpectedAttemptPathV1,
-    pub coverage: ModelTurnCapabilityCoverageV2,
-}
-
-/// The denominator and corroborating B2 evidence for a Phase-C window.
+/// The coordinator-owned denominator for a Phase-C window.
+///
+/// It used to carry a second field, `joined_reports`, alongside a second
+/// producer — `CoordinatorActor::project_expected_attempt_paths_v1`, which
+/// built the denominator from the actor's workload inventory crossed with B1
+/// plan scopes. That producer had no caller outside its own unit tests, so the
+/// tree held two projections of the same thing and only one of them ran.
+/// Adversarial verification of proposal `96fy` found that deleting the live-slot
+/// filter from the dead one left the normative target green, which is exactly
+/// the trap a reader auditing the denominator falls into. The live producer is
+/// [`crate::model_turn_admission::controller::project_dispatch_topology_paths_v1`],
+/// and the report join it never populated now lives inside
+/// [`persist_joined_capability_reports_v1`], its only consumer.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExpectedAttemptPathProjectionV1 {
     pub expected_paths: Vec<ExpectedAttemptPathV1>,
-    pub joined_reports: Vec<JoinedCapabilityReportV1>,
-}
-
-impl CoordinatorActor {
-    /// Build the Phase-C projection from this actor's existing workload
-    /// inventory. Missing inventory fails closed to an empty denominator.
-    pub async fn project_expected_attempt_paths_v1(
-        &self,
-        plans: &[ProviderAttemptPlanV1],
-        reports: &[ModelTurnCapabilityReportV2],
-    ) -> djinn_db::Result<ExpectedAttemptPathProjectionV1> {
-        let Some(inventory) = self.workload_inventory.as_ref() else {
-            return Ok(ExpectedAttemptPathProjectionV1::default());
-        };
-        let records = inventory
-            .list()
-            .await
-            .map_err(djinn_db::Error::InvalidData)?;
-        let repository = ModelTurnAdmissionRepository::new(self.db.clone());
-        project_from_inventory(&repository, &self.catalog, records, plans, reports).await
-    }
 }
 
 /// Diagnostic-free output of the sole catalog-qualified learner seam.
@@ -205,7 +187,7 @@ pub async fn learner_catalog_qualified_phase_c_window_v1(
     }))
 }
 
-/// Persist B2 evidence only if it exact-joined the coordinator-owned expected
+/// Persist B2 evidence only if it exact-joins the coordinator-owned expected
 /// denominator. Covered reports become positive capability heartbeats; every
 /// joined report is retained as bounded heartbeat-stage evidence, with
 /// `Missing` representing an explicitly uncovered route.
@@ -213,34 +195,57 @@ pub async fn learner_catalog_qualified_phase_c_window_v1(
 /// This retains negative capability evidence without treating an uncovered
 /// report as an indistinguishable positive heartbeat. The repository verifies
 /// pool identity and route labels again.
+///
+/// The join is performed here rather than being carried in
+/// [`ExpectedAttemptPathProjectionV1`]. A B2 report has no credential identity,
+/// so a single exact four-field report corroborates *every* already-resolved
+/// credential-qualified route sharing that tuple; an arbitrary first pool is
+/// never selected. Reports that match no expected path are dropped, which is
+/// what "only if it exact-joined the denominator" means.
+///
+/// **This function has no production caller today.** Nothing in the leader pass
+/// collects `ModelTurnCapabilityReportV2` values to hand it, so
+/// `model_turn_capability_heartbeats` is written only by tests and coverage is
+/// never observed from B2 in production — the same Phase-B/B2 storage gap that
+/// keeps every controller window diagnostic. It is retained, rather than
+/// deleted with the dead projection, because it is the intended sink for that
+/// evidence once B2 has somewhere to report from.
 pub async fn persist_joined_capability_reports_v1(
     repository: &ModelTurnAdmissionRepository,
-    projection: &ExpectedAttemptPathProjectionV1,
+    expected_paths: &[ExpectedAttemptPathV1],
+    reports: &[ModelTurnCapabilityReportV2],
 ) -> djinn_db::Result<()> {
-    for joined in &projection.joined_reports {
-        let outcome = match joined.coverage {
-            ModelTurnCapabilityCoverageV2::Covered => {
-                repository
-                    .record_capability_heartbeat(ModelTurnCapabilityHeartbeatInput {
-                        pool_id: joined.expected_path.pool_id,
-                        slot_pod_uid: joined.expected_path.slot_pod_uid.clone(),
-                        deployment_revision: joined.expected_path.deployment_revision.clone(),
-                        provider_id: joined.expected_path.provider.clone(),
-                        model_id: joined.expected_path.model_scope.clone(),
-                    })
-                    .await?;
-                ModelTurnPhaseCEvidenceOutcome::Recorded
-            }
-            ModelTurnCapabilityCoverageV2::Uncovered => ModelTurnPhaseCEvidenceOutcome::Missing,
-        };
-        persist_expected_path_evidence_v1(
-            repository,
-            &joined.expected_path,
-            capability_report_fingerprint(&joined.expected_path),
-            ModelTurnPhaseCEvidenceStage::Heartbeat,
-            outcome,
-        )
-        .await?;
+    for report in reports {
+        for expected_path in expected_paths.iter().filter(|path| {
+            path.slot_pod_uid == report.slot_pod_uid
+                && path.deployment_revision == report.deployment_revision
+                && path.provider == report.provider
+                && path.model_scope == report.model_scope
+        }) {
+            let outcome = match report.coverage {
+                ModelTurnCapabilityCoverageV2::Covered => {
+                    repository
+                        .record_capability_heartbeat(ModelTurnCapabilityHeartbeatInput {
+                            pool_id: expected_path.pool_id,
+                            slot_pod_uid: expected_path.slot_pod_uid.clone(),
+                            deployment_revision: expected_path.deployment_revision.clone(),
+                            provider_id: expected_path.provider.clone(),
+                            model_id: expected_path.model_scope.clone(),
+                        })
+                        .await?;
+                    ModelTurnPhaseCEvidenceOutcome::Recorded
+                }
+                ModelTurnCapabilityCoverageV2::Uncovered => ModelTurnPhaseCEvidenceOutcome::Missing,
+            };
+            persist_expected_path_evidence_v1(
+                repository,
+                expected_path,
+                capability_report_fingerprint(expected_path),
+                ModelTurnPhaseCEvidenceStage::Heartbeat,
+                outcome,
+            )
+            .await?;
+        }
     }
     Ok(())
 }
@@ -307,66 +312,6 @@ pub async fn persist_provider_outcome_v1(
         evidence_outcome,
     )
     .await
-}
-
-async fn project_from_inventory(
-    repository: &ModelTurnAdmissionRepository,
-    catalog: &CatalogService,
-    records: Vec<WorkloadRecord>,
-    plans: &[ProviderAttemptPlanV1],
-    reports: &[ModelTurnCapabilityReportV2],
-) -> djinn_db::Result<ExpectedAttemptPathProjectionV1> {
-    let routes = resolve_planned_routes(repository, catalog, plans).await?;
-    let mut expected_paths = BTreeSet::new();
-    for record in records.iter().filter(eligible_live_slot) {
-        let Some(uid) = record
-            .uid
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-        else {
-            continue;
-        };
-        let Some(revision) = record
-            .deployment_revision
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-        else {
-            continue;
-        };
-        for pool in &routes {
-            expected_paths.insert(ExpectedAttemptPathV1::from_resolved_route(
-                uid.to_owned(),
-                revision.to_owned(),
-                pool,
-            ));
-        }
-    }
-    let expected_paths: Vec<_> = expected_paths.into_iter().collect();
-    // A B2 report has no credential identity, so a single exact four-field
-    // report corroborates every already-resolved credential-qualified route
-    // sharing that tuple. Never select an arbitrary first pool here.
-    let joined_reports = reports
-        .iter()
-        .flat_map(|report| {
-            expected_paths
-                .iter()
-                .filter(move |path| {
-                    path.slot_pod_uid == report.slot_pod_uid
-                        && path.deployment_revision == report.deployment_revision
-                        && path.provider == report.provider
-                        && path.model_scope == report.model_scope
-                })
-                .cloned()
-                .map(move |expected_path| JoinedCapabilityReportV1 {
-                    expected_path,
-                    coverage: report.coverage,
-                })
-        })
-        .collect();
-    Ok(ExpectedAttemptPathProjectionV1 {
-        expected_paths,
-        joined_reports,
-    })
 }
 
 pub(crate) fn eligible_live_slot(record: &&WorkloadRecord) -> bool {
@@ -647,54 +592,17 @@ fn validate_attempt_chain(
     }
 }
 
-async fn resolve_planned_routes(
-    repository: &ModelTurnAdmissionRepository,
-    catalog: &CatalogService,
-    plans: &[ProviderAttemptPlanV1],
-) -> djinn_db::Result<Vec<ModelTurnPool>> {
-    let mut routes = Vec::new();
-    for plan in plans {
-        // The B1 credential scope is deliberately opaque. Resolve only through
-        // the existing admitted pool and require the returned route to agree.
-        let fingerprint = plan.scope.credential.fingerprint();
-        let Some(pool) = repository
-            .resolve_pool_by_credential_fingerprint(
-                fingerprint,
-                &plan.scope.provider_id,
-                &plan.scope.model_id,
-            )
-            .await?
-        else {
-            continue;
-        };
-        // Durable pool rows are identity, not a label authority. Require the
-        // exact resolved pair to be catalog-bounded before it can enter the
-        // coordinator-owned expected-path denominator.
-        if catalog
-            .find_model(&format!("{}/{}", pool.provider_id, pool.model_id))
-            .is_none()
-        {
-            continue;
-        }
-        routes.push(pool);
-    }
-    routes.sort_by_key(|pool| pool.id);
-    routes.dedup_by_key(|pool| pool.id);
-    Ok(routes)
-}
-
 #[cfg(test)]
 mod tests {
+    use super::controller::project_dispatch_topology_paths_v1;
     use super::*;
     use djinn_core::models::{Model, Pricing, Provider};
     use djinn_db::{
-        Database, ModelTurnBucketDebit, ModelTurnBucketKind,
+        Database, ModelTurnPool,
         repositories::test_support::seed_scoped_model_turn_admission_fixture,
     };
     use djinn_provider::{
-        ProviderAttemptAbortHandleV1, ProviderAttemptAbortResultV1, ProviderAttemptLossV1,
-        ProviderAttemptRouteCoverageV1, ProviderAttemptScopeV1, ProviderAttemptTerminalV1,
-        ProviderCredentialRecordScopeV1, ProviderOutputReservationSourceV1,
+        ProviderAttemptAbortResultV1, ProviderAttemptLossV1, ProviderAttemptTerminalV1,
     };
     use std::{
         collections::{BTreeMap, BTreeSet},
@@ -717,24 +625,6 @@ mod tests {
             deployment_revision: revision.map(str::to_owned),
             images: vec![],
             commands: vec![],
-        }
-    }
-    fn plan(credential: &str, provider: &str, model: &str) -> ProviderAttemptPlanV1 {
-        ProviderAttemptPlanV1 {
-            scope: ProviderAttemptScopeV1 {
-                credential: ProviderCredentialRecordScopeV1::from_credential_record_id(credential),
-                provider_id: provider.into(),
-                model_id: model.into(),
-            },
-            coverage: ProviderAttemptRouteCoverageV1::Uncovered(
-                djinn_provider::ProviderAttemptUncoveredReasonV1::SerializationUnavailable,
-            ),
-            debits: vec![ModelTurnBucketDebit {
-                bucket_kind: ModelTurnBucketKind::Request,
-                units: 1,
-            }],
-            output_reservation_source: ProviderOutputReservationSourceV1::ExplicitLimit,
-            abort: ProviderAttemptAbortHandleV1::new(),
         }
     }
     /// Register a real coordinator-incarnation lease and fence writes on it.
@@ -763,14 +653,33 @@ mod tests {
         )
         .await
     }
+    /// Read the durable pool rows the live denominator is built from.
+    async fn pools(
+        repository: &ModelTurnAdmissionRepository,
+        routes: &[(&str, &str, &str)],
+    ) -> Vec<ModelTurnPool> {
+        let mut resolved = Vec::new();
+        for (credential, provider, model) in routes {
+            resolved.push(
+                repository
+                    .resolve_pool(credential, provider, model)
+                    .await
+                    .expect("resolve the seeded pool")
+                    .expect("the fixture seeded this pool"),
+            );
+        }
+        resolved
+    }
+
     #[tokio::test]
     async fn denominator_comes_only_from_live_slots_and_resolved_routes() {
         let db = Database::ephemeral().await.expect("db");
         let pool_id = seed(&db, "credential-a", "zai", "glm-5").await;
-        let projection = project_from_inventory(
-            &ModelTurnAdmissionRepository::new(db),
+        seed(&db, "credential-b", "attacker", "model").await;
+        let repository = ModelTurnAdmissionRepository::new(db);
+        let projection = project_dispatch_topology_paths_v1(
             &CatalogService::new(),
-            vec![
+            &[
                 record(Some("ready-old"), Some("rev-1"), true, false),
                 record(Some("ready-new"), Some("rev-2"), true, false),
                 record(Some("not-ready"), Some("rev-3"), false, false),
@@ -778,24 +687,25 @@ mod tests {
                 record(None, Some("rev-5"), true, false),
                 record(Some("missing-revision"), None, true, false),
             ],
-            &[
-                plan("credential-a", "zai", "glm-5"),
-                plan("fabricated", "attacker", "model"),
-            ],
-            &[],
-        )
-        .await
-        .expect("projection");
-        assert_eq!(projection.expected_paths.len(), 2);
+            &pools(
+                &repository,
+                &[
+                    ("credential-a", "zai", "glm-5"),
+                    ("credential-b", "attacker", "model"),
+                ],
+            )
+            .await,
+        );
+        assert_eq!(
+            projection.expected_paths.len(),
+            2,
+            "two Ready live slots crossed with the one catalog-resolvable route"
+        );
         assert!(
             projection
                 .expected_paths
                 .iter()
                 .all(|path| path.pool_id == pool_id)
-        );
-        assert!(
-            projection.joined_reports.is_empty(),
-            "silent paths remain expected"
         );
     }
     #[tokio::test]
@@ -808,19 +718,20 @@ mod tests {
             "arbitrary-model",
         )
         .await;
-        let projection = project_from_inventory(
-            &ModelTurnAdmissionRepository::new(db),
+        let repository = ModelTurnAdmissionRepository::new(db);
+        let projection = project_dispatch_topology_paths_v1(
             &CatalogService::new(),
-            vec![record(Some("slot-a"), Some("rev-1"), true, false)],
-            &[plan(
-                "credential-arbitrary",
-                "arbitrary-provider",
-                "arbitrary-model",
-            )],
-            &[],
-        )
-        .await
-        .expect("projection");
+            &[record(Some("slot-a"), Some("rev-1"), true, false)],
+            &pools(
+                &repository,
+                &[(
+                    "credential-arbitrary",
+                    "arbitrary-provider",
+                    "arbitrary-model",
+                )],
+            )
+            .await,
+        );
         assert!(projection.expected_paths.is_empty());
     }
 
@@ -863,19 +774,16 @@ mod tests {
         ] {
             reports.push(mismatch);
         }
-        let projection = project_from_inventory(
-            &repository,
+        let projection = project_dispatch_topology_paths_v1(
             &CatalogService::new(),
-            vec![record(Some("slot-a"), Some("rev-1"), true, false)],
-            &[plan("credential-a", "zai", "glm-5")],
-            &reports,
-        )
-        .await
-        .expect("projection");
+            &[record(Some("slot-a"), Some("rev-1"), true, false)],
+            &pools(&repository, &[("credential-a", "zai", "glm-5")]).await,
+        );
         assert_eq!(projection.expected_paths.len(), 1);
-        assert_eq!(projection.joined_reports.len(), 2);
-        assert_eq!(projection.joined_reports[0].expected_path.pool_id, pool_id);
-        persist_joined_capability_reports_v1(&repository, &projection)
+        assert_eq!(projection.expected_paths[0].pool_id, pool_id);
+        // Four of the six reports differ from the expected path in exactly one
+        // field each; only the two that agree on all four may persist anything.
+        persist_joined_capability_reports_v1(&repository, &projection.expected_paths, &reports)
             .await
             .expect("persist");
         assert_eq!(
@@ -954,14 +862,34 @@ mod tests {
         let first_pool_id = seed(&db, "credential-a", "zai", "glm-5").await;
         let second_pool_id = seed(&db, "credential-b", "zai", "glm-5").await;
         let repository = ModelTurnAdmissionRepository::new(db);
-        let projection = project_from_inventory(
-            &repository,
+        let projection = project_dispatch_topology_paths_v1(
             &CatalogService::new(),
-            vec![record(Some("slot-a"), Some("rev-1"), true, false)],
-            &[
-                plan("credential-a", "zai", "glm-5"),
-                plan("credential-b", "zai", "glm-5"),
-            ],
+            &[record(Some("slot-a"), Some("rev-1"), true, false)],
+            &pools(
+                &repository,
+                &[
+                    ("credential-a", "zai", "glm-5"),
+                    ("credential-b", "zai", "glm-5"),
+                ],
+            )
+            .await,
+        );
+
+        assert_eq!(projection.expected_paths.len(), 2);
+        assert_eq!(
+            projection
+                .expected_paths
+                .iter()
+                .map(|path| path.pool_id)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([first_pool_id, second_pool_id]),
+            "both credential-qualified routes share the slot and the four-field \
+             tuple, so the one exact report must reach both"
+        );
+
+        persist_joined_capability_reports_v1(
+            &repository,
+            &projection.expected_paths,
             &[ModelTurnCapabilityReportV2 {
                 slot_pod_uid: "slot-a".into(),
                 deployment_revision: "rev-1".into(),
@@ -971,23 +899,7 @@ mod tests {
             }],
         )
         .await
-        .expect("projection");
-
-        assert_eq!(projection.expected_paths.len(), 2);
-        assert_eq!(projection.joined_reports.len(), 2);
-        assert_eq!(
-            projection
-                .joined_reports
-                .iter()
-                .map(|joined| joined.expected_path.pool_id)
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from([first_pool_id, second_pool_id]),
-            "the exact report joins every credential-qualified pool route"
-        );
-
-        persist_joined_capability_reports_v1(&repository, &projection)
-            .await
-            .expect("persist");
+        .expect("persist");
         for pool_id in [first_pool_id, second_pool_id] {
             assert_eq!(
                 repository
