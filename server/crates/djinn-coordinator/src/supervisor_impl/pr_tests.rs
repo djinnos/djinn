@@ -1894,6 +1894,30 @@ async fn retained_legacy_cleanup_reaches_inline_and_stale_provider_boundaries() 
 
 /// Fresh repository fixtures prevent one maintenance route's parking from
 /// de-selecting the fixture for another route.
+///
+/// # Why every cell keeps its own database, and what that costs
+///
+/// Three of the five surfaces below — `poll_pr_statuses`,
+/// `reconcile_blindspot_merged_prs`, `health::sweep_stale_resources` — are
+/// database-WIDE sweeps, and the invariants asserted per cell
+/// (`direct_delivery_matrix_counts_for_test`) count rows across the whole
+/// database. Two cells sharing a database would therefore let one maintenance
+/// route's park de-select another route's fixture, which is the exact
+/// independence this test exists to prove. So unlike the direct-delivery
+/// fail-closed matrices in `retry_direct_delivery_tests` and
+/// `session_recovery_direct_delivery_tests` — where the varying state is
+/// task-scoped and one template clone now serves a whole row of cells — these
+/// 20 cells cannot be merged.
+///
+/// `CREATE DATABASE … TEMPLATE` forces a cluster-wide checkpoint on either
+/// side, so 20 clones queued behind 15 sibling test processes doing the same
+/// took this test from 7.7 s alone to past the 90 s nextest `terminate-after`
+/// cap. It is fixed by *scheduling* rather than by a larger budget: the
+/// `[[profile.default.overrides]]` entry in `server/.config/nextest.toml`
+/// gives it `threads-required = "num-test-threads"`, so it runs against an
+/// uncontended cluster. The 90 s cap is deliberately left untouched — if this
+/// test ever exceeds it with the runner to itself, that is a real regression
+/// and must fail.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_pr_maintenance_surfaces_independently_preserve_attempt_ownership() {
     let _guard = RETAINED_LEGACY_LIFECYCLE_GUARD.lock().await;

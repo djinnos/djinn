@@ -9,6 +9,38 @@ slow-timeout = { period = "30s", terminate-after = 3 }
 fail-fast = true
 final-status-level = "fail"
 
+# ── Per-test scheduling (NOT per-test timeouts) ─────────────────────────────
+#
+# Overrides declared on `default` are inherited by every other profile, so this
+# applies to `ci`/`merge-group`/`pull-request` too.
+#
+# Nothing here may weaken a timeout. A DB-backed test that is slow because the
+# machine is busy is a *scheduling* problem, and the honest fix is to schedule
+# it — raising `slow-timeout` would only convert a fast failure into a slow one
+# and let a real regression hide behind the larger budget.
+#
+# `task_pr_maintenance_surfaces_independently_preserve_attempt_ownership` is a
+# 5-surface x 4-contract matrix, and each of its 20 cells genuinely needs its
+# own template-cloned database: three of the five surfaces are database-WIDE
+# sweeps (`poll_pr_statuses`, `reconcile_blindspot_merged_prs`,
+# `health::sweep_stale_resources`) and the assertions count direct-delivery
+# rows across the whole database, so two cells sharing a database would let one
+# maintenance route's park de-select another route's fixture — precisely the
+# independence the test exists to prove. Cells therefore cannot be merged the
+# way the direct-delivery fail-closed matrices were (see
+# `retry_direct_delivery_tests` / `session_recovery_direct_delivery_tests`,
+# which share one clone per case instead of one per cell).
+#
+# `CREATE DATABASE … TEMPLATE` forces a cluster-wide checkpoint on either side,
+# so 20 clones queued behind 15 other test processes doing the same took this
+# test from 7.7 s alone to over the 90 s `terminate-after` cap. Reserving the
+# runner gives it the uncontended cluster its shape requires, at a cost of a
+# few seconds of suite wall clock, and leaves the 90 s cap fully load-bearing:
+# if it ever exceeds that budget on an idle machine, that is a real regression.
+[[profile.default.overrides]]
+filter = 'binary_id(djinn-coordinator) & test(=supervisor_impl::pr::tests::task_pr_maintenance_surfaces_independently_preserve_attempt_ownership)'
+threads-required = "num-test-threads"
+
 [profile.ci]
 # Merge-queue/full-suite CI: retry flaky tests, detect slow tests, report flakes.
 # Keep this profile unfiltered. The vjs6/ir2i lifecycle-concurrency inventory in

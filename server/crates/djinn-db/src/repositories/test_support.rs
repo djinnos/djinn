@@ -248,8 +248,15 @@ pub async fn seed_direct_delivery_liveness_fixture_for_test(
     activate_direct_delivery_epoch_for_test(db).await;
     let proposal_id = task_id.to_owned();
     let attempt_id = format!("a{}", &task_id[1..]);
-    let proposal_short_id = task_id[..8].to_owned();
-    let attempt_short_id = format!("a{}", &task_id[1..8]);
+    // `proposals.short_id` and `proposal_build_attempts.short_id` are UNIQUE
+    // database-wide, so derive both from the *random* tail of the task UUID
+    // rather than its leading bytes. Two v7 UUIDs minted within the same ~65 s
+    // window share their first 8 hex characters, which made this helper usable
+    // exactly once per database and forced every matrix cell that wanted a
+    // second seeded task to clone a whole new template database.
+    let tail = &task_id[task_id.len() - 8..];
+    let proposal_short_id = tail.to_owned();
+    let attempt_short_id = format!("a{}", &tail[1..]);
     seed_direct_delivery_proposal_owner_for_test(db, epic_id, &proposal_id, &proposal_short_id)
         .await;
     let attempts = ProposalBuildAttemptRepository::new(db.clone());

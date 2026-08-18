@@ -187,7 +187,17 @@ struct RecoveryFixture {
 /// See the module-level note on `DirectDeliveryEngine::integrate` for the hang
 /// that distinction used to cause, and for the regression that pins it shut.
 async fn recovery_fixture_with_status(status: &str) -> RecoveryFixture {
-    let db = Database::open_in_memory().unwrap();
+    recovery_fixture_in(Database::open_in_memory().unwrap(), status).await
+}
+
+/// Build one seam's fixture inside an **existing** database.
+///
+/// Everything this creates — epic, task, dependent, event bus — is
+/// task-scoped, so a matrix whose cells vary only task-scoped state can hoist
+/// the `CREATE DATABASE … TEMPLATE` clone out of its inner loop and share one
+/// database across those cells. Two fixtures built on the same database share
+/// nothing but the database.
+async fn recovery_fixture_in(db: Database, status: &str) -> RecoveryFixture {
     let source_updates = Arc::new(Mutex::new(0usize));
     let dependent_updates = Arc::new(Mutex::new(0usize));
     let source_slot = Arc::new(Mutex::new(String::new()));
@@ -594,53 +604,54 @@ enum RecoveryRoutingCase {
 /// The retained-legacy half is a positive assertion: those cases must still
 /// return `Release`, i.e. the seam's pre-existing recovery transition is
 /// preserved rather than merely "not crashing".
+///
+/// # One template clone per case, not one per cell
+///
+/// Same shape, and same reason, as
+/// `retry_direct_delivery_tests::every_surface_fails_closed_and_retains_legacy_across_all_persisted_states`:
+/// the case half of a cell is *database-global* (a dropped `task_deliveries`
+/// table, a deleted, disabled, or unknown-state epoch row) and so keeps its own
+/// `CREATE DATABASE … TEMPLATE` clone, while the seam half is *task-scoped* and
+/// so shares it. 14 clones become 7 with all 14 cells still asserted, which
+/// matters because a template clone forces a cluster-wide checkpoint on either
+/// side and this test was already crossing 60 s of the 90 s nextest cap at
+/// full-suite parallelism.
 #[tokio::test]
 async fn both_recovery_seams_fail_closed_and_preserve_legacy_release_by_persisted_state() {
-    for seam in RecoverySeam::ALL {
-        for case in [
-            RecoveryRoutingCase::UnresolvedOwnership,
-            RecoveryRoutingCase::MissingSchema,
-            RecoveryRoutingCase::MissingEpoch,
-            RecoveryRoutingCase::UnknownEpoch,
-            RecoveryRoutingCase::UnknownDeliveryState,
-            RecoveryRoutingCase::SupportedDisabled,
-            RecoveryRoutingCase::SupportedActiveExplicitLegacy,
-        ] {
-            let fixture = recovery_fixture().await;
+    for case in [
+        RecoveryRoutingCase::UnresolvedOwnership,
+        RecoveryRoutingCase::MissingSchema,
+        RecoveryRoutingCase::MissingEpoch,
+        RecoveryRoutingCase::UnknownEpoch,
+        RecoveryRoutingCase::UnknownDeliveryState,
+        RecoveryRoutingCase::SupportedDisabled,
+        RecoveryRoutingCase::SupportedActiveExplicitLegacy,
+    ] {
+        let db = Database::open_in_memory().unwrap();
+        let mut fixtures = Vec::with_capacity(RecoverySeam::ALL.len());
+        for _ in RecoverySeam::ALL {
+            fixtures.push(recovery_fixture_in(db.clone(), "in_progress").await);
+        }
 
+        // Task-scoped seeding: one independent delivery identity per seam.
+        for fixture in &fixtures {
             match case {
                 RecoveryRoutingCase::UnresolvedOwnership => {
-                    djinn_db::test_support::activate_direct_delivery_epoch_for_test(&fixture.db)
-                        .await;
+                    // The short id comes from the random tail of the task UUID
+                    // because short ids are unique database-wide and these two
+                    // tasks share one database.
                     djinn_db::test_support::seed_direct_delivery_proposal_for_test(
                         &fixture.db,
                         &fixture.task_id,
-                        &fixture.task_id[..8],
+                        &fixture.task_id[fixture.task_id.len() - 8..],
                     )
                     .await;
                 }
-                RecoveryRoutingCase::MissingSchema => {
-                    fixture.seed(Some("applying")).await;
-                    djinn_db::test_support::drop_table_cascade_for_test(
-                        &fixture.db,
-                        "task_deliveries",
-                    )
-                    .await;
-                }
-                RecoveryRoutingCase::MissingEpoch => {
-                    fixture.seed(Some("applying")).await;
-                    djinn_db::test_support::remove_direct_delivery_epoch_for_test(&fixture.db)
-                        .await;
-                }
-                RecoveryRoutingCase::UnknownEpoch => {
-                    fixture.seed(Some("applying")).await;
-                    djinn_db::test_support::seed_unknown_direct_delivery_epoch_for_test(
-                        &fixture.db,
-                    )
-                    .await;
-                }
+                _ => fixture.seed(Some("applying")).await,
+            }
+
+            match case {
                 RecoveryRoutingCase::UnknownDeliveryState => {
-                    fixture.seed(Some("applying")).await;
                     djinn_db::test_support::seed_unknown_task_delivery_state_for_test(
                         &fixture.db,
                         &fixture.task_id,
@@ -648,21 +659,40 @@ async fn both_recovery_seams_fail_closed_and_preserve_legacy_release_by_persiste
                     )
                     .await;
                 }
-                RecoveryRoutingCase::SupportedDisabled => {
-                    fixture.seed(Some("applying")).await;
-                    djinn_db::test_support::disable_direct_delivery_epoch_for_test(&fixture.db)
-                        .await;
-                }
                 RecoveryRoutingCase::SupportedActiveExplicitLegacy => {
-                    fixture.seed(Some("applying")).await;
                     fixture
                         .tasks
                         .update_labels(&fixture.task_id, &format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#))
                         .await
                         .unwrap();
                 }
+                _ => {}
             }
+        }
 
+        // Database-global state, applied once after both seams are seeded.
+        // This half of the case is exactly why a case owns a clone of its own.
+        match case {
+            RecoveryRoutingCase::UnresolvedOwnership => {
+                djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
+            }
+            RecoveryRoutingCase::MissingSchema => {
+                djinn_db::test_support::drop_table_cascade_for_test(&db, "task_deliveries").await;
+            }
+            RecoveryRoutingCase::MissingEpoch => {
+                djinn_db::test_support::remove_direct_delivery_epoch_for_test(&db).await;
+            }
+            RecoveryRoutingCase::UnknownEpoch => {
+                djinn_db::test_support::seed_unknown_direct_delivery_epoch_for_test(&db).await;
+            }
+            RecoveryRoutingCase::SupportedDisabled => {
+                djinn_db::test_support::disable_direct_delivery_epoch_for_test(&db).await;
+            }
+            RecoveryRoutingCase::UnknownDeliveryState
+            | RecoveryRoutingCase::SupportedActiveExplicitLegacy => {}
+        }
+
+        for (seam, fixture) in RecoverySeam::ALL.into_iter().zip(&fixtures) {
             let engine_runs = Arc::new(AtomicUsize::new(0));
             let runs = engine_runs.clone();
             *fixture.source_updates.lock().unwrap() = 0;
