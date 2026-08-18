@@ -1,0 +1,17 @@
+---
+source: crates/djinn-agent/src/typed_evidence_demand.rs
+expression: render(case)
+---
+# Typed evidence
+
+Finding `01a01188-0000-7000-8000-0000000d0006` is `demanded`, demanded against revision 2.
+Claim under demand: Can the compaction sweep delete a note that is still referenced?
+
+## Demand thresholds
+
+Category: safety
+Load-bearing: yes
+Threshold: A destructive sweep may not ship while it is unknown whether it can remove data another surface still reads.
+Expected checks:
+- Enumerate every reader of the notes table and record which ones the sweep does not consult
+- Run the sweep against a fixture with a live inbound reference and record what it deletes

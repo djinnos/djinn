@@ -1,0 +1,15 @@
+---
+source: crates/djinn-agent/src/typed_evidence_demand.rs
+expression: render(case)
+---
+# Typed evidence
+
+Finding `01a01188-0000-7000-8000-0000000d0029` is `demanded`, demanded against revision 2.
+Claim under demand: Which module owns the admission settle window today?
+
+## Demand thresholds
+
+Category: repository_answerable
+Load-bearing: no
+Threshold: A question the repository already answers is not an evidence demand. Read the code and file an ordinary objection if the answer is wrong.
+Expected checks: none — this remains an ordinary objection rather than an evidence demand.

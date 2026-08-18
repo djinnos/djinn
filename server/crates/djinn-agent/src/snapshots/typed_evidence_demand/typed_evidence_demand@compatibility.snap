@@ -1,0 +1,17 @@
+---
+source: crates/djinn-agent/src/typed_evidence_demand.rs
+expression: render(case)
+---
+# Typed evidence
+
+Finding `01a01188-0000-7000-8000-0000000d0013` is `demanded`, demanded against revision 2.
+Claim under demand: Does the new launcher protocol parse a payload written by the previous release?
+
+## Demand thresholds
+
+Category: compatibility
+Load-bearing: yes
+Threshold: A mixed-version fleet cannot be accepted while it is unknown whether the old writer's payload still decodes.
+Expected checks:
+- Decode a payload captured from the previous release and record the result
+- Read the protocol's version fence and record which versions it admits

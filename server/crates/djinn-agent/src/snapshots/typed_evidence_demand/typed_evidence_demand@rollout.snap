@@ -1,0 +1,17 @@
+---
+source: crates/djinn-agent/src/typed_evidence_demand.rs
+expression: render(case)
+---
+# Typed evidence
+
+Finding `01a01188-0000-7000-8000-0000000d0007` is `demanded`, demanded against revision 2.
+Claim under demand: Does the settle window let a rolling deploy wedge admission?
+
+## Demand thresholds
+
+Category: rollout
+Load-bearing: yes
+Threshold: A rollout plan may not ship while it is unknown whether the deploy itself can stall the gate it depends on.
+Expected checks:
+- Read the admission settle window and record its interaction with a surge rollout
+- Run a simulated rolling deploy against the admission gate and record whether it admits

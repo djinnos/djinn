@@ -1,0 +1,17 @@
+---
+source: crates/djinn-agent/src/typed_evidence_demand.rs
+expression: render(case)
+---
+# Typed evidence
+
+Finding `01a01188-0000-7000-8000-0000000d0011` is `demanded`, demanded against revision 2.
+Claim under demand: Can the launcher share a cgroup across pods?
+
+## Demand thresholds
+
+Category: feasibility
+Load-bearing: yes
+Threshold: The spec cannot be accepted while it is unknown whether the kernel permits the delegation this design assumes.
+Expected checks:
+- Run the cgroup delegation probe on a representative host and capture its exit status
+- Read the launcher's cgroup attach path and record whether it can target a delegated subtree
