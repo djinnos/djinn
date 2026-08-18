@@ -43,6 +43,14 @@ const STARTUP_TASK_RUN_THRESHOLD_SECS: i64 = 10;
 /// while staying safely clear of any real starting attempt.
 const ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS: i64 = 5 * 60;
 
+/// The window the `direct_delivery_v1` activation census uses to decide which
+/// `coordinator_incarnations` rows are live.
+///
+/// It is deliberately the same value as
+/// [`ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS`]: a process the reaper still
+/// treats as a live dispatch owner is a process the activation fence must count.
+pub(crate) const COORDINATOR_LIVENESS_THRESHOLD_SECS: i64 = ORPHANED_PENDING_ATTEMPT_THRESHOLD_SECS;
+
 // NOTE: this threshold is deliberately NOT exported for the CI-route startup
 // owner handoff (proposal `nafu`). A lapsed renewal means renewal stopped, and
 // renewal stops at cancellation — not at process death — so a leader still

@@ -2446,6 +2446,135 @@ pub async fn queue_feedback_refinement_generation_for_test(db: &Database, inject
     .unwrap_or_else(|error| panic!("queue feedback refinement generation: {error}"));
 }
 
+/// Persist the shipped-disabled epoch at an arbitrary generation so an
+/// activation fixture can present a *later* target than generation 1.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn seed_disabled_direct_delivery_epoch_at_generation_for_test(
+    db: &Database,
+    generation: i64,
+) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "UPDATE direct_delivery_epochs SET state = 'disabled', generation = $1 \
+         WHERE name = 'direct_delivery_v1'",
+    )
+    .bind(generation)
+    .execute(db.pool())
+    .await
+    .expect("failed to seed disabled direct-delivery epoch generation");
+}
+
+/// The exact persisted epoch row, read without going through the typed probe.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn direct_delivery_epoch_row_for_test(db: &Database) -> Option<(String, i64)> {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_as::<_, (String, i64)>(
+        "SELECT state, generation FROM direct_delivery_epochs WHERE name = 'direct_delivery_v1'",
+    )
+    .fetch_optional(db.pool())
+    .await
+    .expect("failed to read direct-delivery epoch row")
+}
+
+/// Advertised capability rows as `(process_incarnation_id, capability,
+/// epoch_generation)`, ordered deterministically.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn direct_delivery_capability_rows_for_test(db: &Database) -> Vec<(String, String, i64)> {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT process_incarnation_id, capability, epoch_generation \
+         FROM direct_delivery_process_capabilities ORDER BY process_incarnation_id, capability",
+    )
+    .fetch_all(db.pool())
+    .await
+    .expect("failed to read direct-delivery capability rows")
+}
+
+/// Drop one advertised capability so the census gap for it can be observed.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn revoke_direct_delivery_capability_for_test(
+    db: &Database,
+    process_incarnation_id: &str,
+    capability: &str,
+) {
+    db.ensure_initialized().await.unwrap();
+    let removed = sqlx::query(
+        "DELETE FROM direct_delivery_process_capabilities \
+         WHERE process_incarnation_id = $1 AND capability = $2",
+    )
+    .bind(process_incarnation_id)
+    .bind(capability)
+    .execute(db.pool())
+    .await
+    .expect("failed to revoke direct-delivery capability")
+    .rows_affected();
+    assert_eq!(
+        removed, 1,
+        "revoking {capability} for {process_incarnation_id} must remove exactly one advertised row"
+    );
+}
+
+/// Every lease row as `(id, epoch_generation, released)`, ordered by id.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn direct_delivery_lease_rows_for_test(db: &Database) -> Vec<(String, i64, bool)> {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_as::<_, (String, i64, bool)>(
+        "SELECT id, epoch_generation, released_at IS NOT NULL \
+         FROM direct_delivery_leases ORDER BY id",
+    )
+    .fetch_all(db.pool())
+    .await
+    .expect("failed to read direct-delivery lease rows")
+}
+
+/// Backdate a lease's expiry so takeover of an expired lease can be exercised
+/// without sleeping.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn expire_direct_delivery_lease_for_test(db: &Database, lease_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    let updated = sqlx::query(
+        "UPDATE direct_delivery_leases \
+         SET acquired_at = now() - interval '2 hours', expires_at = now() - interval '1 hour' \
+         WHERE id = $1",
+    )
+    .bind(lease_id)
+    .execute(db.pool())
+    .await
+    .expect("failed to expire direct-delivery lease")
+    .rows_affected();
+    assert_eq!(
+        updated, 1,
+        "expiring {lease_id} must update exactly one lease"
+    );
+}
+
+/// Backdate a coordinator incarnation's renewal so the activation census reads
+/// it as no longer live.
+///
+/// **Not for production use.** Panics on SQL errors.
+pub async fn expire_coordinator_incarnation_for_test(db: &Database, incarnation_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    let updated = sqlx::query(
+        "UPDATE coordinator_incarnations SET last_renewed_at = '1970-01-01T00:00:00.000Z' \
+         WHERE id = $1",
+    )
+    .bind(incarnation_id)
+    .execute(db.pool())
+    .await
+    .expect("failed to expire coordinator incarnation")
+    .rows_affected();
+    assert_eq!(
+        updated, 1,
+        "expiring {incarnation_id} must update exactly one incarnation"
+    );
+}
+
 // Larger multi-row fixtures live beside this module and are re-exported here,
 // so `crate::repositories::test_support::*` remains the single import path.
 pub use super::test_support_fixtures::*;

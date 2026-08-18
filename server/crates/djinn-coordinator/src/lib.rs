@@ -61,6 +61,10 @@ pub mod ci_reproduction;
 pub mod context;
 /// Crash-convergent direct append engine, unreachable while its epoch is off.
 pub mod direct_delivery;
+pub mod direct_delivery_activation;
+#[cfg(test)]
+#[path = "direct_delivery_activation_matrix.rs"]
+mod direct_delivery_activation_matrix;
 pub mod disk_admission;
 pub mod dispatch_pause;
 pub mod doctor;
