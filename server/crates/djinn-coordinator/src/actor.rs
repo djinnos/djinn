@@ -399,6 +399,15 @@ pub struct CoordinatorActor {
     /// completed a controller cycle for. The tick is faster than the window, so
     /// this keeps one cycle per window rather than one per tick.
     pub(super) last_phase_c_window_start: Option<i64>,
+    /// The fail-closed qualifier's verdict for that window, recorded by the
+    /// controller cycle. The enforcement pass reads it rather than
+    /// re-qualifying, so there is exactly one qualifier in the tick.
+    ///
+    /// It starts `false`, and it stays `false` for every production window
+    /// today: Phase B stored a capability instant rather than a coverage
+    /// interval and no authoritative usage column, so no window can qualify
+    /// until that storage lands. A pool therefore cannot reach `enforce`.
+    pub(super) last_phase_c_window_trainable: bool,
     /// Rolling-window throughput tracking: epic_id → Vec of merge event instants.
     // Restart-safe-to-lose: sliding window for throughput metrics, rebuilt on the next metrics tick.
     pub(super) throughput_events: HashMap<String, Vec<StdInstant>>,
@@ -875,6 +884,7 @@ impl CoordinatorActor {
             rpc_registry,
             prune_tick_counter: 0,
             last_phase_c_window_start: None,
+            last_phase_c_window_trainable: false,
             throughput_events: HashMap::new(),
             pr_status_cache: HashMap::new(),
             pr_draft_first_seen: HashMap::new(),
@@ -1433,6 +1443,11 @@ impl CoordinatorActor {
         // write. Pools sit at `off` until an operator opts one in, so an
         // unarmed deployment does no work here.
         poll_stack::boxed(|| self.run_completed_phase_c_window()).await;
+        // Phase-D guarded enforcement pass (epic j1m0, task 5mqp). It runs in
+        // the same leader tick, immediately after the controller cycle whose
+        // qualifier verdict it consumes, and it is the only production writer
+        // that can move a pool to `enforce` or drain one on coverage loss.
+        poll_stack::boxed(|| self.run_model_turn_enforcement_pass()).await;
 
         poll_stack::boxed(|| {
             self.mismatch_scan

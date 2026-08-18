@@ -676,6 +676,12 @@ pub enum ModelTurnModeChangeRejection {
         expected: ModelTurnRollbackStepV1,
         attempted: ModelTurnRollbackStepV1,
     },
+    /// The last completed aligned window did not qualify, so there is nothing
+    /// the pool has been shown to sustain. Given that Phase B never stored a
+    /// capability *interval* or an authoritative usage column, this is the
+    /// gate a production window is expected to fail — permanently, until that
+    /// storage lands.
+    WindowNotTrainable,
 }
 
 impl ModelTurnModeChangeRejection {
@@ -688,6 +694,7 @@ impl ModelTurnModeChangeRejection {
             Self::CompatibilityPhaseInsufficient { .. } => "compatibility_phase_insufficient",
             Self::IdentityIneligible { .. } => "identity_ineligible",
             Self::RollbackOutOfOrder { .. } => "rollback_out_of_order",
+            Self::WindowNotTrainable => "window_not_trainable",
         }
     }
 }
@@ -793,6 +800,46 @@ impl ModelTurnRollbackPlanV1 {
             }),
         }
     }
+}
+
+/// One pool's slice of a leader enforcement pass.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelTurnEnforcementPassInput {
+    pub pool_id: i64,
+    /// The live expected attempt paths for this pool: the coordinator's own
+    /// workload inventory crossed with the durable dispatch topology.
+    pub expected_paths: Vec<ModelTurnExpectedPathKey>,
+    /// RFC 3339 instant every freshness bound is measured from.
+    pub evaluated_at: String,
+    /// The durable leadership fence, re-checked inside this transaction.
+    pub fence: ModelTurnControllerFence,
+    pub controller_generation: i64,
+    /// The fail-closed qualifier's verdict for the last completed window.
+    /// Only a qualifying window may advance a pool to `enforce`.
+    pub window_trainable: bool,
+}
+
+/// What one pool's slice of the enforcement pass did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelTurnEnforcementOutcome {
+    /// Leadership was lost, superseded, or is draining. Nothing was mutated.
+    Fenced,
+    /// Complete coverage was not observed, so the pool stopped admitting.
+    Drained {
+        from: ModelTurnAdmissionPhase,
+        changed_at: String,
+    },
+    /// Every gate held; the pool now enforces.
+    Enforced {
+        changed_at: String,
+    },
+    /// A gate refused the advance. The pool is untouched.
+    Denied(ModelTurnModeChangeRejection),
+    /// Nothing to do for this pool.
+    Unchanged {
+        mode: ModelTurnAdmissionPhase,
+    },
+    PoolUnavailable,
 }
 
 /// A requested change to one pool's admission mode.
@@ -1228,28 +1275,200 @@ impl ModelTurnAdmissionRepository {
 
     /// Atomically move the named enforcing pools to `draining`.
     ///
-    /// `acquire_turn` reads the pool row `FOR UPDATE` inside a serializable
-    /// transaction, so once this commits no later acquisition can commit
-    /// against the old phase. Breaker state, identity state, and learned
-    /// concurrency are untouched. Returns the pools that actually transitioned.
-    pub async fn drain_enforcing_pools(&self, pool_ids: &[i64]) -> Result<Vec<i64>> {
+    /// Every pool goes through [`Self::drain_pool_in_transaction`], so the mode
+    /// ledger stays the whole truth about how a pool's mode moved: there is
+    /// exactly one production writer of `model_turn_pools.phase`. Breaker
+    /// state, identity state, and learned concurrency are untouched. Returns
+    /// the pools that actually transitioned.
+    pub async fn drain_enforcing_pools(
+        &self,
+        pool_ids: &[i64],
+        controller_generation: i64,
+    ) -> Result<Vec<i64>> {
         self.db.ensure_initialized().await?;
         if pool_ids.iter().any(|pool_id| *pool_id <= 0) {
             return invalid_phase_c();
         }
-        if pool_ids.is_empty() {
-            return Ok(Vec::new());
+        let mut drained = Vec::new();
+        for pool_id in pool_ids {
+            // Only an *enforcing* pool is drained here: this is the Phase-C
+            // coverage-loss path, and a `shadow` pool was never admitting.
+            let mode: Option<String> =
+                sqlx::query_scalar("SELECT phase FROM model_turn_pools WHERE id = $1")
+                    .bind(pool_id)
+                    .fetch_optional(self.db.pool())
+                    .await?;
+            if mode.as_deref() != Some("enforce") {
+                continue;
+            }
+            let outcome = self
+                .drain_pool_in_transaction(
+                    *pool_id,
+                    controller_generation,
+                    ModelTurnModeChangeReason::CapabilityCoverageLoss,
+                )
+                .await?;
+            if matches!(
+                outcome,
+                ModelTurnModeChangeOutcome::Applied { .. }
+                    | ModelTurnModeChangeOutcome::DrainedAndSettled { .. }
+            ) {
+                drained.push(*pool_id);
+            }
         }
+        Ok(drained)
+    }
+
+    /// Observe one pool's coverage and act on it, in a single transaction.
+    ///
+    /// This is the leader-side enforcement pass at the storage boundary. The
+    /// order inside the transaction is the contract:
+    ///
+    /// 1. Take the canonical admission locks (pool row, then bucket bindings
+    ///    ordered by `bucket_kind`).
+    /// 2. Re-check the durable leadership fence. A superseded or draining
+    ///    incarnation returns [`ModelTurnEnforcementOutcome::Fenced`] having
+    ///    mutated nothing — a stale generation cannot commit after succession.
+    /// 3. Evaluate coverage **here**, from the stored heartbeats, against the
+    ///    caller's live expected-path set. The loss and the drain are therefore
+    ///    the same transaction, not two.
+    /// 4. Lost coverage drains this pool and only this pool. Held coverage may
+    ///    advance a `shadow` pool to `enforce`, but only if the window
+    ///    qualified, the compatibility phase actually reached `d`, and the
+    ///    identity is eligible.
+    ///
+    /// Nothing outside `model_turn_*` is read or written.
+    pub async fn apply_enforcement_pass_in_transaction(
+        &self,
+        input: ModelTurnEnforcementPassInput,
+    ) -> Result<ModelTurnEnforcementOutcome> {
+        self.db.ensure_initialized().await?;
+        if input.pool_id <= 0
+            || input.controller_generation <= 0
+            || input.evaluated_at.trim().is_empty()
+            || input.fence.incarnation_id.trim().is_empty()
+            || input.fence.live_since_at.trim().is_empty()
+        {
+            return Err(crate::Error::InvalidData(
+                "invalid model-turn enforcement pass".to_owned(),
+            ));
+        }
+        for attempt in 0..3 {
+            match self.apply_enforcement_pass_once(&input).await {
+                Err(error) if attempt < 2 && is_serialization_failure(&error) => continue,
+                result => return result,
+            }
+        }
+        unreachable!("the bounded retry loop returns on its final iteration")
+    }
+
+    async fn apply_enforcement_pass_once(
+        &self,
+        input: &ModelTurnEnforcementPassInput,
+    ) -> Result<ModelTurnEnforcementOutcome> {
         let mut tx = self.db.pool().begin().await?;
-        let drained: Vec<(i64,)> = sqlx::query_as(
-            "UPDATE model_turn_pools SET phase = 'draining', updated_at = now() \
-             WHERE id = ANY($1::bigint[]) AND phase = 'enforce' RETURNING id",
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut *tx)
+            .await?;
+        let Some(locked) = lock_pool_for_mode_change(&mut tx, input.pool_id).await? else {
+            tx.commit().await?;
+            return Ok(ModelTurnEnforcementOutcome::PoolUnavailable);
+        };
+        let leading: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM coordinator_incarnations \
+             WHERE id = $1 AND draining_at IS NULL AND last_renewed_at >= $2",
         )
-        .bind(pool_ids)
-        .fetch_all(&mut *tx)
+        .bind(&input.fence.incarnation_id)
+        .bind(&input.fence.live_since_at)
+        .fetch_one(&mut *tx)
+        .await?;
+        if leading != 1 {
+            tx.commit().await?;
+            return Ok(ModelTurnEnforcementOutcome::Fenced);
+        }
+        let mode = parse_phase(&locked.phase)?;
+        let covered = expected_path_coverage_held(
+            &mut tx,
+            input.pool_id,
+            &input.evaluated_at,
+            &input.expected_paths,
+        )
+        .await?;
+
+        if !covered {
+            if !matches!(
+                mode,
+                ModelTurnAdmissionPhase::Shadow | ModelTurnAdmissionPhase::Enforce
+            ) {
+                tx.commit().await?;
+                return Ok(ModelTurnEnforcementOutcome::Unchanged { mode });
+            }
+            let changed_at = apply_mode_change(
+                &mut tx,
+                input.pool_id,
+                mode,
+                ModelTurnAdmissionPhase::Draining,
+                ModelTurnModeChangeReason::CapabilityCoverageLoss,
+                input.controller_generation,
+            )
+            .await?;
+            if locked.in_flight == 0 {
+                apply_mode_change(
+                    &mut tx,
+                    input.pool_id,
+                    ModelTurnAdmissionPhase::Draining,
+                    ModelTurnAdmissionPhase::Off,
+                    ModelTurnModeChangeReason::DrainSettled,
+                    input.controller_generation,
+                )
+                .await?;
+            }
+            tx.commit().await?;
+            return Ok(ModelTurnEnforcementOutcome::Drained {
+                from: mode,
+                changed_at,
+            });
+        }
+
+        if mode != ModelTurnAdmissionPhase::Shadow {
+            tx.commit().await?;
+            return Ok(ModelTurnEnforcementOutcome::Unchanged { mode });
+        }
+        if !input.window_trainable {
+            tx.commit().await?;
+            return Ok(ModelTurnEnforcementOutcome::Denied(
+                ModelTurnModeChangeRejection::WindowNotTrainable,
+            ));
+        }
+        let compatibility_phase = parse_compatibility_phase(&locked.compatibility_phase)?;
+        if compatibility_phase != ModelTurnCompatibilityPhase::D {
+            tx.commit().await?;
+            return Ok(ModelTurnEnforcementOutcome::Denied(
+                ModelTurnModeChangeRejection::CompatibilityPhaseInsufficient {
+                    phase: compatibility_phase,
+                },
+            ));
+        }
+        let identity_state = parse_identity(&locked.identity_state)?;
+        if identity_state != ModelTurnIdentityState::Eligible {
+            tx.commit().await?;
+            return Ok(ModelTurnEnforcementOutcome::Denied(
+                ModelTurnModeChangeRejection::IdentityIneligible {
+                    state: identity_state,
+                },
+            ));
+        }
+        let changed_at = apply_mode_change(
+            &mut tx,
+            input.pool_id,
+            ModelTurnAdmissionPhase::Shadow,
+            ModelTurnAdmissionPhase::Enforce,
+            ModelTurnModeChangeReason::EnforcementAdvance,
+            input.controller_generation,
+        )
         .await?;
         tx.commit().await?;
-        Ok(drained.into_iter().map(|(id,)| id).collect())
+        Ok(ModelTurnEnforcementOutcome::Enforced { changed_at })
     }
 
     /// Move one pool's admission **mode**, appending exactly one ledger row.
@@ -1653,32 +1872,16 @@ impl ModelTurnAdmissionRepository {
 
         // ── Predicate 5: fresh coverage equals the live expected denominator ─
         //
-        // Exact set equality, not containment. A path the coordinator expects
-        // but nothing covers denies, and coverage reported by a path the
-        // coordinator does not expect denies too — an unexpected reporter is
-        // exactly as much a coverage fault as a silent one.
-        let covered_rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT slot_pod_uid, deployment_revision FROM model_turn_capability_heartbeats \
-             WHERE pool_id = $1 \
-               AND heartbeat_at >= $2::timestamptz - make_interval(secs => $3::double precision)",
+        // Exact set equality, not containment — see
+        // [`expected_path_coverage_held`], which the leader's enforcement pass
+        // evaluates from the same stored rows.
+        let expected_path_coverage = expected_path_coverage_held(
+            &mut tx,
+            request.pool_id,
+            &request.evaluated_at,
+            &request.expected_paths,
         )
-        .bind(request.pool_id)
-        .bind(&request.evaluated_at)
-        .bind(MODEL_TURN_PHASE_PREDICATE_FRESHNESS_SECONDS as f64)
-        .fetch_all(&mut *tx)
         .await?;
-        let covered: std::collections::BTreeSet<ModelTurnExpectedPathKey> = covered_rows
-            .into_iter()
-            .map(
-                |(slot_pod_uid, deployment_revision)| ModelTurnExpectedPathKey {
-                    slot_pod_uid,
-                    deployment_revision,
-                },
-            )
-            .collect();
-        let expected: std::collections::BTreeSet<ModelTurnExpectedPathKey> =
-            request.expected_paths.iter().cloned().collect();
-        let expected_path_coverage = !expected.is_empty() && covered == expected;
 
         // ── Predicate 6: durable per-pool identity eligibility ─────────────
         let identity_eligibility =
@@ -1944,6 +2147,43 @@ impl ModelTurnAdmissionRepository {
         .fetch_optional(self.db.pool())
         .await
         .map_err(Into::into)
+    }
+
+    /// Put a pool at a given compatibility phase directly.
+    ///
+    /// Production reaches a phase only through
+    /// [`Self::request_phase_transition_in_transaction`]; this seam exists so a
+    /// dependent crate can model a pool that already got there without
+    /// acquiring SQL access.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn set_pool_compatibility_phase_for_test(
+        &self,
+        pool_id: i64,
+        phase: ModelTurnCompatibilityPhase,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("UPDATE model_turn_pools SET compatibility_phase = $2 WHERE id = $1")
+            .bind(pool_id)
+            .bind(phase.code())
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
+    /// Overwrite the durable per-pool identity state.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn set_pool_identity_for_test(
+        &self,
+        pool_id: i64,
+        state: ModelTurnIdentityState,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("UPDATE model_turn_pools SET identity_state = $2 WHERE id = $1")
+            .bind(pool_id)
+            .bind(identity_state_name(state))
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
     }
 
     /// Overwrite the durable pool label pair for a fail-closed learner
@@ -2710,6 +2950,50 @@ fn commit_outcome(outcome: ModelTurnAcquireOutcome) -> Result<ModelTurnAcquireOu
     Ok(outcome)
 }
 
+/// Does fresh coverage equal the live expected denominator exactly?
+///
+/// Set equality, not containment: a path the coordinator expects but nothing
+/// covers is a loss, and coverage reported by a path the coordinator does not
+/// expect is a loss too. An empty denominator is a loss, never a vacuous pass.
+///
+/// A heartbeat row records that a path reported *covered at one instant*. It
+/// does not record a coverage interval, so this predicate deliberately claims
+/// only recency. Establishing that coverage held for a whole aligned window is
+/// not derivable from what Phase B stored, and the coordinator's fail-closed
+/// window qualifier — not this function — is what refuses to train on it.
+async fn expected_path_coverage_held(
+    tx: &mut Transaction<'_, Postgres>,
+    pool_id: i64,
+    evaluated_at: &str,
+    expected_paths: &[ModelTurnExpectedPathKey],
+) -> Result<bool> {
+    let expected: std::collections::BTreeSet<&ModelTurnExpectedPathKey> =
+        expected_paths.iter().collect();
+    if expected.is_empty() {
+        return Ok(false);
+    }
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT slot_pod_uid, deployment_revision FROM model_turn_capability_heartbeats \
+         WHERE pool_id = $1 \
+           AND heartbeat_at >= $2::timestamptz - make_interval(secs => $3::double precision)",
+    )
+    .bind(pool_id)
+    .bind(evaluated_at)
+    .bind(MODEL_TURN_PHASE_PREDICATE_FRESHNESS_SECONDS as f64)
+    .fetch_all(&mut **tx)
+    .await?;
+    let covered: std::collections::BTreeSet<ModelTurnExpectedPathKey> = rows
+        .into_iter()
+        .map(
+            |(slot_pod_uid, deployment_revision)| ModelTurnExpectedPathKey {
+                slot_pod_uid,
+                deployment_revision,
+            },
+        )
+        .collect();
+    Ok(covered.iter().collect::<std::collections::BTreeSet<_>>() == expected)
+}
+
 /// Settle a draining pool to `off` the moment its last lease terminalizes.
 ///
 /// The guard is the durable counter, not a caller's belief: the update only
@@ -2738,6 +3022,17 @@ async fn settle_drained_pool(
         .await?;
     }
     Ok(())
+}
+
+/// The persisted spelling of one durable identity state.
+#[cfg(any(test, feature = "test-support"))]
+const fn identity_state_name(state: ModelTurnIdentityState) -> &'static str {
+    match state {
+        ModelTurnIdentityState::Eligible => "eligible",
+        ModelTurnIdentityState::Revoked => "revoked",
+        ModelTurnIdentityState::Ambiguous => "ambiguous",
+        ModelTurnIdentityState::Colliding => "colliding",
+    }
 }
 
 /// The persisted spelling of one admission mode.

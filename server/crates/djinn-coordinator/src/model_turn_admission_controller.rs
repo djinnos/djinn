@@ -87,6 +87,7 @@ pub async fn run_completed_window_cycle_v1(
     catalog: &CatalogService,
     fence: &ModelTurnControllerFence,
     completed: &PhaseCCompletedWindowV1<'_>,
+    controller_generation: i64,
 ) -> djinn_db::Result<PhaseCControllerCycleOutcomeV1> {
     let qualification = qualify_aligned_phase_c_window_v1(
         completed.window,
@@ -151,7 +152,9 @@ pub async fn run_completed_window_cycle_v1(
         .into_iter()
         .collect();
     if !selected.is_empty() {
-        outcome.drained_pools = repository.drain_enforcing_pools(&selected).await?;
+        outcome.drained_pools = repository
+            .drain_enforcing_pools(&selected, controller_generation)
+            .await?;
     }
     Ok(outcome)
 }
@@ -226,6 +229,16 @@ impl crate::CoordinatorActor {
     /// It is the incarnation lease the actor already registers and renews, so
     /// the controller inherits the advisory-lock leader lifecycle rather than
     /// inventing a second one.
+    /// The audit generation this leader stamps on every durable mode change.
+    ///
+    /// The *authority* is the incarnation lease in
+    /// [`Self::model_turn_controller_fence`]; this is the monotonic per-leader
+    /// counter that makes the ledger row attributable to one tick.
+    #[must_use]
+    pub fn model_turn_controller_generation(&self) -> i64 {
+        i64::from(self.prune_tick_counter).saturating_add(1)
+    }
+
     #[must_use]
     pub fn model_turn_controller_fence(&self, live_since_at: String) -> ModelTurnControllerFence {
         ModelTurnControllerFence {
@@ -382,11 +395,23 @@ impl crate::CoordinatorActor {
             admitted_attempts: &admitted_attempts,
             counts,
         };
-        match run_completed_window_cycle_v1(&repository, &self.catalog, &fence, &completed).await {
+        match run_completed_window_cycle_v1(
+            &repository,
+            &self.catalog,
+            &fence,
+            &completed,
+            self.model_turn_controller_generation(),
+        )
+        .await
+        {
             Ok(outcome) => {
                 if !outcome.fenced {
                     self.last_phase_c_window_start = Some(window.start_second());
                 }
+                // The single qualifier verdict for this window. The Phase-D
+                // enforcement pass reads it; it does not re-qualify.
+                self.last_phase_c_window_trainable =
+                    !outcome.fenced && outcome.qualification.admitted;
                 // Counts only: no pool identity, no slot uid, no revision.
                 tracing::info!(
                     persisted = outcome.persisted_pools.len(),

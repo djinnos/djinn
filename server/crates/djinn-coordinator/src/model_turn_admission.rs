@@ -1866,6 +1866,12 @@ mod tests {
 #[path = "model_turn_admission_controller.rs"]
 pub mod controller;
 
+/// The leader-side guarded enforcement pass (task 5mqp). A public child module
+/// so it can build expected-path keys from this module's private route fields
+/// the way production does, rather than from labels a report supplied.
+#[path = "model_turn_admission_enforcement.rs"]
+pub mod enforcement;
+
 /// Aggregate-throughput learning and the concurrency controller (task yh4d).
 /// A public child module so it can consume this module's catalog-qualified
 /// learner seam without widening the Phase-C boundary to a new crate.

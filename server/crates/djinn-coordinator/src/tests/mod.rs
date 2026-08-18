@@ -482,6 +482,7 @@ fn coordinator_actor_for_tests(
         rpc_registry: None,
         prune_tick_counter: 0,
         last_phase_c_window_start: None,
+        last_phase_c_window_trainable: false,
         throughput_events: HashMap::new(),
         pr_status_cache: HashMap::new(),
         pr_draft_first_seen: HashMap::new(),

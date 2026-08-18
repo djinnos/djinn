@@ -1710,6 +1710,23 @@ pub async fn override_debate_trail_body_metadata(
 /// census that proves "zero writes" has to be taken relation by relation.
 ///
 /// **Not for production use.**  Panics on SQL errors.
+/// A canonical digest of an entire table's contents.
+///
+/// Every row is rendered by Postgres as text and the rows are ordered by that
+/// rendering, so the digest is stable across insertion order and changes if any
+/// byte of any column of any row changes. This is how a test asserts that a
+/// pass left a relation *byte-identical* rather than merely the same size.
+pub async fn table_digest_for_test(db: &Database, table_name: &str) -> String {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query_scalar(&format!(
+        "SELECT coalesce(md5(string_agg(t::text, '|' ORDER BY t::text)), 'empty') \
+         FROM {table_name} t"
+    ))
+    .fetch_one(db.pool())
+    .await
+    .unwrap_or_else(|error| panic!("digest table {table_name}: {error}"))
+}
+
 pub async fn count_rows_for_test(db: &Database, table_name: &str) -> i64 {
     db.ensure_initialized().await.unwrap();
     let (count,): (i64,) = sqlx::query_as(&format!("SELECT count(*) FROM {table_name}"))
