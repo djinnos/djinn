@@ -1,5 +1,6 @@
 // djinn:allow-oversize — park telemetry + quality-strike guard logic pushed file past the byte threshold; split when touched substantively.
 use super::super::*;
+use super::session_recovery::RecoveryReleaseAdmission;
 use djinn_core::models::task_attempt::{TaskAttemptLedgerRow, TaskAttemptOutcome};
 use djinn_core::models::{ReopenClass, SessionFailureCause, TransitionAction};
 #[cfg(not(test))]
@@ -22,6 +23,36 @@ pub struct DispatchStrikeDecision {
     /// ([`should_route_cycling_intervention`]), which must not treat a
     /// cancelled session as "the run finished and the task didn't move".
     pub(crate) prior_session: PriorSessionDisposition,
+}
+
+/// Retry-escalation admission for the arbiter second-strike seam.
+///
+/// Shares one body with the two recovery-release seams in `session_recovery`:
+/// all three are the same question — "may this legacy lifecycle mutation run, or
+/// does a direct generation own this task?" — asked at three different sites.
+/// Naming it separately keeps each site independently enterable, so the retry
+/// proof cannot be satisfied by recovery coverage.
+///
+/// `Applying` is consumed by the caller-owned `DirectDeliveryEngine` before any
+/// retry mutation, rather than merely classified.
+pub(crate) async fn admit_second_strike_retry<F, Fut>(
+    db: djinn_db::Database,
+    tasks: &djinn_db::TaskRepository,
+    task_id: &str,
+    reconcile: F,
+) -> RecoveryReleaseAdmission
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<crate::direct_delivery::DeliveryOutcome>>,
+{
+    super::session_recovery::admit_direct_delivery_lifecycle_mutation(
+        db,
+        tasks,
+        task_id,
+        "second_strike_retry",
+        reconcile,
+    )
+    .await
 }
 
 impl CoordinatorActor {
@@ -2565,36 +2596,17 @@ impl CoordinatorActor {
     ) -> bool {
         // Retry escalation is a task-state mutation: fail closed until the
         // shared epoch/ownership/ledger boundary permits legacy liveness.
+        //
+        // Same collaborator the repository-backed second-strike tests enter,
+        // sharing this actor's real direct-delivery reconciler.
         let task_repo = self.task_repo();
-        match crate::direct_delivery::admit_direct_delivery_liveness(
-            self.db.clone(),
-            &task_repo,
-            &task.id,
-        )
+        match admit_second_strike_retry(self.db.clone(), &task_repo, &task.id, || {
+            self.reconcile_direct_delivery_task(task)
+        })
         .await
         {
-            Ok(crate::direct_delivery::DirectDeliveryLiveness::Legacy)
-            | Ok(crate::direct_delivery::DirectDeliveryLiveness::Dispatch) => {}
-            Ok(crate::direct_delivery::DirectDeliveryLiveness::Reconcile) => {
-                match self.reconcile_direct_delivery_task(task).await {
-                    Ok(outcome) => {
-                        tracing::info!(task_id = %task.short_id, ?outcome, "CoordinatorActor: reconciled applying direct delivery instead of retry escalation")
-                    }
-                    Err(error) => {
-                        tracing::error!(task_id = %task.short_id, %error, "CoordinatorActor: direct reconciliation failed; refusing retry escalation")
-                    }
-                }
-                return false;
-            }
-            Ok(crate::direct_delivery::DirectDeliveryLiveness::Settled)
-            | Ok(crate::direct_delivery::DirectDeliveryLiveness::Parked) => {
-                tracing::info!(task_id = %task.short_id, "CoordinatorActor: direct delivery is settled or parked; refusing retry escalation");
-                return false;
-            }
-            Err(error) => {
-                tracing::error!(task_id = %task.short_id, %error, "CoordinatorActor: direct-delivery admission unavailable; refusing retry escalation");
-                return false;
-            }
+            RecoveryReleaseAdmission::Release => {}
+            RecoveryReleaseAdmission::Refuse(_) => return false,
         }
         tracing::warn!(
             task_id = %task.short_id,
@@ -3752,3 +3764,7 @@ mod infra_reopen_class_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "retry_direct_delivery_tests.rs"]
+mod direct_delivery_tests;

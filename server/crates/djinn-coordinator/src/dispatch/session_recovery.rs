@@ -3354,13 +3354,19 @@ pub(crate) enum RecoveryReleaseAdmission {
     Refuse(RecoveryReleaseRefusal),
 }
 
-/// Shared body behind both recovery-release seams.
+/// Shared body behind every legacy lifecycle-mutation seam that a direct
+/// generation may own: both recovery-release sites here, and the arbiter
+/// second-strike retry site in `retry.rs`.
+///
+/// They are one question asked at several places — "may this legacy mutation
+/// run, or does a direct generation own this task?" — so they share one answer,
+/// while each site keeps its own named entry point and its own proof.
 ///
 /// `Applying` is **consumed** here — the caller-owned `DirectDeliveryEngine`
-/// runs before any release or reopen decision is returned — rather than merely
-/// classified. Routing comes from canonical ledger facts (epoch, resolved
+/// runs before any release, reopen, or retry decision is returned — rather than
+/// merely classified. Routing comes from canonical ledger facts (epoch, resolved
 /// active attempt, persisted generation), never from nullable task-PR fields.
-async fn admit_recovery_release<F, Fut>(
+pub(crate) async fn admit_direct_delivery_lifecycle_mutation<F, Fut>(
     db: djinn_db::Database,
     tasks: &TaskRepository,
     task_id: &str,
@@ -3418,7 +3424,7 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<crate::direct_delivery::DeliveryOutcome>>,
 {
-    admit_recovery_release(db, tasks, task_id, "zombie_release", reconcile).await
+    admit_direct_delivery_lifecycle_mutation(db, tasks, task_id, "zombie_release", reconcile).await
 }
 
 /// Recovery-release admission for the execution-state orphan seam.
@@ -3432,7 +3438,7 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<crate::direct_delivery::DeliveryOutcome>>,
 {
-    admit_recovery_release(db, tasks, task_id, "orphan_release", reconcile).await
+    admit_direct_delivery_lifecycle_mutation(db, tasks, task_id, "orphan_release", reconcile).await
 }
 
 pub(crate) fn build_liveness_evidence(
