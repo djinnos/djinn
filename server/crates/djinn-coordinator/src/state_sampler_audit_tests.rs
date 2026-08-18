@@ -348,6 +348,223 @@ fn state_sampler_audit_inventory_is_complete() {
         .unwrap_or_else(|error| panic!("changed state-sampler guard contract failed: {error}"));
 }
 
+// ─── Startup-row resolution contract (task `cv5r`) ───────────────────────────
+//
+// Cell non-emptiness is not truth. Before this, the three `startup-stage-*`
+// rows named `AppState::initialize_agents` as Stage A's production entry point
+// (it passes `None` and never reaches Stage A) and cited regression evidence at
+// `server/tests/startup_reconnectability.rs` (no such file), and the audit
+// stayed green on all of it. These helpers resolve what a startup row claims
+// against the checked-out repository: every cited source path must exist, every
+// symbol in the documented entry-point chain must be defined in one of those
+// files, and each consecutive pair of the chain must be a real call.
+//
+// Scoped to the startup rows, which are the rows this contract is required to
+// hold for; the older rows use abbreviated crate-relative anchors that the
+// `DECLARED_ENTRY_POINTS` reconciliation above already pins.
+
+const REPO_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../..");
+
+const SOURCE_EXTENSIONS: [&str; 4] = [".rs", ".md", ".toml", ".sh"];
+
+/// Every backticked token in a cell, in document order.
+fn backticked(cell: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut rest = cell;
+    while let Some((_, tail)) = rest.split_once('`') {
+        match tail.split_once('`') {
+            Some((token, remainder)) => {
+                tokens.push(token);
+                rest = remainder;
+            }
+            None => break,
+        }
+    }
+    tokens
+}
+
+/// The repository path a backticked anchor cites, if it cites one. Anchors are
+/// `path[:symbol-or-range]`, so the path is the part before the first colon.
+fn cited_path(token: &str) -> Option<&str> {
+    let path = token.split(':').next()?;
+    SOURCE_EXTENSIONS
+        .iter()
+        .any(|extension| path.ends_with(extension))
+        .then_some(path)
+}
+
+fn resolves_in_repo(relative: &str) -> bool {
+    std::path::Path::new(REPO_ROOT).join(relative).is_file()
+}
+
+fn read_repo_file(relative: &str) -> Option<String> {
+    std::fs::read_to_string(std::path::Path::new(REPO_ROOT).join(relative)).ok()
+}
+
+/// The documented call chain: every backticked token after the sampler ID,
+/// reduced to its final path segment (`health::reap_x` and `AppState::become_leader`
+/// both name a function definition, not a module or a type).
+fn entry_point_chain(cell: &str) -> Vec<&str> {
+    backticked(cell)
+        .into_iter()
+        .skip(1)
+        .map(|symbol| symbol.rsplit("::").next().unwrap_or(symbol))
+        .collect()
+}
+
+/// Slice a function definition's text: from its `fn <name>(` to the next item
+/// declared at file or `impl` scope.
+fn function_body<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+    const ITEM_STARTS: [&str; 20] = [
+        "\nfn ",
+        "\npub fn ",
+        "\nasync fn ",
+        "\npub async fn ",
+        "\npub(crate) fn ",
+        "\npub(crate) async fn ",
+        "\npub(super) fn ",
+        "\npub(super) async fn ",
+        "\nstruct ",
+        "\npub struct ",
+        "\nenum ",
+        "\npub enum ",
+        "\nimpl ",
+        "\n    fn ",
+        "\n    pub fn ",
+        "\n    async fn ",
+        "\n    pub async fn ",
+        "\n    pub(crate) fn ",
+        "\n    pub(crate) async fn ",
+        "\n    pub(super) async fn ",
+    ];
+    let start = source.find(&format!("fn {name}("))?;
+    let tail = &source[start..];
+    let end = ITEM_STARTS
+        .iter()
+        .filter_map(|marker| tail[1..].find(marker).map(|offset| offset + 1))
+        .min()
+        .unwrap_or(tail.len());
+    Some(&tail[..end])
+}
+
+/// Resolve one startup row against the repository.
+fn validate_startup_row_resolves(row: &[&str]) -> Result<(), String> {
+    let sampler_id = row[0]
+        .strip_prefix('`')
+        .and_then(|cell| cell.split_once('`'))
+        .map(|(id, _)| id)
+        .ok_or_else(|| format!("row lacks a stable backticked sampler ID: {}", row[0]))?;
+
+    // 1. Every path any cell of the row cites must exist in the repository.
+    let mut cited_sources = Vec::new();
+    for cell in row {
+        for path in backticked(cell).into_iter().filter_map(cited_path) {
+            if !resolves_in_repo(path) {
+                return Err(format!(
+                    "startup sampler `{sampler_id}` cites `{path}`, which does not exist in the repository"
+                ));
+            }
+            if path.ends_with(".rs") && !cited_sources.contains(&path) {
+                cited_sources.push(path);
+            }
+        }
+    }
+
+    // 2. Every symbol in the documented entry-point chain must be defined in
+    //    one of the sources the same row cites as evidence.
+    let chain = entry_point_chain(row[0]);
+    if chain.len() < 2 {
+        return Err(format!(
+            "startup sampler `{sampler_id}` documents no production call chain: {}",
+            row[0]
+        ));
+    }
+    let mut defining_source = Vec::new();
+    for symbol in &chain {
+        let owner = cited_sources
+            .iter()
+            .find(|path| {
+                read_repo_file(path).is_some_and(|source| source.contains(&format!("fn {symbol}(")))
+            })
+            .ok_or_else(|| {
+                format!(
+                    "startup sampler `{sampler_id}` names `{symbol}`, which is defined in none of \
+                     the sources the row cites: {cited_sources:?}"
+                )
+            })?;
+        defining_source.push(*owner);
+    }
+
+    // 3. Each consecutive pair must be a real call, not documented adjacency.
+    for (index, pair) in chain.windows(2).enumerate() {
+        let (caller, callee) = (pair[0], pair[1]);
+        let source = read_repo_file(defining_source[index])
+            .ok_or_else(|| format!("cannot read `{}`", defining_source[index]))?;
+        let body = function_body(&source, caller)
+            .ok_or_else(|| format!("cannot slice the body of `{caller}`"))?;
+        if !body.contains(&format!("{callee}(")) {
+            return Err(format!(
+                "startup sampler `{sampler_id}` documents `{caller}` → `{callee}`, but the body of \
+                 `{caller}` in `{}` contains no call to `{callee}`",
+                defining_source[index]
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A follow-up this epic delivered must not still read as an open finding, and
+/// no inventory row may cite it as one.
+#[test]
+fn delivered_follow_ups_are_not_cited_as_open_findings() {
+    let delivered_section = AUDIT
+        .split_once("## Delivered follow-ups\n")
+        .map(|(_, section)| {
+            section
+                .split_once("\n## ")
+                .map_or(section, |(section, _)| section)
+        })
+        .expect("audit declares a delivered follow-up section");
+    let delivered: HashSet<_> = delivered_section
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- **FOLLOW-UP-"))
+        .filter_map(|tail| {
+            tail.split_once("**")
+                .map(|(id, _)| format!("FOLLOW-UP-{id}"))
+        })
+        .filter(|id| stable_follow_up_id(id))
+        .collect();
+    assert!(
+        delivered.contains("FOLLOW-UP-STALE-TASK-RUN-STARTUP"),
+        "epic `43ww` delivered the startup stale-task-run follow-up; it must be recorded as \
+         delivered rather than left in the open list"
+    );
+
+    let open_section = AUDIT
+        .split_once("## Follow-ups for unsafe findings\n")
+        .map(|(_, section)| {
+            section
+                .split_once("\n## ")
+                .map_or(section, |(section, _)| section)
+        })
+        .expect("audit declares an open follow-up section");
+    for id in &delivered {
+        assert!(
+            !open_section.contains(id.as_str()),
+            "`{id}` is delivered but still listed as an open follow-up"
+        );
+    }
+    for row in audit_rows(AUDIT).expect("inventory parses") {
+        if let Some(reference) = follow_up_id(row[6]) {
+            assert!(
+                !delivered.contains(reference),
+                "inventory row `{}` cites delivered follow-up `{reference}` as an open finding",
+                row[0]
+            );
+        }
+    }
+}
+
 #[test]
 fn startup_sampler_audit_rows_are_present() {
     let rows = audit_rows(AUDIT).expect("startup rows retain the nine-column audit shape");
@@ -383,6 +600,15 @@ fn startup_sampler_audit_rows_are_present() {
             .filter(|row| row[0].contains("startup-stage-"))
             .all(|row| row.len() == HEADERS.len() && row.iter().all(|cell| !cell.is_empty()))
     );
+
+    // Presence and non-emptiness are not truth. Every startup row must also
+    // resolve against the checked-out repository: the paths it cites must
+    // exist, the symbols in its documented entry-point chain must be defined
+    // in those files, and each link of that chain must be a real call.
+    for row in rows.iter().filter(|row| row[0].contains("startup-stage-")) {
+        validate_startup_row_resolves(row)
+            .unwrap_or_else(|error| panic!("startup sampler audit row failed to resolve: {error}"));
+    }
 }
 
 #[test]

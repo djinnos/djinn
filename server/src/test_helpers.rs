@@ -568,7 +568,8 @@ pub async fn initialize_mcp_session_with_headers(
 /// crate-visible, so an integration test that must observe Stage A from inside
 /// the production dispatch seam cannot reach it directly. This forwards to that
 /// exact method with no logic of its own — production still enters Stage A
-/// through `run_startup_recovery`, which is what the ordering regressions pin.
+/// through [`AppState::become_leader`], which is what the ordering regressions
+/// pin.
 pub async fn run_startup_stage_a(
     state: &AppState,
     census: &djinn_coordinator::startup_census::StartupCensus,
