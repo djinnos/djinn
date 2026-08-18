@@ -114,7 +114,17 @@ struct SurfaceFixture {
 }
 
 async fn surface_fixture_with_status(status: &str) -> SurfaceFixture {
-    let db = Database::open_in_memory().unwrap();
+    surface_fixture_in(Database::open_in_memory().unwrap(), status).await
+}
+
+/// Build one surface's fixture inside an **existing** database.
+///
+/// Everything this creates — epic, task, dependent, event bus — is
+/// task-scoped, so a matrix whose cells vary only task-scoped state can hoist
+/// the `CREATE DATABASE … TEMPLATE` clone out of its inner loop and share one
+/// database across those cells. Two fixtures built on the same database share
+/// nothing but the database.
+async fn surface_fixture_in(db: Database, status: &str) -> SurfaceFixture {
     let source_updates = Arc::new(Mutex::new(0usize));
     let dependent_updates = Arc::new(Mutex::new(0usize));
     let source_slot = Arc::new(Mutex::new(String::new()));
@@ -649,55 +659,65 @@ enum AuditCase {
 /// Fail-closed cases must never reach a surface's legacy continuation; the two
 /// retained-legacy cases must positively reach it at every surface, so "safe"
 /// cannot be achieved by refusing everything.
+///
+/// # One template clone per case, not one per cell
+///
+/// The matrix is seven persisted states by five surfaces. Every one of those
+/// 35 cells used to call `surface_fixture()`, i.e. take its own
+/// `CREATE DATABASE … TEMPLATE` clone plus the synchronous `DROP DATABASE` the
+/// handle issues on drop — 70 whole-database operations in a single test.
+/// Postgres forces a checkpoint on either side of a template clone and those
+/// checkpoints are cluster-wide, so under full-suite `cargo nextest`
+/// parallelism this test spent nearly all of its wall clock queued behind
+/// every other suite's clones: ~9 s alone, past the repository's 90 s
+/// `slow-timeout.terminate-after` cap under load.
+///
+/// The clone is hoisted to the **case** loop instead. Cases genuinely cannot
+/// share one: each is a *database-global* corruption — a dropped
+/// `task_deliveries` table, a deleted, disabled, or unknown-state epoch row —
+/// and `MissingSchema` is not even reversible. Surfaces within a case can
+/// share one: each surface gets its own epic, proposal, build attempt, task,
+/// and dependent, and every surface entry point below reads and writes only
+/// the task it is handed. 35 clones become 7 and all 35 cells still run.
 #[tokio::test]
 async fn every_surface_fails_closed_and_retains_legacy_across_all_persisted_states() {
     const PR: &str = "https://example.test/pr/audit";
 
-    for surface in Surface::ALL {
-        for case in [
-            AuditCase::UnresolvedOwnership,
-            AuditCase::MissingSchema,
-            AuditCase::MissingEpoch,
-            AuditCase::UnknownEpoch,
-            AuditCase::UnknownDeliveryState,
-            AuditCase::SupportedDisabled,
-            AuditCase::SupportedActiveExplicitLegacy,
-        ] {
-            let fixture = surface_fixture().await;
+    for case in [
+        AuditCase::UnresolvedOwnership,
+        AuditCase::MissingSchema,
+        AuditCase::MissingEpoch,
+        AuditCase::UnknownEpoch,
+        AuditCase::UnknownDeliveryState,
+        AuditCase::SupportedDisabled,
+        AuditCase::SupportedActiveExplicitLegacy,
+    ] {
+        let db = Database::open_in_memory().unwrap();
+        let mut fixtures = Vec::with_capacity(Surface::ALL.len());
+        for _ in Surface::ALL {
+            fixtures.push(surface_fixture_in(db.clone(), "approved").await);
+        }
 
+        // Task-scoped seeding: one independent delivery identity per surface.
+        for fixture in &fixtures {
             match case {
                 AuditCase::UnresolvedOwnership => {
-                    djinn_db::test_support::activate_direct_delivery_epoch_for_test(&fixture.db)
-                        .await;
+                    // The proposal exists but no epic carries it, so canonical
+                    // ownership cannot resolve. The short id comes from the
+                    // random tail of the task UUID because short ids are
+                    // unique database-wide and these five tasks share one.
                     djinn_db::test_support::seed_direct_delivery_proposal_for_test(
                         &fixture.db,
                         &fixture.task_id,
-                        &fixture.task_id[..8],
+                        &fixture.task_id[fixture.task_id.len() - 8..],
                     )
                     .await;
                 }
-                AuditCase::MissingSchema => {
-                    fixture.seed(Some("applying")).await;
-                    djinn_db::test_support::drop_table_cascade_for_test(
-                        &fixture.db,
-                        "task_deliveries",
-                    )
-                    .await;
-                }
-                AuditCase::MissingEpoch => {
-                    fixture.seed(Some("applying")).await;
-                    djinn_db::test_support::remove_direct_delivery_epoch_for_test(&fixture.db)
-                        .await;
-                }
-                AuditCase::UnknownEpoch => {
-                    fixture.seed(Some("applying")).await;
-                    djinn_db::test_support::seed_unknown_direct_delivery_epoch_for_test(
-                        &fixture.db,
-                    )
-                    .await;
-                }
+                _ => fixture.seed(Some("applying")).await,
+            }
+
+            match case {
                 AuditCase::UnknownDeliveryState => {
-                    fixture.seed(Some("applying")).await;
                     djinn_db::test_support::seed_unknown_task_delivery_state_for_test(
                         &fixture.db,
                         &fixture.task_id,
@@ -705,22 +725,40 @@ async fn every_surface_fails_closed_and_retains_legacy_across_all_persisted_stat
                     )
                     .await;
                 }
-                AuditCase::SupportedDisabled => {
-                    fixture.seed(Some("applying")).await;
-                    djinn_db::test_support::disable_direct_delivery_epoch_for_test(&fixture.db)
-                        .await;
-                }
                 AuditCase::SupportedActiveExplicitLegacy => {
-                    fixture.seed(Some("applying")).await;
                     fixture
                         .tasks
                         .update_labels(&fixture.task_id, &format!(r#"["{LEGACY_DELIVERY_LABEL}"]"#))
                         .await
                         .unwrap();
                 }
+                _ => {}
             }
+        }
 
-            let outcome = invoke_surface(surface, &fixture, Some(PR), || async {
+        // Database-global state, applied once after every surface is seeded.
+        // This half of the case is exactly why a case owns a clone of its own.
+        match case {
+            AuditCase::UnresolvedOwnership => {
+                djinn_db::test_support::activate_direct_delivery_epoch_for_test(&db).await;
+            }
+            AuditCase::MissingSchema => {
+                djinn_db::test_support::drop_table_cascade_for_test(&db, "task_deliveries").await;
+            }
+            AuditCase::MissingEpoch => {
+                djinn_db::test_support::remove_direct_delivery_epoch_for_test(&db).await;
+            }
+            AuditCase::UnknownEpoch => {
+                djinn_db::test_support::seed_unknown_direct_delivery_epoch_for_test(&db).await;
+            }
+            AuditCase::SupportedDisabled => {
+                djinn_db::test_support::disable_direct_delivery_epoch_for_test(&db).await;
+            }
+            AuditCase::UnknownDeliveryState | AuditCase::SupportedActiveExplicitLegacy => {}
+        }
+
+        for (surface, fixture) in Surface::ALL.into_iter().zip(&fixtures) {
+            let outcome = invoke_surface(surface, fixture, Some(PR), || async {
                 panic!("{surface:?}/{case:?} must never reach the delivery engine")
             })
             .await
