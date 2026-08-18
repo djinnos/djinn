@@ -209,22 +209,45 @@ async fn typed_evidence_schema_retains_legacy_columns_and_enforces_identities() 
     );
 }
 
+/// Every terminal requirement token this test knows how to probe. The fixture
+/// selects from this closed set; a token it names that is absent here panics,
+/// and a token present here that the fixture omits must be provably *not*
+/// enforced for that disposition.
+const TERMINAL_REQUIREMENTS: [&str; 4] = [
+    "nonempty_rationale",
+    "judge_attribution",
+    "committed_folding_revision",
+    "non_load_bearing_assertion",
+];
+
 #[tokio::test]
 async fn typed_evidence_lifecycle_v1() {
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/typed_evidence_lifecycle_v1.json")).unwrap();
     assert_eq!(fixture["version"], "typed_evidence_lifecycle_v1");
-    assert_eq!(fixture["conflict_error"], "active_evidence_conflict");
-    assert_eq!(
-        fixture["terminal_controls"]["generic_transition_error"],
-        "terminal transitions require dispose_in_transaction"
-    );
-    assert!(
-        fixture["terminal_controls"]["withdrawn_requires"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("non_load_bearing_assertion"))
-    );
+    let conflict_error = fixture["conflict_error"]
+        .as_str()
+        .expect("fixture pins the proposal-wide conflict error")
+        .to_owned();
+    let generic_transition_error = fixture["terminal_controls"]["generic_transition_error"]
+        .as_str()
+        .expect("fixture pins the generic terminal-transition refusal")
+        .to_owned();
+    // Ledger of the fixture-declared scenarios this body actually proves. The
+    // two sets are compared at the end, so a renamed, added or removed scenario
+    // in the fixture reddens this test.
+    let declared_scenarios: Vec<String> = fixture["scenarios"]
+        .as_array()
+        .expect("fixture declares the scenario set")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("each scenario is a string")
+                .to_owned()
+        })
+        .collect();
+    let mut proven_scenarios: Vec<&'static str> = Vec::new();
 
     let db = Database::open_in_memory().unwrap();
     db.ensure_initialized().await.unwrap();
@@ -293,13 +316,15 @@ async fn typed_evidence_lifecycle_v1() {
     .await
     .unwrap();
     assert_eq!(replay.finding.id, finding_id);
+    proven_scenarios.push("identical_demand_idempotent");
+    proven_scenarios.push("cross_revision_n_n1_n2_blocking");
     assert!(matches!(
         TypedEvidenceRepository::demand_in_transaction(
             &mut tx,
             demand(uuid::Uuid::now_v7().to_string(), "different-demand", 2),
         )
         .await,
-        Err(djinn_db::Error::InvalidTransition(message)) if message == "active_evidence_conflict"
+        Err(djinn_db::Error::InvalidTransition(message)) if message == conflict_error
     ));
     let transitions: i64 =
         sqlx::query_scalar("SELECT count(*) FROM typed_evidence_transitions WHERE finding_id=$1")
@@ -308,6 +333,7 @@ async fn typed_evidence_lifecycle_v1() {
             .await
             .unwrap();
     assert_eq!(transitions, 1, "conflict writes no transition");
+    proven_scenarios.push("distinct_demand_no_write_conflict");
 
     // Persist an allowed non-terminal edge, then reject an unlisted edge.
     TypedEvidenceRepository::append_transition_in_transaction(
@@ -340,6 +366,8 @@ async fn typed_evidence_lifecycle_v1() {
         .await,
         Err(djinn_db::Error::InvalidTransition(message)) if message == "spike_active -> demanded"
     ));
+    proven_scenarios.push("persisted_nonterminal_transition");
+    proven_scenarios.push("unlisted_transition_rejected");
     TypedEvidenceRepository::append_transition_in_transaction(
         &mut tx,
         AppendTypedEvidenceTransitionInput {
@@ -371,8 +399,9 @@ async fn typed_evidence_lifecycle_v1() {
         )
         .await,
         Err(djinn_db::Error::InvalidTransition(message))
-            if message == "terminal transitions require dispose_in_transaction"
+            if message == generic_transition_error
     ));
+    proven_scenarios.push("generic_terminal_transition_rejected");
     let dispose = |disposition,
                    judge_task_id: String,
                    folding_revision,
@@ -392,6 +421,8 @@ async fn typed_evidence_lifecycle_v1() {
         }
     };
     // Invalid terminal inputs leave this evidence_received finding unresolved.
+    // Identity is required of every disposition field, not only the two the
+    // requirement tokens below name.
     assert!(matches!(
         TypedEvidenceRepository::dispose_in_transaction(
             &mut tx,
@@ -400,38 +431,66 @@ async fn typed_evidence_lifecycle_v1() {
         .await,
         Err(djinn_db::Error::InvalidData(message)) if message == "typed evidence identity fields must be non-empty"
     ));
-    assert!(matches!(
-        TypedEvidenceRepository::dispose_in_transaction(
-            &mut tx,
-            dispose(TribunalEvidenceLifecycle::Resolved, "not-the-judge".into(), 1, "folded", true),
-        )
-        .await,
-        Err(djinn_db::Error::InvalidData(message)) if message == "active Judge attribution required"
-    ));
-    assert!(matches!(
-        TypedEvidenceRepository::dispose_in_transaction(
-            &mut tx,
-            dispose(TribunalEvidenceLifecycle::Resolved, judge_task_id.clone(), 99, "folded", true),
-        )
-        .await,
-        Err(djinn_db::Error::InvalidData(message)) if message == "existing committed folding revision required"
-    ));
-    assert!(matches!(
-        TypedEvidenceRepository::dispose_in_transaction(
-            &mut tx,
-            dispose(TribunalEvidenceLifecycle::Withdrawn, judge_task_id.clone(), 1, "", true),
-        )
-        .await,
-        Err(djinn_db::Error::InvalidData(message)) if message == "typed evidence identity fields must be non-empty"
-    ));
-    assert!(matches!(
-        TypedEvidenceRepository::dispose_in_transaction(
-            &mut tx,
-            dispose(TribunalEvidenceLifecycle::Withdrawn, judge_task_id.clone(), 1, "not load-bearing", false),
-        )
-        .await,
-        Err(djinn_db::Error::InvalidData(message)) if message == "withdrawal requires non-load-bearing assertion"
-    ));
+    // `terminal_controls.{resolved,withdrawn}_requires` is the whole refusal
+    // set for its disposition, in both directions: a token the fixture lists
+    // must yield exactly its refusal, and a token it omits must not.
+    for (disposition, key) in [
+        (TribunalEvidenceLifecycle::Resolved, "resolved_requires"),
+        (TribunalEvidenceLifecycle::Withdrawn, "withdrawn_requires"),
+    ] {
+        let required: Vec<String> = fixture["terminal_controls"][key]
+            .as_array()
+            .unwrap_or_else(|| panic!("fixture key `terminal_controls.{key}` must be an array"))
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .unwrap_or_else(|| panic!("`terminal_controls.{key}` holds only strings"))
+                    .to_owned()
+            })
+            .collect();
+        for token in &required {
+            assert!(
+                TERMINAL_REQUIREMENTS.contains(&token.as_str()),
+                "`terminal_controls.{key}` names `{token}`, which no probe in this test enforces",
+            );
+        }
+        for token in TERMINAL_REQUIREMENTS {
+            let (input, refusal) = match token {
+                "nonempty_rationale" => (
+                    dispose(disposition, judge_task_id.clone(), 1, "", true),
+                    "typed evidence identity fields must be non-empty",
+                ),
+                "judge_attribution" => (
+                    dispose(disposition, "not-the-judge".into(), 1, "folded", true),
+                    "active Judge attribution required",
+                ),
+                "committed_folding_revision" => (
+                    dispose(disposition, judge_task_id.clone(), 99, "folded", true),
+                    "existing committed folding revision required",
+                ),
+                "non_load_bearing_assertion" => (
+                    dispose(disposition, judge_task_id.clone(), 1, "folded", false),
+                    "withdrawal requires non-load-bearing assertion",
+                ),
+                other => panic!("unknown terminal requirement probe `{other}`"),
+            };
+            let error = TypedEvidenceRepository::dispose_in_transaction(&mut tx, input)
+                .await
+                .expect_err("an invalid terminal disposition never persists");
+            let refused = matches!(
+                &error,
+                djinn_db::Error::InvalidData(message) if message == refusal
+            );
+            assert_eq!(
+                refused,
+                required.contains(&token.to_owned()),
+                "`terminal_controls.{key}` must list `{token}` exactly when {disposition:?} is refused for it; got {error:?}",
+            );
+        }
+    }
+    proven_scenarios.push("resolved_requires_judge_and_committed_folding_revision");
+    proven_scenarios.push("withdrawn_requires_rationale_and_non_load_bearing_assertion");
     tx.commit().await.unwrap();
 
     insert_committed_revision(&db, &proposal_id, 1).await;
@@ -507,6 +566,7 @@ async fn typed_evidence_lifecycle_v1() {
             .unwrap()
     );
     tx.commit().await.unwrap();
+    proven_scenarios.push("resolved_and_withdrawn_clear_unresolved_projection");
 
     // Database append-only triggers protect lifecycle transition history.
     for statement in [
@@ -525,4 +585,25 @@ async fn typed_evidence_lifecycle_v1() {
             "transition history rejects mutation: {statement}",
         );
     }
+    proven_scenarios.push("append_only_history");
+
+    let mut proven: Vec<String> = proven_scenarios
+        .iter()
+        .map(|scenario| (*scenario).to_owned())
+        .collect();
+    proven.sort();
+    proven.dedup();
+    let mut declared = declared_scenarios.clone();
+    declared.sort();
+    declared.dedup();
+    assert_eq!(
+        declared.len(),
+        declared_scenarios.len(),
+        "the fixture must not declare a scenario twice",
+    );
+    assert_eq!(
+        proven, declared,
+        "every scenario the fixture declares must be proven by this body, and every scenario \
+         proven here must be declared by the fixture",
+    );
 }

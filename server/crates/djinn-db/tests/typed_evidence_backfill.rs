@@ -8,6 +8,48 @@ use djinn_db::{
 };
 use serde_json::{Value, json};
 
+/// `fixtures/typed_evidence_backfill.json` is the single declaration of the
+/// legacy claim shape, the two backfill projections, and the rollback
+/// expectation. Every key in it is read below, so corrupting any one of them
+/// reddens `cargo test -p djinn-db typed_evidence_backfill`.
+fn fixture() -> Value {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/typed_evidence_backfill.json"))
+            .expect("backfill fixture is valid JSON");
+    assert_eq!(fixture["version"], "typed_evidence_backfill_v1");
+    fixture
+}
+
+/// A backfill projection: the lifecycle the finding lands in, how many attempts
+/// it allocates, and the exact ordered transition history it writes.
+fn projection(key: &str) -> (String, usize, Vec<String>) {
+    let fixture = fixture();
+    let node = &fixture[key];
+    (
+        node["finding_lifecycle"]
+            .as_str()
+            .unwrap_or_else(|| panic!("`{key}.finding_lifecycle` is a string"))
+            .to_owned(),
+        usize::try_from(
+            node["attempts"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("`{key}.attempts` is a count")),
+        )
+        .expect("attempt count fits in usize"),
+        node["transitions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("`{key}.transitions` is an array"))
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .unwrap_or_else(|| panic!("`{key}.transitions` holds only strings"))
+                    .to_owned()
+            })
+            .collect(),
+    )
+}
+
 struct Seed {
     proposal: String,
     creator: String,
@@ -120,16 +162,26 @@ async fn typed_evidence_backfill_postgres_parity_matrix() {
             .created_findings,
         1
     );
+    let (claim_only_lifecycle, claim_only_attempts, claim_only_transitions) =
+        projection("expected_claim_only");
     let (f, a, t) = typed_rows(&db, &claim_only.proposal).await;
     assert_eq!(f.len(), 1);
-    assert!(a.is_empty());
-    assert_eq!(t.len(), 1);
+    assert_eq!(
+        a.len(),
+        claim_only_attempts,
+        "claim-only attempt allocation"
+    );
+    assert_eq!(
+        t.iter().map(|row| row.3.clone()).collect::<Vec<_>>(),
+        claim_only_transitions,
+        "claim-only transition history",
+    );
     assert_eq!(
         (&f[0].1, &f[0].2, &f[0].3, &f[0].4, f[0].5, &f[0].6),
         (
             &claim_only.proposal,
             &legacy_demand_hash(&c, None),
-            &"demanded".to_owned(),
+            &claim_only_lifecycle,
             &c,
             7,
             &claim_only.creator
@@ -198,17 +250,28 @@ async fn typed_evidence_backfill_postgres_parity_matrix() {
     let authority = legacy(&db, &both.proposal).await;
     typed.backfill_active_legacy_evidence().await.unwrap();
     let before = snapshot(&db, &both.proposal).await;
+    let (active_lifecycle, active_attempts, active_transitions) = projection("expected_active");
     let (f, a, t) = typed_rows(&db, &both.proposal).await;
     assert_eq!(
         (&f[0].1, &f[0].2, &f[0].3, &f[0].4, f[0].5, &f[0].6),
         (
             &both.proposal,
             &legacy_demand_hash(&c, Some(&both.spike)),
-            &"spike_active".to_owned(),
+            &active_lifecycle,
             &c,
             7,
             &both.creator
         )
+    );
+    assert_eq!(
+        a.len(),
+        active_attempts,
+        "active backfill attempt allocation"
+    );
+    assert_eq!(
+        t.iter().map(|row| row.3.clone()).collect::<Vec<_>>(),
+        active_transitions,
+        "active backfill transition history",
     );
     assert_eq!((&a[0].1, a[0].2, &a[0].3), (&f[0].0, 1, &both.spike));
     assert_eq!(
@@ -449,7 +512,17 @@ async fn typed_evidence_backfill_dual_write_clear_rollback_and_reverse_rollback(
         &set_failure.spike,
     )
     .await;
-    assert!(result.is_err());
+    let rollback = fixture()["rollback"].clone();
+    match rollback["after_write_before_commit"]
+        .as_str()
+        .expect("`rollback.after_write_before_commit` names the outcome")
+    {
+        "abort" => assert!(
+            result.is_err(),
+            "the production set API aborts when the attempt insert is rejected"
+        ),
+        other => panic!("unknown rollback outcome `{other}`"),
+    }
     drop(tx);
     sqlx::query("DROP TRIGGER typed_evidence_test_reject_attempt ON typed_evidence_attempts")
         .execute(db.pool())
@@ -464,6 +537,33 @@ async fn typed_evidence_backfill_dual_write_clear_rollback_and_reverse_rollback(
     assert_eq!(after.1, before.1, "finding set was not rolled back");
     assert_eq!(after.2, before.2, "attempt set was not rolled back");
     assert_eq!(after.3, before.3, "transition set was not rolled back");
+    // The rolled-back proposal keeps exactly the row counts the fixture pins:
+    // an aborted dual write leaves no typed authority behind at all.
+    for (label, observed, expected) in [
+        (
+            "expected_findings",
+            after.1.len(),
+            &rollback["expected_findings"],
+        ),
+        (
+            "expected_attempts",
+            after.2.len(),
+            &rollback["expected_attempts"],
+        ),
+        (
+            "expected_transitions",
+            after.3.len(),
+            &rollback["expected_transitions"],
+        ),
+    ] {
+        assert_eq!(
+            u64::try_from(observed).unwrap(),
+            expected
+                .as_u64()
+                .unwrap_or_else(|| panic!("`rollback.{label}` is a count")),
+            "`rollback.{label}` must match the persisted row count",
+        );
+    }
 
     // Begin populated, append the typed clear transition, then reject only the
     // legacy UPDATE which clears non-null compatibility authority.

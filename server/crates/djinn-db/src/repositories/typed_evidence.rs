@@ -2896,47 +2896,105 @@ fn limit_typed_issue(
 mod tests {
     use super::*;
 
+    /// The edge set and the unresolved projection are read out of
+    /// `tests/fixtures/typed_evidence_lifecycle_v1.json` rather than restated
+    /// here, so the fixture is the single declaration of the lifecycle
+    /// vocabulary. Corrupting any key in that file reddens this test.
     #[test]
     fn typed_evidence_lifecycle_v1() {
         use TribunalEvidenceLifecycle::*;
-        let allowed_edges = [
-            (Demanded, SpikeActive),
-            (Demanded, Withdrawn),
-            (SpikeActive, EvidenceReceived),
-            (SpikeActive, Failed),
-            (SpikeActive, Withdrawn),
-            (EvidenceReceived, Resolved),
-            (EvidenceReceived, Withdrawn),
-            (Failed, Demanded),
-            (Failed, SpikeActive),
-            (Failed, Withdrawn),
-        ];
-        for from in [
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/typed_evidence_lifecycle_v1.json"
+        ))
+        .expect("lifecycle fixture is valid JSON");
+        assert_eq!(fixture["version"], "typed_evidence_lifecycle_v1");
+
+        let strings = |key: &str| -> Vec<String> {
+            fixture[key]
+                .as_array()
+                .unwrap_or_else(|| panic!("fixture key `{key}` must be an array"))
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .unwrap_or_else(|| panic!("fixture key `{key}` holds only strings"))
+                        .to_owned()
+                })
+                .collect()
+        };
+
+        // The enum vocabulary and the fixture vocabulary are the same list, in
+        // the same order. A lifecycle added to one and not the other is red.
+        let enumerated = [
             Demanded,
             SpikeActive,
             EvidenceReceived,
             Failed,
             Resolved,
             Withdrawn,
-        ] {
-            for to in [
-                Demanded,
-                SpikeActive,
-                EvidenceReceived,
-                Failed,
-                Resolved,
-                Withdrawn,
-            ] {
+        ];
+        assert_eq!(
+            strings("lifecycles"),
+            enumerated
+                .iter()
+                .map(|lifecycle| lifecycle.as_str().to_owned())
+                .collect::<Vec<_>>(),
+            "fixture `lifecycles` must enumerate the lifecycle vocabulary in order",
+        );
+
+        // `allowed_transitions` is the whole edge set in both directions: every
+        // listed pair is admitted, every unlisted pair of the full 6x6 product
+        // is refused.
+        let edges: Vec<(String, String)> = fixture["allowed_transitions"]
+            .as_array()
+            .expect("fixture key `allowed_transitions` must be an array")
+            .iter()
+            .map(|edge| {
+                let edge = edge
+                    .as_array()
+                    .expect("each allowed transition is a [from, to] pair");
+                assert_eq!(
+                    edge.len(),
+                    2,
+                    "each allowed transition is a [from, to] pair"
+                );
+                let from = edge[0].as_str().expect("edge source is a string");
+                let to = edge[1].as_str().expect("edge target is a string");
+                parse(from).expect("edge source is a known lifecycle");
+                parse(to).expect("edge target is a known lifecycle");
+                (from.to_owned(), to.to_owned())
+            })
+            .collect();
+        let mut deduplicated = edges.clone();
+        deduplicated.sort();
+        deduplicated.dedup();
+        assert_eq!(
+            deduplicated.len(),
+            edges.len(),
+            "`allowed_transitions` must not repeat an edge",
+        );
+        for from in enumerated {
+            for to in enumerated {
                 assert_eq!(
                     allowed(from, to),
-                    allowed_edges.contains(&(from, to)),
-                    "{from:?} -> {to:?}"
+                    edges.contains(&(from.as_str().to_owned(), to.as_str().to_owned())),
+                    "{from:?} -> {to:?} must match the fixture edge set",
                 );
             }
         }
-        assert!(!Demanded.is_terminal());
-        assert!(Resolved.is_terminal());
-        assert!(Withdrawn.is_terminal());
+
+        // `unresolved` is exactly the complement of terminality.
+        let unresolved = strings("unresolved");
+        for name in &unresolved {
+            parse(name).expect("every `unresolved` entry is a known lifecycle");
+        }
+        for lifecycle in enumerated {
+            assert_eq!(
+                !lifecycle.is_terminal(),
+                unresolved.contains(&lifecycle.as_str().to_owned()),
+                "{lifecycle:?} terminality must match the fixture `unresolved` projection",
+            );
+        }
     }
 
     #[test]
